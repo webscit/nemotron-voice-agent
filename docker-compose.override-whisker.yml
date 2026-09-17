@@ -1,0 +1,31 @@
+# Local-only override: enables the Pipecat Whisker debugger on the
+# multilingual-assistant recipes and publishes its WebSocket port so the
+# Whisker UI (run separately, see https://github.com/pipecat-ai/whisker)
+# can connect from the host. Also bind-mounts ./whisker_traces so the
+# .whisk trace file (see src/whisker_setup.py) survives container
+# recreation. Not tracked as project config — delete or rename this file
+# to go back to the stock recipes.
+services:
+  multilingual-assistant:
+    ports:
+      - "9090:9090"
+    environment:
+      PIPECAT_SETUP_FILES: /app/src/whisker_setup.py
+    volumes:
+      - ./whisker_traces:/app/whisker_traces
+
+  multilingual-assistant-server:
+    ports:
+      - "9090:9090"
+    environment:
+      PIPECAT_SETUP_FILES: /app/src/whisker_setup.py
+    volumes:
+      - ./whisker_traces:/app/whisker_traces
+
+  multilingual-assistant-single-gpu:
+    ports:
+      - "9090:9090"
+    environment:
+      PIPECAT_SETUP_FILES: /app/src/whisker_setup.py
+    volumes:
+      - ./whisker_traces:/app/whisker_traces

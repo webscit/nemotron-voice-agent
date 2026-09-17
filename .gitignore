@@ -42,6 +42,7 @@ asr_cache/
 tts_cache/
 llm_cache/
 audio_dumps/
+whisker_traces/
 
 # Benchmarking results
 benchmarking_tools/scaling-perf/results_*/

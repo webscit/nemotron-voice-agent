@@ -34,6 +34,7 @@ dev = [
     "ruff>=0.15.6",
     "pre-commit>=4.0.0",
     "pytest>=9.1.1",
+    "pipecat-ai-whisker>=2.0.1",
 ]
 eval = [
     "pipecat-ai[evals]==1.7.0",
