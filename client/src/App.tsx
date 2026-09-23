@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useCallback, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useState, type ComponentProps } from "react";
 import { PipecatClient } from "@pipecat-ai/client-js";
 import { PipecatClientProvider, PipecatClientAudio } from "@pipecat-ai/client-react";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
@@ -14,6 +14,7 @@ import { Header } from "./components/Header";
 import { StatusPanel } from "./components/status-panel";
 import { Sidebar } from "./components/Sidebar";
 import { CenterPanel } from "./components/content";
+import { evaluateMathExpression, resolveExpressionArgument } from "./lib/mathWorkerClient";
 
 const EMPTY_ICE_SERVERS: RTCIceServer[] = [];
 const DEFAULT_AUDIO_INPUT_SAMPLE_RATE = 16000;
@@ -54,6 +55,44 @@ function ClientSession({
       enableMic: true,
     });
   });
+
+  // Client-executed tool: the bot forwards this function call over RTVI
+  // because only the browser knows the user's own wall-clock time and
+  // timezone. See src/examples/multilingual/tool_handlers.py for the
+  // server-side half of this exchange.
+  useEffect(() => {
+    client.registerFunctionCallHandler("get_client_local_time", async () => {
+      console.log("Client function call");
+      const now = new Date();
+      return {
+        iso8601: now.toISOString(),
+        local_date: now.toLocaleDateString(),
+        local_time: now.toLocaleTimeString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      };
+    });
+    return () => {
+      client.unregisterFunctionCallHandler("get_client_local_time");
+    };
+  }, [client]);
+
+  // Client-executed tool: arithmetic runs in a sandboxed Web Worker with no
+  // network access (see src/lib/mathWorkerClient.ts) so the server never has
+  // to run arbitrary LLM-authored code itself.
+  useEffect(() => {
+    client.registerFunctionCallHandler("evaluate_math_expression", async (fn) => {
+      const expression = resolveExpressionArgument(fn.arguments);
+      try {
+        const result = await evaluateMathExpression(expression);
+        return { expression, result };
+      } catch (err) {
+        return { expression, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+    return () => {
+      client.unregisterFunctionCallHandler("evaluate_math_expression");
+    };
+  }, [client]);
 
   return (
     <PipecatClientProvider client={client as unknown as ProviderClient}>

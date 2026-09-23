@@ -25,6 +25,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frameworks.rtvi import RTVIFunctionCallReportLevel, RTVIObserverParams
 from pipecat.processors.frameworks.rtvi.frames import RTVIServerMessageFrame
 from pipecat.runner.types import EvalRunnerArguments, RunnerArguments
 from pipecat.services.nvidia.llm import NvidiaLLMService, NvidiaLLMSettings
@@ -45,6 +46,8 @@ from examples.multilingual.multilingual_processor import (
     get_lang_codes,
     with_reasoning,
 )
+from examples.multilingual.tool_handlers import ClientToolResultBridge, build_client_tool_handler
+from examples.multilingual.tools import CLIENT_TOOL_NAMES, CLIENT_TOOLS_SCHEMA
 from examples.shared.audio_recorder import create_audio_recorder
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
 from examples.shared.pipeline_utils import (
@@ -83,6 +86,7 @@ from utils import (
 load_dotenv(override=True)
 CHAT_HISTORY_RECENT_TURNS = parse_env_int("CHAT_HISTORY_RECENT_TURNS", 10)
 DEFAULT_SESSION_LANGUAGE = "de-DE"
+CLIENT_FUNCTION_TIMEOUT_SECS = parse_env_float("CLIENT_FUNCTION_TIMEOUT_SECS", 5.0, min_value=1.0)
 
 
 def _is_eval_transport(runner_args: RunnerArguments) -> bool:
@@ -333,8 +337,17 @@ async def bot(runner_args: RunnerArguments) -> None:
     )
 
     messages = build_context_messages(base_system_content, system_prompt)
-    context = LLMContext(messages)
+    context = LLMContext(messages, tools=CLIENT_TOOLS_SCHEMA, tool_choice="auto")
     preserve_prompt_messages = len(messages)
+
+    client_tool_bridge = ClientToolResultBridge()
+    client_tool_handler = build_client_tool_handler(CLIENT_FUNCTION_TIMEOUT_SECS, client_tool_bridge)
+    for client_tool_name in CLIENT_TOOL_NAMES:
+        llm.register_function(client_tool_name, client_tool_handler, cancel_on_interruption=True)
+    logger.info(
+        f"Registered client-executed tools: {', '.join(CLIENT_TOOL_NAMES)} "
+        f"(timeout={CLIENT_FUNCTION_TIMEOUT_SECS:.1f}s)"
+    )
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
@@ -359,6 +372,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             tts,
             transport.output(),
             *([audio_recorder] if audio_recorder else []),
+            client_tool_bridge,
             assistant_aggregator,
         ]
     )
@@ -429,6 +443,9 @@ async def bot(runner_args: RunnerArguments) -> None:
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
         observers=with_realtime_observers(latency_observer, transport=transport),
         enable_tracing=IS_TRACING_ENABLED,
+        rtvi_observer_params=RTVIObserverParams(
+            function_call_report_level={name: RTVIFunctionCallReportLevel.FULL for name in CLIENT_TOOL_NAMES}
+        ),
     )
 
     @user_aggregator.event_handler("on_user_turn_stopped")

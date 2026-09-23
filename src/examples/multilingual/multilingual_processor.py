@@ -107,8 +107,10 @@ def describe_language(code: str) -> str:
 
 
 _ONE_LANGUAGE_RULE = (
-    "Your ENTIRE response must be in ONE single language only. Never mix two languages "
-    "and never switch language mid-sentence."
+    "Your ENTIRE spoken response must be in ONE single language only. Never mix two languages "
+    "and never switch language mid-sentence. This rule is about the language you speak in — it "
+    "does not stop you from calling a tool first when one applies; call it, then speak the "
+    "result in that language."
 )
 
 

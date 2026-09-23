@@ -78,6 +78,28 @@ TTS voices and supported language codes are discovered at runtime by prewarming 
 | `prompts.yaml` | multilingual prompt catalog (`multilingual_voice_assistant`) |
 | `services.cloud.yaml` | cloud service endpoints and defaults |
 | `services.local.yaml` | on-prem service endpoints (server / single GPU), registry default `nemotron-asr-streaming-multilingual` |
+| `tools.py` | tool schema for functions the client executes (currently `get_client_local_time`) |
+| `tool_handlers.py` | server-side RTVI forwarding handler for those client-executed tools |
+
+### Client-executed tools
+
+Two tools demonstrate Pipecat's RTVI client-side function calling: the LLM calls each tool as normal, but the *browser* executes it and returns the result.
+
+| Tool | Why it runs on the client |
+| --- | --- |
+| `get_client_local_time` | Only the browser knows the user's own wall-clock time and IANA timezone. |
+| `evaluate_math_expression` | Arithmetic runs inside a sandboxed Web Worker (`client/src/lib/mathWorkerClient.ts`) instead of as arbitrary code on the server. The worker disables every network-capable API (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `importScripts`, `RTCPeerConnection`, `navigator.sendBeacon`) and only accepts a whitelisted character set plus a whitelisted set of `Math` member names, so it can only ever evaluate plain arithmetic. |
+
+The flow is the same for both:
+
+1. The LLM decides to call the tool. `NvidiaLLMService` broadcasts a function-call-in-progress frame before invoking the registered server handler.
+2. `RTVIObserverParams.function_call_report_level` is set to `FULL` for each tool name in `CLIENT_TOOL_NAMES`, so the RTVI observer turns that frame into an `llm-function-call-in-progress` message carrying the function name and arguments.
+3. The client SDK's `registerFunctionCallHandler(...)` (wired up in `client/src/App.tsx`) reacts to that event, runs the tool locally, and replies with an `llm-function-call-result` message on its own — no custom protocol needed.
+4. `RTVIProcessor` turns that reply directly into a result frame that the assistant context aggregator matches by `tool_call_id` and folds into the conversation.
+
+The server-side handler in `tool_handlers.py` never computes a result itself — it only keeps the call open (`cancel_on_interruption=False`, the same async-tool pattern used for deferred backend work in the Frontend/Backend Agent example) and applies its own `CLIENT_FUNCTION_TIMEOUT_SECS` (default 5s) timeout so a client that never answers can't stall the conversation. Add another client-executed tool by extending `tools.py`'s schema and `CLIENT_TOOL_NAMES`; the same handler and report-level wiring cover any tool name added there.
+
+If a client-executed tool "does nothing," check the prompt catalog first: the LLM only calls a tool it's told about, and the tool result must be summarized in natural spoken text, not read back verbatim (raw JSON read aloud by TTS sounds like a broken response).
 
 ### How it works
 
