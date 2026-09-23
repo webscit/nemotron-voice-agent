@@ -14,9 +14,13 @@ import {
   type SimpleService,
 } from "../api";
 import { DevicesSection } from "./status-panel/DevicesSection";
+import { clientToolDeclarations } from "../lib/clientTools";
 
 type StartBotClient = {
-  connect: (args: { wsUrl?: string; webrtcUrl?: string }) => Promise<void>;
+  connect: (args: {
+    wsUrl?: string;
+    webrtcRequestParams?: { endpoint: string; requestData?: unknown };
+  }) => Promise<void>;
   disconnect: () => Promise<void>;
   initDevices: () => Promise<void>;
 };
@@ -215,10 +219,12 @@ export function Header({ onClientReset }: Readonly<HeaderProps>) {
           selectedSessionLanguage,
         });
 
+        const clientTools = JSON.stringify(clientToolDeclarations());
+
         if (selectedTransport === "websocket") {
           const sessionId = await createSessionConfig(config);
           if (!mountedRef.current) return;
-          const qs = `session_id=${sessionId}`;
+          const qs = `session_id=${sessionId}&client_tools=${encodeURIComponent(clientTools)}`;
           const wsProto = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
           setCurrentSessionId(sessionId);
           await client.connect({ wsUrl: `${wsProto}//${globalThis.location.host}/api/ws?${qs}` });
@@ -232,7 +238,14 @@ export function Header({ onClientReset }: Readonly<HeaderProps>) {
             throw new Error("WebRTC session URL did not include session_id.");
           }
           setCurrentSessionId(sessionId);
-          await withWebRTCConnectTimeout(client.connect({ webrtcUrl }));
+          await withWebRTCConnectTimeout(
+            client.connect({
+              webrtcRequestParams: {
+                endpoint: webrtcUrl,
+                requestData: { tools: clientToolDeclarations() },
+              },
+            })
+          );
         }
       }
     } catch (err) {

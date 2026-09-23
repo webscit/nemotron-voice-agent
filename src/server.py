@@ -849,6 +849,7 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
         websocket: WebSocket,
         session_id: str = Query(default=""),
         pipeline_mode: str = Query(default=""),
+        client_tools: str = Query(default=""),
     ):
         if session_id and _multi_worker_mode_enabled():
             await websocket.close(code=1013, reason=_MULTI_WORKER_SESSION_CONFIG_MESSAGE)
@@ -872,9 +873,16 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
             if session_id:
                 _active_session_configs[session_id] = dict(config)
 
+            body = {**config, "session_id": session_id}
+            if client_tools:
+                try:
+                    body["tools"] = json.loads(client_tools)
+                except ValueError:
+                    logger.warning("Ignoring malformed client_tools query parameter (not valid JSON)")
+
             runner_args = SimpleNamespace(
                 websocket=websocket,
-                body={**config, "session_id": session_id},
+                body=body,
                 handle_sigint=False,
                 pipeline_idle_timeout_secs=parse_env_int("PIPELINE_IDLE_TIMEOUT_SECS", 600, min_value=300),
             )

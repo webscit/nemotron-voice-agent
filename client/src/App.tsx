@@ -14,7 +14,7 @@ import { Header } from "./components/Header";
 import { StatusPanel } from "./components/status-panel";
 import { Sidebar } from "./components/Sidebar";
 import { CenterPanel } from "./components/content";
-import { evaluateMathExpression, resolveExpressionArgument } from "./lib/mathWorkerClient";
+import { CLIENT_TOOLS } from "./lib/clientTools";
 
 const EMPTY_ICE_SERVERS: RTCIceServer[] = [];
 const DEFAULT_AUDIO_INPUT_SAMPLE_RATE = 16000;
@@ -56,41 +56,19 @@ function ClientSession({
     });
   });
 
-  // Client-executed tool: the bot forwards this function call over RTVI
-  // because only the browser knows the user's own wall-clock time and
-  // timezone. See src/examples/multilingual/tool_handlers.py for the
-  // server-side half of this exchange.
+  // The bot forwards a call to any of these names over RTVI because they
+  // run on the client (see src/examples/multilingual/tool_handlers.py for
+  // the server-side half of this exchange). CLIENT_TOOLS is also what gets
+  // declared to the bot at connect time (see Header.tsx), so registration
+  // here and declaration there always agree on names and behavior.
   useEffect(() => {
-    client.registerFunctionCallHandler("get_client_local_time", async () => {
-      console.log("Client function call");
-      const now = new Date();
-      return {
-        iso8601: now.toISOString(),
-        local_date: now.toLocaleDateString(),
-        local_time: now.toLocaleTimeString(),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      };
-    });
+    for (const tool of CLIENT_TOOLS) {
+      client.registerFunctionCallHandler(tool.name, tool.handler);
+    }
     return () => {
-      client.unregisterFunctionCallHandler("get_client_local_time");
-    };
-  }, [client]);
-
-  // Client-executed tool: arithmetic runs in a sandboxed Web Worker with no
-  // network access (see src/lib/mathWorkerClient.ts) so the server never has
-  // to run arbitrary LLM-authored code itself.
-  useEffect(() => {
-    client.registerFunctionCallHandler("evaluate_math_expression", async (fn) => {
-      const expression = resolveExpressionArgument(fn.arguments);
-      try {
-        const result = await evaluateMathExpression(expression);
-        return { expression, result };
-      } catch (err) {
-        return { expression, error: err instanceof Error ? err.message : String(err) };
+      for (const tool of CLIENT_TOOLS) {
+        client.unregisterFunctionCallHandler(tool.name);
       }
-    });
-    return () => {
-      client.unregisterFunctionCallHandler("evaluate_math_expression");
     };
   }, [client]);
 

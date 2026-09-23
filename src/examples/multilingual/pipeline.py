@@ -47,7 +47,7 @@ from examples.multilingual.multilingual_processor import (
     with_reasoning,
 )
 from examples.multilingual.tool_handlers import ClientToolResultBridge, build_client_tool_handler
-from examples.multilingual.tools import CLIENT_TOOL_NAMES, CLIENT_TOOLS_SCHEMA
+from examples.multilingual.tools import build_client_tools
 from examples.shared.audio_recorder import create_audio_recorder
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
 from examples.shared.pipeline_utils import (
@@ -336,18 +336,26 @@ async def bot(runner_args: RunnerArguments) -> None:
         {"fixed_language_name": describe_language(fixed_session_language)},
     )
 
+    client_tools_schema, client_tool_names = build_client_tools(body.get("tools"))
+
     messages = build_context_messages(base_system_content, system_prompt)
-    context = LLMContext(messages, tools=CLIENT_TOOLS_SCHEMA, tool_choice="auto")
+    if client_tools_schema is not None:
+        context = LLMContext(messages, tools=client_tools_schema, tool_choice="auto")
+    else:
+        context = LLMContext(messages)
     preserve_prompt_messages = len(messages)
 
     client_tool_bridge = ClientToolResultBridge()
-    client_tool_handler = build_client_tool_handler(CLIENT_FUNCTION_TIMEOUT_SECS, client_tool_bridge)
-    for client_tool_name in CLIENT_TOOL_NAMES:
-        llm.register_function(client_tool_name, client_tool_handler, cancel_on_interruption=True)
-    logger.info(
-        f"Registered client-executed tools: {', '.join(CLIENT_TOOL_NAMES)} "
-        f"(timeout={CLIENT_FUNCTION_TIMEOUT_SECS:.1f}s)"
-    )
+    if client_tool_names:
+        client_tool_handler = build_client_tool_handler(CLIENT_FUNCTION_TIMEOUT_SECS, client_tool_bridge)
+        for client_tool_name in client_tool_names:
+            llm.register_function(client_tool_name, client_tool_handler, cancel_on_interruption=True)
+        logger.info(
+            f"Registered client-declared tools: {', '.join(client_tool_names)} "
+            f"(timeout={CLIENT_FUNCTION_TIMEOUT_SECS:.1f}s)"
+        )
+    else:
+        logger.info("No client tool declarations received; running without tools")
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
@@ -444,7 +452,7 @@ async def bot(runner_args: RunnerArguments) -> None:
         observers=with_realtime_observers(latency_observer, transport=transport),
         enable_tracing=IS_TRACING_ENABLED,
         rtvi_observer_params=RTVIObserverParams(
-            function_call_report_level={name: RTVIFunctionCallReportLevel.FULL for name in CLIENT_TOOL_NAMES}
+            function_call_report_level={name: RTVIFunctionCallReportLevel.FULL for name in client_tool_names}
         ),
     )
 
