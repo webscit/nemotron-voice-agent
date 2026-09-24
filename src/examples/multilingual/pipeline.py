@@ -63,6 +63,7 @@ from examples.shared.pipeline_utils import (
 from examples.shared.prewarm import (
     prewarm_asr,
     prewarm_tts,
+    resolve_locale_for_language,
     resolve_voice_for_language,
     validate_llm_session_language,
 )
@@ -289,7 +290,16 @@ async def bot(runner_args: RunnerArguments) -> None:
     if tts_synthesis_mode:
         tts_settings_kwargs["synthesis_mode"] = tts_synthesis_mode
     if fixed_session_language:
-        tts_settings_kwargs["language"] = fixed_session_language
+        # A caller (e.g. an external client passing request_data.asr_language_code) may
+        # only know the bare base language ("fr"), not the full locale the TTS voice
+        # catalog is keyed by ("fr-FR"); expand it here so synthesis gets the locale the
+        # engine actually expects rather than silently keeping the previous voice/language.
+        tts_settings_kwargs["language"] = resolve_locale_for_language(
+            fixed_session_language,
+            server=tts_server,
+            function_id=tts_function_id,
+            model=tts_model,
+        )
         resolved_voice = resolve_voice_for_language(
             fixed_session_language,
             tts_voice,

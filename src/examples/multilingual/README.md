@@ -105,10 +105,12 @@ If a client-executed tool "does nothing," check two things: that the client actu
 
 ### How it works
 
-1. The user selects a locale compatible with the active ASR, TTS, and LLM in the UI (default `de-DE`) before connecting.
+1. The user selects a locale compatible with the active ASR, TTS, and LLM in the UI (default `de-DE`) before connecting. A non-UI client can set the same thing directly by sending `asr_language_code` in the WebRTC offer's `request_data` (e.g. `{"asr_language_code": "fr"}`) — the [Reachy Mini conversation app](https://codefloe.com/fcollonval/reachy_mini_pipecat_app) integration does this since it has no UI of its own. A bare base code like `fr` is expanded against the prewarmed TTS voice catalog to the full locale (`fr-FR`) the TTS engine expects — critical for TTS voice/language selection, which otherwise silently keeps whatever voice was already selected.
 2. The ASR and the TTS voice are pinned to that language when the connection starts. They do not change mid-session.
 3. The fixed-session prompt addon instructs the LLM to reply only in that language, and the LLM returns plain spoken text (no JSON, labels, or metadata) that flows straight to TTS, the client transcript, and chat history.
 4. `PerTurnReminderProcessor` re-states the "reply only in <language>" reminder on each user turn at request time only, so the reminder never pollutes stored history.
+
+A non-UI client can likewise set the system prompt directly by sending `prompt_content` in `request_data` (the same field the UI uses for a custom, non-catalog prompt; e.g. `{"prompt_content": "You are a pirate. Always say Arr."}`). Omit it to keep the catalog default (`multilingual_voice_assistant`), or send `prompt_key` to select a different catalog entry by name instead.
 
 ### Switching the multilingual ASR model
 
