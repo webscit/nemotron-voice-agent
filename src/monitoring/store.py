@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Session store (relational rows) and artifact store (binary blobs).
+
+Both are synchronous and meant to be called from worker threads
+(``asyncio.to_thread``), never directly from the pipeline event loop.
+
+- ``SessionStore`` uses SQLAlchemy Core, so moving from SQLite to Postgres is a
+  ``MONITORING_DB_URL`` change.
+- ``ArtifactStore`` is a small protocol; ``LocalArtifactStore`` is the only
+  implementation for now. An object-storage implementation only needs the same
+  four methods (``local_path`` may stage to a temp dir and upload on ``commit``).
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any, Protocol
+
+from sqlalchemy import Engine, create_engine, event, func, select, update
+from sqlalchemy.dialects import postgresql, sqlite
+
+from monitoring import schema
+from monitoring.config import MonitoringConfig
+
+# Tables written through ``write_batch`` and how conflicts are resolved.
+_UPSERT_TABLES = {"turns": ("session_id", "idx")}
+_IGNORE_CONFLICT_TABLES = {"media"}
+
+
+class ArtifactStore(Protocol):
+    """Blob storage addressed by slash-separated keys."""
+
+    def put(self, key: str, data: bytes) -> None:
+        """Store ``data`` under ``key`` (overwrite)."""
+
+    def get(self, key: str) -> bytes:
+        """Return the bytes stored under ``key``."""
+
+    def exists(self, key: str) -> bool:
+        """Return whether ``key`` exists."""
+
+    def local_path(self, key: str) -> Path:
+        """Return a local path to stream-write ``key``; call ``commit`` when done."""
+
+    def commit(self, key: str) -> None:
+        """Publish a file written through ``local_path``."""
+
+
+class LocalArtifactStore:
+    """Artifact store backed by a local directory."""
+
+    def __init__(self, root: Path):
+        """Use ``root`` as the store directory."""
+        self.root = Path(root)
+
+    def _path(self, key: str) -> Path:
+        path = (self.root / key).resolve()
+        if not path.is_relative_to(self.root.resolve()):
+            raise ValueError(f"Artifact key escapes the store root: {key}")
+        return path
+
+    def put(self, key: str, data: bytes) -> None:
+        """Store ``data`` under ``key`` (overwrite)."""
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+
+    def get(self, key: str) -> bytes:
+        """Return the bytes stored under ``key``."""
+        return self._path(key).read_bytes()
+
+    def exists(self, key: str) -> bool:
+        """Return whether ``key`` exists."""
+        return self._path(key).exists()
+
+    def local_path(self, key: str) -> Path:
+        """Return a local path to stream-write ``key``; call ``commit`` when done."""
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def commit(self, key: str) -> None:
+        """Publish a file written through ``local_path`` (no-op locally)."""
+        return None
+
+
+def _configure_sqlite(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _on_connect(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
+
+
+class SessionStore:
+    """Relational store for sessions, turns, timelines, annotations and jobs."""
+
+    def __init__(self, db_url: str):
+        """Connect to ``db_url`` (tables are created by ``create_schema``)."""
+        if db_url.startswith("sqlite:///"):
+            Path(db_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
+        self.engine = create_engine(db_url, future=True)
+        if self.engine.dialect.name == "sqlite":
+            _configure_sqlite(self.engine)
+        self._insert = postgresql.insert if self.engine.dialect.name == "postgresql" else sqlite.insert
+
+    # ------------------------------------------------------------------ schema
+    def create_schema(self) -> None:
+        """Create missing tables and record the schema version."""
+        schema.metadata.create_all(self.engine)
+        with self.engine.begin() as conn:
+            current = conn.execute(select(func.max(schema.schema_version.c.version))).scalar()
+            if current is None:
+                conn.execute(schema.schema_version.insert().values(version=schema.SCHEMA_VERSION))
+
+    # ---------------------------------------------------------------- sessions
+    def create_session(self, row: dict[str, Any]) -> None:
+        """Insert or replace a session row."""
+        with self.engine.begin() as conn:
+            stmt = self._insert(schema.sessions).values(**row)
+            conn.execute(stmt.on_conflict_do_update(index_elements=["id"], set_=row))
+
+    def touch_session(self, session_id: str, ts: float) -> None:
+        """Update the session heartbeat."""
+        with self.engine.begin() as conn:
+            conn.execute(update(schema.sessions).where(schema.sessions.c.id == session_id).values(last_seen_at=ts))
+
+    def end_session(self, session_id: str, ts: float, reason: str) -> None:
+        """Mark a session ended (first call wins)."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(schema.sessions)
+                .where(schema.sessions.c.id == session_id, schema.sessions.c.ended_at.is_(None))
+                .values(ended_at=ts, last_seen_at=ts, end_reason=reason)
+            )
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """Return a session row, or None."""
+        with self.engine.connect() as conn:
+            row = conn.execute(select(schema.sessions).where(schema.sessions.c.id == session_id)).mappings().first()
+        return dict(row) if row else None
+
+    def open_session_count(self, *, now: float, stale_after_secs: float) -> int:
+        """Count sessions still live (not ended and seen recently)."""
+        with self.engine.connect() as conn:
+            return conn.execute(
+                select(func.count())
+                .select_from(schema.sessions)
+                .where(
+                    schema.sessions.c.ended_at.is_(None),
+                    schema.sessions.c.last_seen_at >= now - stale_after_secs,
+                )
+            ).scalar_one()
+
+    def last_session_activity(self) -> float | None:
+        """Return the most recent heartbeat/end timestamp across all sessions."""
+        with self.engine.connect() as conn:
+            return conn.execute(select(func.max(schema.sessions.c.last_seen_at))).scalar()
+
+    def close_orphaned_sessions(self, *, now: float, stale_after_secs: float) -> list[str]:
+        """End sessions whose recorder died without closing them (process crash)."""
+        with self.engine.begin() as conn:
+            stale = (
+                conn.execute(
+                    select(schema.sessions.c.id).where(
+                        schema.sessions.c.ended_at.is_(None),
+                        schema.sessions.c.last_seen_at < now - stale_after_secs,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if stale:
+                conn.execute(
+                    update(schema.sessions)
+                    .where(schema.sessions.c.id.in_(stale))
+                    .values(ended_at=schema.sessions.c.last_seen_at, end_reason="orphaned")
+                )
+        return list(stale)
+
+    # ------------------------------------------------------------ batch writes
+    def write_batch(self, rows: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Insert ``(table_name, row)`` pairs in one transaction."""
+        if not rows:
+            return
+        with self.engine.begin() as conn:
+            for table_name, row in rows:
+                table = schema.metadata.tables[table_name]
+                stmt = self._insert(table).values(**row)
+                if table_name in _UPSERT_TABLES:
+                    keys = _UPSERT_TABLES[table_name]
+                    changes = {k: v for k, v in row.items() if k not in keys}
+                    stmt = stmt.on_conflict_do_update(index_elements=list(keys), set_=changes)
+                elif table_name in _IGNORE_CONFLICT_TABLES:
+                    stmt = stmt.on_conflict_do_nothing()
+                conn.execute(stmt)
+
+    # ------------------------------------------------------------------ reads
+    def rows(self, table_name: str, session_id: str, **filters: Any) -> list[dict[str, Any]]:
+        """Return rows of ``table_name`` for a session, optionally filtered by equality."""
+        table = schema.metadata.tables[table_name]
+        stmt = select(table).where(table.c.session_id == session_id)
+        for column, value in filters.items():
+            stmt = stmt.where(table.c[column] == value)
+        order = [c for c in ("idx", "turn_idx", "ts", "started_at", "id") if c in table.c]
+        if order:
+            stmt = stmt.order_by(*(table.c[c] for c in order))
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
+    def ended_session_ids(self) -> list[str]:
+        """Return ids of ended sessions, oldest first."""
+        with self.engine.connect() as conn:
+            return list(
+                conn.execute(
+                    select(schema.sessions.c.id)
+                    .where(schema.sessions.c.ended_at.is_not(None))
+                    .order_by(schema.sessions.c.started_at)
+                ).scalars()
+            )
+
+    # ------------------------------------------------------------ annotations
+    def add_annotations(self, rows: Iterable[dict[str, Any]]) -> None:
+        """Insert annotation rows (``created_at`` is filled in)."""
+        now = time.time()
+        payload = [{"created_at": now, **row} for row in rows]
+        if not payload:
+            return
+        with self.engine.begin() as conn:
+            conn.execute(schema.annotations.insert(), payload)
+
+    def annotations_for(self, session_id: str, *, kind: str | None = None) -> list[dict[str, Any]]:
+        """Return a session's annotations, optionally of one ``kind``."""
+        stmt = select(schema.annotations).where(schema.annotations.c.session_id == session_id)
+        if kind:
+            stmt = stmt.where(schema.annotations.c.kind == kind)
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(stmt.order_by(schema.annotations.c.id)).mappings()]
+
+    # -------------------------------------------------------------------- jobs
+    def enqueue_job(self, kind: str, target: str, params: dict[str, Any] | None = None) -> bool:
+        """Queue a job; returns False when the same (kind, target) already exists."""
+        stmt = (
+            self._insert(schema.jobs)
+            .values(kind=kind, target=target, params=params or {}, status="pending", created_at=time.time())
+            .on_conflict_do_nothing()
+        )
+        with self.engine.begin() as conn:
+            return conn.execute(stmt).rowcount > 0
+
+    def reset_job(self, kind: str, target: str, params: dict[str, Any] | None = None) -> None:
+        """Queue a job from scratch, replacing any previous run of it."""
+        values = {
+            "status": "pending",
+            "params": params or {},
+            "progress": {},
+            "attempts": 0,
+            "error": None,
+            "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
+        }
+        stmt = self._insert(schema.jobs).values(kind=kind, target=target, **values)
+        with self.engine.begin() as conn:
+            conn.execute(stmt.on_conflict_do_update(index_elements=["kind", "target"], set_=values))
+
+    def claim_next_job(self, kinds: Sequence[str], *, max_attempts: int) -> dict[str, Any] | None:
+        """Atomically move the oldest pending job of ``kinds`` to ``running``."""
+        with self.engine.begin() as conn:
+            row = (
+                conn.execute(
+                    select(schema.jobs)
+                    .where(
+                        schema.jobs.c.status == "pending",
+                        schema.jobs.c.kind.in_(list(kinds)),
+                        schema.jobs.c.attempts < max_attempts,
+                    )
+                    .order_by(schema.jobs.c.created_at)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return None
+            claimed = conn.execute(
+                update(schema.jobs)
+                .where(schema.jobs.c.id == row["id"], schema.jobs.c.status == "pending")
+                .values(status="running", attempts=row["attempts"] + 1, started_at=time.time())
+            ).rowcount
+            if not claimed:
+                return None
+            return {**dict(row), "status": "running", "attempts": row["attempts"] + 1}
+
+    def update_job(self, job_id: int, **values: Any) -> None:
+        """Update columns of a job row."""
+        with self.engine.begin() as conn:
+            conn.execute(update(schema.jobs).where(schema.jobs.c.id == job_id).values(**values))
+
+    def requeue_running_jobs(self) -> int:
+        """Return jobs left ``running`` by a dead runner to ``pending``."""
+        with self.engine.begin() as conn:
+            return conn.execute(
+                update(schema.jobs).where(schema.jobs.c.status == "running").values(status="pending")
+            ).rowcount
+
+    def jobs(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        """Return job rows, optionally filtered by status."""
+        stmt = select(schema.jobs).order_by(schema.jobs.c.id)
+        if status:
+            stmt = stmt.where(schema.jobs.c.status == status)
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
+
+def open_stores(config: MonitoringConfig) -> tuple[SessionStore, LocalArtifactStore]:
+    """Create (and migrate) the configured session and artifact stores."""
+    store = SessionStore(config.db_url)
+    store.create_schema()
+    artifacts = LocalArtifactStore(config.artifacts_dir)
+    return store, artifacts

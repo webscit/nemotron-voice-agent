@@ -825,7 +825,8 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
 
         async def run_bot_session(runner_args: SmallWebRTCRunnerArguments) -> None:
             try:
-                await bot_fn(runner_args)
+                with logger.contextualize(stream_id=session_id or "-"):
+                    await bot_fn(runner_args)
             finally:
                 if session_id:
                     _active_session_configs.pop(session_id, None)

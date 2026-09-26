@@ -1,0 +1,57 @@
+# Offline post-processing ("dreamer") — see docs/how-to/enable-conversation-recording.md
+#
+#   docker compose --profile <recipe> --profile dreamer up -d
+#   docker compose --profile dreamer-models create     # once: on-demand model containers
+#
+# The dreamer only runs jobs while no conversation is live. It starts the
+# `dreamer-models` containers (through the Docker socket) only for jobs that need them,
+# and stops them before a new conversation needs the GPU.
+services:
+  dreamer:
+    profiles: ["dreamer"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: nemotron-voice-agent:latest
+    command: ["uv", "run", "python", "-m", "monitoring.jobs", "run"]
+    env_file:
+      - ../.env
+    environment:
+      PYTHONPATH: /app/src
+      MONITORING_DATA_DIR: /app/data
+      DREAMER_CONFIG: ${DREAMER_CONFIG:-}
+    volumes:
+      - ../src:/app/src:ro
+      - ../data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Alternative ASR for the `reasr` job (English streaming model, ASR only).
+  # Never started by `up`; the dreamer starts and stops it on demand.
+  dreamer-asr-en:
+    profiles: ["dreamer-models"]
+    image: ${DREAMER_ASR_IMAGE:-fcollonval/nemo-speech.cpp:latest-cu130-thor}
+    ipc: host
+    entrypoint:
+      - /opt/nemo-speech/bin/riva_server
+    command:
+      - --asr.model.path=/models/nemotron-speech-streaming-en-0.6b.q8_0.gguf
+      - --asr.backend.gpu=0
+      - --bind=0.0.0.0:50051
+    volumes:
+      - ${NEMO_SPEECH_MODEL_LOC:-../models/nemo-speech}:/models:ro
+    tmpfs:
+      - /tmp:mode=1777
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    restart: "no"

@@ -1,0 +1,36 @@
+# Post-processing runner ("dreamer") configuration.
+# Override the path with DREAMER_CONFIG=/path/to/dreamer.yaml.
+
+# Seconds between polls when there is nothing to do.
+poll_secs: 10
+# Wait this long after the last session activity before using the GPU.
+idle_grace_secs: 60
+# A session without heartbeat for this long no longer blocks jobs...
+live_stale_secs: 60
+# ...and is closed as "orphaned" after this long (server crash).
+orphan_after_secs: 120
+max_attempts: 3
+# Jobs queued automatically for every ended session.
+auto_enqueue: [reasr]
+# Compose project name used to find on-demand containers (default: any project).
+compose_project: null
+
+reasr:
+  # Pseudo ground truth: the strongest ASR you can run offline. Human corrections
+  # (python -m monitoring.transcripts_csv) always take precedence over it.
+  # Example (cloud, needs NVIDIA_API_KEY):
+  # reference:
+  #   name: canary-1b-cloud
+  #   server: grpc.nvcf.nvidia.com:443
+  #   function_id: <function id>
+  reference: null
+
+  # ASR variants to compare against the live one. `service` is a compose service
+  # started only while idle (profile `dreamer-models`) and stopped on preemption;
+  # omit it for endpoints that are always up. `languages` restricts the sessions
+  # an endpoint is used for (base codes).
+  candidates:
+    - name: nemotron-speech-streaming-en-0.6b
+      server: dreamer-asr-en:50051
+      service: dreamer-asr-en
+      languages: [en]
