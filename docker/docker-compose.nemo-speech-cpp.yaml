@@ -38,7 +38,15 @@ services:
 
   nemo-speech-multilingual:
     <<: *nemo-speech
+    image: fcollonval/nemo-speech.cpp:latest-cu130-thor
     profiles: [multilingual-assistant/single-gpu]
+    volumes:
+      - ${NEMO_SPEECH_MODEL_LOC:-../models/nemo-speech}:/models:ro
+    ports:
+      - "50051:50051"
+      - "10700:10700"
+    entrypoint:
+      - /opt/nemo-speech/bin/riva_server
     command:
       - --asr.model.path=/models/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf
       - --asr.backend.gpu=0
@@ -48,10 +56,11 @@ services:
       - --tts.codec-model=/models/nano-codec/nemo_nano_codec_22khz_1.89kbps_21.5fps.decoder.f16.gguf
       - --tts.tokenizer-model-dir=/models/magpie-tts/extracted
       - --tts.tn-model-dir=/models/tn_configs
-      - --tts.language-code=en-US
-      - --tts.voice-name=John
+      - --tts.language-code=fr-FR
+      # - --tts.voice-name=John
       - --tts.threads=${NEMO_SPEECH_TTS_THREADS:-8}
       - --bind=0.0.0.0:50051
+      - --wyoming.port=10700
 
   nemo-speech-tts:
     <<: *nemo-speech

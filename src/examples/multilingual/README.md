@@ -78,6 +78,30 @@ TTS voices and supported language codes are discovered at runtime by prewarming 
 | `prompts.yaml` | multilingual prompt catalog (`multilingual_voice_assistant`) |
 | `services.cloud.yaml` | cloud service endpoints and defaults |
 | `services.local.yaml` | on-prem service endpoints (server / single GPU), registry default `nemotron-asr-streaming-multilingual` |
+| `tools.py` | validates client-declared tool schemas into a `ToolsSchema` for the LLM context |
+| `tool_handlers.py` | server-side RTVI forwarding handler for those client-executed tools |
+
+### Client-executed tools
+
+Tools demonstrate Pipecat's RTVI client-side function calling: the LLM calls a tool as normal, but the *browser* executes it and returns the result. Unlike a fixed server-side schema, the set of tools is declared **by the client at connect time** (Pattern B: dynamic discovery) rather than hardcoded on the server — different client builds can expose different capabilities without any server change.
+
+| Tool | Why it runs on the client |
+| --- | --- |
+| `get_client_local_time` | Only the browser knows the user's own wall-clock time and IANA timezone. |
+| `evaluate_math_expression` | Arithmetic runs inside a sandboxed Web Worker (`client/src/lib/mathWorkerClient.ts`) instead of as arbitrary code on the server. The worker disables every network-capable API (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `importScripts`, `RTCPeerConnection`, `navigator.sendBeacon`) and only accepts a whitelisted character set plus a whitelisted set of `Math` member names, so it can only ever evaluate plain arithmetic. |
+
+Both are defined once, client-side, in `client/src/lib/clientTools.ts` (name, description, JSON-schema parameters, and the handler that implements them). The flow:
+
+1. On connect, the client sends its tool declarations as `requestData.tools` (WebRTC: `webrtcRequestParams.requestData` on `client.connect(...)`, carried through to the `/api/offer` POST body as `request_data`/`requestData`; WebSocket: a `client_tools` query parameter on the `/api/ws` URL, since that transport has no HTTP request to hang `requestData` on).
+2. `tools.py`'s `build_client_tools` validates that untrusted, client-supplied JSON (name pattern, description length, parameter shape, dedup, a cap on tool count) and turns it into a `ToolsSchema`. Invalid entries are dropped with a warning rather than reaching the LLM.
+3. The LLM decides to call one of the declared tools. `NvidiaLLMService` broadcasts a function-call-in-progress frame before invoking the registered server handler (`tool_handlers.py`, registered per-session for each name the client declared).
+4. `RTVIObserverParams.function_call_report_level` is set to `FULL` for each declared tool name, so the RTVI observer turns that frame into an `llm-function-call-in-progress` message carrying the function name and arguments.
+5. The client SDK's `registerFunctionCallHandler(...)` (wired up in `client/src/App.tsx` from the same `clientTools.ts` list) reacts to that event, runs the tool locally, and replies with an `llm-function-call-result` message on its own — no custom protocol needed.
+6. `RTVIProcessor` turns that reply directly into a result frame that the assistant context aggregator matches by `tool_call_id` and folds into the conversation.
+
+The server-side handler in `tool_handlers.py` never computes a result itself — it only keeps the call open (`cancel_on_interruption=True`, the plain sync tool pattern) and applies its own `CLIENT_FUNCTION_TIMEOUT_SECS` (default 5s) timeout so a client that never answers can't stall the conversation. `cancel_on_interruption=False` (Pipecat's async-tool pattern, used elsewhere for genuinely long-running backend work) was tried and rejected here: it injects the final result as a `role="developer"` message, which Nemotron 3.5 Lightning doesn't recognize — it kept telling the user the tool was "still running" even with the real result sitting in context. Add a new client-executed tool entirely in `client/src/lib/clientTools.ts`; nothing on the server needs to change.
+
+If a client-executed tool "does nothing," check two things: that the client actually declared it at connect time (see step 1 above), and the prompt catalog — the tool result must be summarized in natural spoken text, not read back verbatim (raw JSON read aloud by TTS sounds like a broken response).
 
 ### How it works
 

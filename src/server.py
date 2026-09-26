@@ -802,11 +802,18 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
 
     @app.post("/api/offer")
     async def offer(
-        request: SmallWebRTCRequest,
+        raw_request: Request,
         background_tasks: BackgroundTasks,
         session_id: str = Query(default=""),
         pipeline_mode: str = Query(default=""),
     ):
+        # SmallWebRTCRequest.from_dict() (not FastAPI's automatic dataclass
+        # parsing) is what accepts the client SDK's camelCase "requestData" —
+        # parsing the body manually here is required for that alias to apply.
+        try:
+            request = SmallWebRTCRequest.from_dict(await raw_request.json())
+        except (ValueError, TypeError) as exc:
+            return JSONResponse(status_code=400, content={"detail": f"Invalid WebRTC offer body: {exc}"})
         if _multi_worker_mode_enabled():
             return _multi_worker_session_config_response()
         config = _resolve_config(session_id, fallback_example_key=fallback_example_key, pipeline_mode=pipeline_mode)
@@ -849,6 +856,7 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
         websocket: WebSocket,
         session_id: str = Query(default=""),
         pipeline_mode: str = Query(default=""),
+        client_tools: str = Query(default=""),
     ):
         if session_id and _multi_worker_mode_enabled():
             await websocket.close(code=1013, reason=_MULTI_WORKER_SESSION_CONFIG_MESSAGE)
@@ -872,9 +880,16 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
             if session_id:
                 _active_session_configs[session_id] = dict(config)
 
+            body = {**config, "session_id": session_id}
+            if client_tools:
+                try:
+                    body["tools"] = json.loads(client_tools)
+                except ValueError:
+                    logger.warning("Ignoring malformed client_tools query parameter (not valid JSON)")
+
             runner_args = SimpleNamespace(
                 websocket=websocket,
-                body={**config, "session_id": session_id},
+                body=body,
                 handle_sigint=False,
                 pipeline_idle_timeout_secs=parse_env_int("PIPELINE_IDLE_TIMEOUT_SECS", 600, min_value=300),
             )

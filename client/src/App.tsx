@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useCallback, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useState, type ComponentProps } from "react";
 import { PipecatClient } from "@pipecat-ai/client-js";
 import { PipecatClientProvider, PipecatClientAudio } from "@pipecat-ai/client-react";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
@@ -14,6 +14,7 @@ import { Header } from "./components/Header";
 import { StatusPanel } from "./components/status-panel";
 import { Sidebar } from "./components/Sidebar";
 import { CenterPanel } from "./components/content";
+import { CLIENT_TOOLS } from "./lib/clientTools";
 
 const EMPTY_ICE_SERVERS: RTCIceServer[] = [];
 const DEFAULT_AUDIO_INPUT_SAMPLE_RATE = 16000;
@@ -54,6 +55,22 @@ function ClientSession({
       enableMic: true,
     });
   });
+
+  // The bot forwards a call to any of these names over RTVI because they
+  // run on the client (see src/examples/multilingual/tool_handlers.py for
+  // the server-side half of this exchange). CLIENT_TOOLS is also what gets
+  // declared to the bot at connect time (see Header.tsx), so registration
+  // here and declaration there always agree on names and behavior.
+  useEffect(() => {
+    for (const tool of CLIENT_TOOLS) {
+      client.registerFunctionCallHandler(tool.name, tool.handler);
+    }
+    return () => {
+      for (const tool of CLIENT_TOOLS) {
+        client.unregisterFunctionCallHandler(tool.name);
+      }
+    };
+  }, [client]);
 
   return (
     <PipecatClientProvider client={client as unknown as ProviderClient}>
