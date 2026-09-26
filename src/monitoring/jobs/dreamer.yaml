@@ -18,12 +18,18 @@ compose_project: null
 reasr:
   # Pseudo ground truth: the strongest ASR you can run offline. Human corrections
   # (python -m monitoring.transcripts_csv) always take precedence over it.
-  # Example (cloud, needs NVIDIA_API_KEY):
-  # reference:
+  # Voxtral (vLLM, OpenAI-compatible API) covers French, English, German, Spanish,
+  # Italian, Portuguese, Dutch, Hindi, ...; the container is started only while idle.
+  reference:
+    name: voxtral-mini-4b
+    protocol: openai
+    base_url: http://dreamer-asr-voxtral:8000/v1
+    model: mistralai/Voxtral-Mini-4B-Realtime-2602
+    service: dreamer-asr-voxtral
+  # A Riva-compatible gRPC reference looks like:
   #   name: canary-1b-cloud
   #   server: grpc.nvcf.nvidia.com:443
   #   function_id: <function id>
-  reference: null
 
   # ASR variants to compare against the live one. `service` is a compose service
   # started only while idle (profile `dreamer-models`) and stopped on preemption;

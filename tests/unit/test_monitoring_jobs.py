@@ -184,7 +184,7 @@ def test_reasr_scores_live_and_candidates(stores, monkeypatch):
         def transcribe_wav(self, wav, language):
             return outputs[self.endpoint.name]
 
-    monkeypatch.setattr(reasr_module, "RivaTranscriber", FakeTranscriber)
+    monkeypatch.setattr(reasr_module, "make_transcriber", FakeTranscriber)
     config = {
         "auto_enqueue": ["reasr"],
         "reasr": {
@@ -226,3 +226,52 @@ def test_reasr_scores_live_and_candidates(stores, monkeypatch):
 
 def test_registry_contains_reasr():
     assert "reasr" in JOB_REGISTRY
+
+
+def test_openai_transcriber_sends_iso_language(tmp_path):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from monitoring.jobs.asr_client import AsrEndpoint, OpenAITranscriber, make_transcriber
+
+    received = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _json(self, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._json(
+                {"object": "list", "data": [{"id": "voxtral", "object": "model", "created": 0, "owned_by": "x"}]}
+            )
+
+        def do_POST(self):
+            received["path"] = self.path
+            received["body"] = self.rfile.read(int(self.headers["Content-Length"]))
+            self._json({"text": " Allume la lumière. "})
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        endpoint = AsrEndpoint.from_config(
+            {"name": "voxtral", "protocol": "openai", "base_url": f"http://127.0.0.1:{server.server_port}/v1"}
+        )
+        transcriber = make_transcriber(endpoint)
+        assert isinstance(transcriber, OpenAITranscriber)
+        transcriber.wait_ready(timeout_secs=5)
+        text = transcriber.transcribe_wav(pcm16_to_wav(b"\x00\x00" * 1600, 16000), "fr-FR")
+    finally:
+        server.shutdown()
+    assert text == "Allume la lumière."
+    assert received["path"] == "/v1/audio/transcriptions"
+    assert b'name="language"\r\n\r\nfr\r\n' in received["body"]
+    assert b'name="model"\r\n\r\nvoxtral\r\n' in received["body"]

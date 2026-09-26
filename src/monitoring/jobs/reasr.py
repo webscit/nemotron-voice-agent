@@ -6,7 +6,7 @@
 For each user turn with recorded audio:
 
 1. transcribe it with the configured ``reference`` endpoint (pseudo ground truth,
-   the strongest offline model) and every ``candidates`` endpoint, storing
+   the strongest offline model, e.g. Voxtral) and every ``candidates`` endpoint, storing
    ``kind="transcript"`` annotations (source = endpoint name);
 2. pick the reference text: the latest human correction
    (``kind="transcript"``, ``source="human:<name>"``) wins over the reference model;
@@ -24,7 +24,7 @@ from typing import Any
 
 from loguru import logger
 
-from monitoring.jobs.asr_client import AsrEndpoint, RivaTranscriber
+from monitoring.jobs.asr_client import AsrEndpoint, make_transcriber
 from monitoring.jobs.base import Job, JobContext, register
 from monitoring.jobs.wer import error_rates
 
@@ -93,7 +93,7 @@ class ReAsrJob(Job):
                     continue
                 ctx.check_preempted()
                 if transcriber is None:
-                    transcriber = RivaTranscriber(endpoint)
+                    transcriber = make_transcriber(endpoint)
                     transcriber.wait_ready()
                 text = transcriber.transcribe_wav(_turn_wav(ctx, segments), language)
                 ctx.store.add_annotations(
@@ -103,7 +103,7 @@ class ReAsrJob(Job):
                             "target_type": "turn",
                             "target_id": f"{session_id}:{turn_idx}",
                             "source": endpoint.name,
-                            "source_version": endpoint.model or endpoint.server,
+                            "source_version": endpoint.model or endpoint.server or endpoint.base_url,
                             "kind": "transcript",
                             "value": {"text": text, "language": language},
                         }

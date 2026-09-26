@@ -91,6 +91,7 @@ Each group shows:
 
 ```bash
 docker compose --profile multilingual-assistant/single-gpu --profile dreamer up -d
+docker compose --profile dreamer-models build    # once: Voxtral image
 docker compose --profile dreamer-models create   # once: on-demand model containers
 docker compose exec dreamer uv run python -m monitoring.jobs status
 ```
@@ -114,13 +115,30 @@ Configure the runner in
 ### `reasr`: evaluate another ASR on real conversations
 
 For each recorded user turn, `reasr` transcribes the audio with the configured
-`reference` and `candidates` endpoints (any Riva-compatible gRPC server). It
-then scores the live transcript and each candidate by word error rate (WER):
+`reference` and `candidates` endpoints. It then scores the live transcript and
+each candidate by word error rate (WER):
 
 - **Reference.** The latest **human correction** is used when there is one.
   Otherwise the `reference` model serves as a pseudo ground truth.
 - **Output.** Per-turn `kind="wer"` annotations, plus a session-level
   `kind="wer_summary"`: total errors divided by total reference words.
+
+Endpoints can use either protocol:
+
+- `protocol: riva` (default): a Riva-compatible gRPC server, such as Riva, a NIM
+  or NeMo-Speech.cpp. Set `server: host:port`.
+- `protocol: openai`: an OpenAI-compatible `POST /v1/audio/transcriptions`
+  endpoint. Set `base_url` and `model`.
+
+The default reference is **Voxtral Mini 4B**
+(`mistralai/Voxtral-Mini-4B-Realtime-2602`). It is served by vLLM in the
+on-demand `dreamer-asr-voxtral` container and covers French, English, German,
+Spanish and more. Its image (`docker/voxtral.Dockerfile`) adds the audio
+decoders missing from the stock vLLM image. Build it once with
+`docker compose --profile dreamer-models build dreamer-asr-voxtral`. You can
+tune it with `VOXTRAL_MODEL`, `VOXTRAL_GPU_MEMORY_UTILIZATION` (default `0.15`,
+since it shares unified memory with the idle live stack) and
+`VOXTRAL_MAX_MODEL_LEN`.
 
 To add human corrections:
 

@@ -1,15 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Offline transcription of recorded WAV clips through a Riva-compatible gRPC ASR.
+"""Offline transcription of recorded WAV clips.
 
-Uses the streaming RPC (the one the live pipeline uses, so it works with Riva,
-NIM and NeMo-Speech.cpp alike) and keeps final results only.
+Two protocols are supported (``protocol`` in ``dreamer.yaml``):
+
+- ``riva`` (default): Riva-compatible gRPC, using the streaming RPC the live
+  pipeline uses (Riva, NIM and NeMo-Speech.cpp alike); final results only.
+- ``openai``: OpenAI-compatible ``POST /v1/audio/transcriptions`` (vLLM serving
+  Voxtral, Whisper, ...).
 """
 
 from __future__ import annotations
 
 import io
+import time
 import wave
 from dataclasses import dataclass
 from typing import Any
@@ -27,7 +32,10 @@ class AsrEndpoint:
     """One ASR variant to evaluate (``name`` becomes the annotation source)."""
 
     name: str
-    server: str
+    server: str = ""
+    protocol: str = "riva"
+    # OpenAI-compatible base URL (``protocol: openai``), e.g. http://host:8000/v1
+    base_url: str = ""
     language: str | None = None
     model: str = ""
     function_id: str = ""
@@ -46,7 +54,9 @@ class AsrEndpoint:
         """Build from a ``dreamer.yaml`` entry."""
         return cls(
             name=str(raw["name"]),
-            server=str(raw["server"]),
+            server=str(raw.get("server", "") or ""),
+            protocol=str(raw.get("protocol", "riva")).lower(),
+            base_url=str(raw.get("base_url", "") or ""),
             language=raw.get("language"),
             model=str(raw.get("model", "") or ""),
             function_id=str(raw.get("function_id", "") or ""),
@@ -99,3 +109,48 @@ class RivaTranscriber:
                 if result.is_final and result.alternatives:
                     parts.append(result.alternatives[0].transcript.strip())
         return " ".join(p for p in parts if p)
+
+
+class OpenAITranscriber:
+    """Blocking transcriber for OpenAI-compatible ``/audio/transcriptions`` servers."""
+
+    def __init__(self, endpoint: AsrEndpoint):
+        """Create a client for ``endpoint.base_url`` (API key from ``OPENAI_API_KEY`` or a dummy)."""
+        import os
+
+        from openai import OpenAI
+
+        self.endpoint = endpoint
+        self._client = OpenAI(base_url=endpoint.base_url, api_key=os.getenv("OPENAI_API_KEY") or "not-needed")
+        self._model = endpoint.model
+
+    def wait_ready(self, timeout_secs: float = 900.0) -> None:
+        """Poll ``/models`` until the server answers (vLLM loads the model first)."""
+        deadline = time.monotonic() + timeout_secs
+        while True:
+            try:
+                models = [m.id for m in self._client.models.list()]
+                self._model = self._model or models[0]
+                return
+            except Exception:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(5.0)
+
+    def transcribe_wav(self, wav_bytes: bytes, language: str) -> str:
+        """Return the transcript of a WAV clip (``language`` sent as an ISO-639-1 code)."""
+        code = (self.endpoint.language or language or "").split("-")[0].lower() or None
+        kwargs = {"language": code} if code else {}
+        result = self._client.audio.transcriptions.create(
+            model=self._model, file=("turn.wav", wav_bytes, "audio/wav"), temperature=0.0, **kwargs
+        )
+        return (result.text or "").strip()
+
+
+def make_transcriber(endpoint: AsrEndpoint) -> RivaTranscriber | OpenAITranscriber:
+    """Return the transcriber matching ``endpoint.protocol``."""
+    if endpoint.protocol == "openai":
+        return OpenAITranscriber(endpoint)
+    if endpoint.protocol == "riva":
+        return RivaTranscriber(endpoint)
+    raise ValueError(f"Unknown ASR protocol {endpoint.protocol!r} for {endpoint.name}")

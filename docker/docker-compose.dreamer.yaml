@@ -31,6 +31,45 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # Reference ASR for the `reasr` job: Voxtral Mini 4B (multilingual, incl. French)
+  # served by vLLM's OpenAI-compatible /v1/audio/transcriptions endpoint.
+  dreamer-asr-voxtral:
+    profiles: ["dreamer-models"]
+    build:
+      context: .
+      dockerfile: voxtral.Dockerfile
+    image: nemotron-voice-agent-voxtral:latest
+    shm_size: 4GB
+    env_file:
+      - ../.env
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    command:
+      - ${VOXTRAL_MODEL:-mistralai/Voxtral-Mini-4B-Realtime-2602}
+      - --host=0.0.0.0
+      - --port=8000
+      - --tokenizer-mode=mistral
+      - --config-format=mistral
+      - --load-format=mistral
+      - --max-model-len=${VOXTRAL_MAX_MODEL_LEN:-8192}
+      # Shares unified memory with the (idle) live stack; keep it small.
+      - --gpu-memory-utilization=${VOXTRAL_GPU_MEMORY_UTILIZATION:-0.15}
+      - '--compilation-config={"cudagraph_mode": "PIECEWISE"}'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 900s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    restart: "no"
+
   # Alternative ASR for the `reasr` job (English streaming model, ASR only).
   # Never started by `up`; the dreamer starts and stops it on demand.
   dreamer-asr-en:
