@@ -110,10 +110,14 @@ def test_artifact_supports_range(env):
 
 def test_asr_queue_orders_by_disagreement_and_reference_rescoring(env):
     client, store = env
-    queue = client.get("/api/review/asr/queue").json()
+    queue = client.get("/api/review/asr/queue", params={"sort": "disagreement"}).json()
     assert queue["open"] == 2 and queue["agreeing"] == 1
     assert [i["turn_idx"] for i in queue["items"]] == [2, 1]  # disagreement first
     assert queue["items"][0]["disagreement"] > 0 and queue["items"][1]["agree"]
+    turn1_first = client.get("/api/review/asr/queue", params={"sort": "recent"}).json()
+    assert [i["turn_idx"] for i in turn1_first["items"]] == [2, 1]  # turn 2 started later
+    page = client.get("/api/review/asr/queue", params={"limit": 1, "offset": 1}).json()
+    assert page["matching"] == 2 and [i["turn_idx"] for i in page["items"]] == [1]
 
     saved = client.post(
         "/api/review/asr/references",

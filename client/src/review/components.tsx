@@ -9,7 +9,8 @@ export function DiffText({ reference, hypothesis }: Readonly<{ reference: string
     <span className="rv-diff">
       {wordDiff(reference, hypothesis).map((token, i) => (
         <span key={`${i}-${token.text}`} className={`rv-diff-${token.kind}`}>
-          {token.text}{" "}
+          {token.text}
+          {token.sep}
         </span>
       ))}
     </span>

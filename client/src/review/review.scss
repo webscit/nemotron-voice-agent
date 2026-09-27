@@ -265,6 +265,35 @@
   }
 }
 
+.rv-table tbody tr.rv-selected {
+  background: var(--bg-card-hover);
+  box-shadow: inset 3px 0 0 var(--nvidia-green);
+}
+
+.rv-nowrap {
+  white-space: nowrap;
+}
+
+.rv-ellipsis {
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rv-pager {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+
+.rv-select {
+  width: auto;
+  margin-left: var(--space-2);
+}
+
 .rv-mono {
   font-family: var(--font-mono);
 }

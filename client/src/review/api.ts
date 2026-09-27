@@ -118,8 +118,11 @@ export interface AsrQueue {
   total: number;
   open: number;
   agreeing: number;
+  matching: number;
   items: AsrQueueItem[];
 }
+
+export type AsrQueueSort = "recent" | "disagreement";
 
 export interface Activity {
   id: string;
@@ -221,10 +224,10 @@ export function useLlmCall(sessionId: string, callId: number | null) {
   });
 }
 
-export function useAsrQueue(status: "open" | "reviewed" | "all", limit = 200) {
+export function useAsrQueue(status: "open" | "reviewed" | "all", sort: AsrQueueSort, limit = 200) {
   return useQuery({
-    queryKey: ["review", "asr-queue", status, limit],
-    queryFn: () => request<AsrQueue>(`/asr/queue?status=${status}&limit=${limit}`),
+    queryKey: ["review", "asr-queue", status, sort, limit],
+    queryFn: () => request<AsrQueue>(`/asr/queue?status=${status}&sort=${sort}&limit=${limit}`),
     ...live,
   });
 }

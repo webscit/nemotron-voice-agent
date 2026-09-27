@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { artifactUrl, useAsrQueue, useSaveReferences, type AsrQueueItem } from "./api";
+import { artifactUrl, useAsrQueue, useSaveReferences, type AsrQueueItem, type AsrQueueSort } from "./api";
 import { DiffText, StatusLine } from "./components";
 import { formatDate, formatPct, reviewHref, useAnnotator } from "./utils";
 
 type Status = "open" | "reviewed" | "all";
+
+const PAGE_SIZE = 20;
 
 function itemKey(item: AsrQueueItem): string {
   return `${item.session_id}:${item.turn_idx}`;
@@ -26,7 +28,7 @@ function ReviewCard({
   position,
   count,
   onSave,
-  onSkip,
+  onNext,
   onPrevious,
   saving,
 }: Readonly<{
@@ -34,10 +36,12 @@ function ReviewCard({
   position: number;
   count: number;
   onSave: (text: string) => void;
-  onSkip: () => void;
+  onNext: () => void;
   onPrevious: () => void;
   saving: boolean;
 }>) {
+  const hasPrevious = position > 0;
+  const hasNext = position < count - 1;
   const [draft, setDraft] = useState(() => defaultText(item));
   const audioRefs = useRef<HTMLAudioElement[]>([]);
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -87,9 +91,9 @@ function ReviewCard({
     } else if (event.key === "e") {
       event.preventDefault();
       textRef.current?.focus();
-    } else if (event.key === "s" || event.key === "ArrowRight") {
-      onSkip();
-    } else if (event.key === "ArrowLeft") {
+    } else if ((event.key === "s" || event.key === "ArrowRight") && hasNext) {
+      onNext();
+    } else if (event.key === "ArrowLeft" && hasPrevious) {
       onPrevious();
     }
   });
@@ -119,9 +123,6 @@ function ReviewCard({
       </div>
 
       <div className="rv-audio">
-        <button className="btn-secondary" onClick={playAll} title="Space">
-          ▶ Play
-        </button>
         {item.audio.map((clip, i) => (
           <audio
             key={clip.key}
@@ -174,11 +175,11 @@ function ReviewCard({
         onChange={(event) => setDraft(event.target.value)}
       />
       <div className="rv-actions">
-        <button className="btn-ghost" onClick={onPrevious} title="←">
+        <button className="btn-ghost" onClick={onPrevious} disabled={!hasPrevious} title="←">
           ← Previous
         </button>
-        <button className="btn-ghost" onClick={onSkip} title="s or →">
-          Skip
+        <button className="btn-ghost" onClick={onNext} disabled={!hasNext} title="→ or s">
+          Next →
         </button>
         <button className="btn-primary" onClick={() => onSave(draft)} disabled={saving || !draft.trim()} title="Enter">
           {saving ? "Saving…" : "Save reference"}
@@ -186,23 +187,116 @@ function ReviewCard({
       </div>
       <p className="text-xs text-muted">
         Shortcuts: <kbd>space</kbd> play · <kbd>1</kbd>/<kbd>2</kbd> take live/reference · <kbd>e</kbd> edit ·{" "}
-        <kbd>enter</kbd> save (<kbd>ctrl</kbd>+<kbd>enter</kbd> while editing) · <kbd>s</kbd> skip ·{" "}
-        <kbd>←</kbd> previous
+        <kbd>enter</kbd> save (<kbd>ctrl</kbd>+<kbd>enter</kbd> while editing) · <kbd>←</kbd> previous ·{" "}
+        <kbd>→</kbd>/<kbd>s</kbd> next
       </p>
+    </div>
+  );
+}
+
+function statusBadge(item: AsrQueueItem) {
+  if (item.human_reference) return <span className="rv-badge rv-badge-good">reviewed</span>;
+  if (item.disagreement === null) return <span className="rv-badge rv-badge-muted">awaiting reference</span>;
+  if (item.agree) return <span className="rv-badge rv-badge-good">agree</span>;
+  return <span className="rv-badge rv-badge-bad">{formatPct(item.disagreement)}</span>;
+}
+
+/** Paginated list of the turns in the current queue order; the selected turn is highlighted. */
+function TurnList({
+  items,
+  selectedIndex,
+  page,
+  onPage,
+  onSelect,
+}: Readonly<{
+  items: AsrQueueItem[];
+  selectedIndex: number;
+  page: number;
+  onPage: (page: number) => void;
+  onSelect: (index: number) => void;
+}>) {
+  const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const first = page * PAGE_SIZE;
+  return (
+    <div className="rv-turn-list">
+      <table className="rv-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Time</th>
+            <th>Session · turn</th>
+            <th>Status</th>
+            <th>Live transcript</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.slice(first, first + PAGE_SIZE).map((item, offset) => {
+            const index = first + offset;
+            return (
+              <tr
+                key={itemKey(item)}
+                className={index === selectedIndex ? "rv-selected" : ""}
+                aria-selected={index === selectedIndex}
+                onClick={() => onSelect(index)}
+              >
+                <td className="text-muted">{index + 1}</td>
+                <td className="rv-nowrap">{formatDate(item.started_at)}</td>
+                <td className="rv-mono text-xs rv-nowrap">
+                  {item.session_id} · {item.turn_idx}
+                </td>
+                <td>{statusBadge(item)}</td>
+                <td className="rv-ellipsis">{item.human_reference?.text ?? item.live.text}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {pages > 1 && (
+        <div className="rv-pager text-sm">
+          <button className="btn-ghost" disabled={page === 0} onClick={() => onPage(page - 1)}>
+            ← Newer
+          </button>
+          <span className="text-muted">
+            Page {page + 1} / {pages}
+          </span>
+          <button className="btn-ghost" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+            Older →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 export function AsrReview() {
   const [status, setStatus] = useState<Status>("open");
-  const [position, setPosition] = useState(0);
+  const [sort, setSort] = useState<AsrQueueSort>("recent");
+  // Selection follows the item (by key) across refetches; when it disappears (saved in the
+  // open queue) the item now at the same position is selected, i.e. the next one.
+  const [selected, setSelected] = useState<{ key: string; index: number }>({ key: "", index: 0 });
+  // null = the list page follows the selected turn.
+  const [pageOverride, setPageOverride] = useState<number | null>(null);
   const [annotator] = useAnnotator();
-  const queue = useAsrQueue(status, 1000);
+  const queue = useAsrQueue(status, sort, 1000);
   const save = useSaveReferences();
   const items = queue.data?.items ?? [];
-  const index = Math.min(position, Math.max(items.length - 1, 0));
+  const found = items.findIndex((i) => itemKey(i) === selected.key);
+  const index = found >= 0 ? found : Math.min(selected.index, Math.max(items.length - 1, 0));
   const item = items[index];
+  const page = pageOverride ?? Math.floor(index / PAGE_SIZE);
   const agreeing = items.filter((i) => i.agree && !i.human_reference);
+
+  const select = (next: number) => {
+    const target = items[next];
+    if (!target) return;
+    setSelected({ key: itemKey(target), index: next });
+    setPageOverride(null);
+  };
+
+  const reset = () => {
+    setSelected({ key: "", index: 0 });
+    setPageOverride(null);
+  };
 
   const saveText = (target: AsrQueueItem, text: string) => {
     if (!annotator || !text.trim()) return;
@@ -210,8 +304,9 @@ export function AsrReview() {
       { annotator, items: [{ session_id: target.session_id, turn_idx: target.turn_idx, text }] },
       {
         onSuccess: () => {
-          // In the open queue the saved item disappears, so the same index is the next item.
-          if (status !== "open") setPosition(index + 1);
+          // In the open queue the saved turn leaves the list and its successor takes its position.
+          if (status === "open") setSelected({ key: "", index });
+          else select(Math.min(index + 1, items.length - 1));
         },
       }
     );
@@ -231,8 +326,8 @@ export function AsrReview() {
         <div>
           <h2 className="text-lg font-semibold">ASR reference</h2>
           <p className="text-sm text-muted">
-            Set what the user actually said. Turns where the live ASR and the reference model disagree come first; the
-            reference you save becomes the WER ground truth and is rescored immediately.
+            Set what the user actually said. The reference you save becomes the WER ground truth and is rescored
+            immediately.
           </p>
         </div>
         <div className="rv-segmented">
@@ -242,12 +337,24 @@ export function AsrReview() {
               className={`tab-btn ${status === s ? "active" : ""}`}
               onClick={() => {
                 setStatus(s);
-                setPosition(0);
+                reset();
               }}
             >
               {s}
             </button>
           ))}
+          <select
+            className="input rv-select"
+            value={sort}
+            aria-label="Order"
+            onChange={(event) => {
+              setSort(event.target.value as AsrQueueSort);
+              reset();
+            }}
+          >
+            <option value="recent">Most recent first</option>
+            <option value="disagreement">Most disagreement first</option>
+          </select>
         </div>
       </div>
 
@@ -271,16 +378,19 @@ export function AsrReview() {
       <StatusLine loading={queue.isLoading} error={queue.error} />
 
       {item ? (
-        <ReviewCard
-          key={itemKey(item)}
-          item={item}
-          position={index}
-          count={items.length}
-          saving={save.isPending}
-          onSave={(text) => saveText(item, text)}
-          onSkip={() => setPosition(Math.min(index + 1, items.length - 1))}
-          onPrevious={() => setPosition(Math.max(index - 1, 0))}
-        />
+        <>
+          <ReviewCard
+            key={itemKey(item)}
+            item={item}
+            position={index}
+            count={items.length}
+            saving={save.isPending}
+            onSave={(text) => saveText(item, text)}
+            onNext={() => select(index + 1)}
+            onPrevious={() => select(index - 1)}
+          />
+          <TurnList items={items} selectedIndex={index} page={page} onPage={setPageOverride} onSelect={select} />
+        </>
       ) : (
         queue.data && <p className="text-sm text-muted">Nothing to review here.</p>
       )}

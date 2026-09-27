@@ -88,11 +88,20 @@ export function formatSecs(value: number | null | undefined): string {
 }
 
 // ---- Word diff (LCS over normalized tokens) ----
+// Tokenization mirrors the server's WER normalization (src/monitoring/jobs/wer.py):
+// hyphens and punctuation separate words, so "Rappelle-moi" matches "rappelle moi".
 
-export type DiffToken = { text: string; kind: "same" | "del" | "ins" };
+export type DiffToken = { text: string; sep: string; kind: "same" | "del" | "ins" };
 
-function tokens(text: string): string[] {
-  return text.split(/\s+/u).filter(Boolean);
+type Token = { text: string; sep: string };
+
+function tokens(text: string): Token[] {
+  const out: Token[] = [];
+  for (const word of text.split(/\s+/u).filter(Boolean)) {
+    const parts = word.split(/(?<=[-‐‑–—])/u);
+    parts.forEach((part, i) => out.push({ text: part, sep: i < parts.length - 1 ? "" : " " }));
+  }
+  return out;
 }
 
 function norm(token: string): string {
@@ -106,24 +115,25 @@ export function wordDiff(reference: string, hypothesis: string): DiffToken[] {
   const lcs: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
   for (let i = a.length - 1; i >= 0; i--) {
     for (let j = b.length - 1; j >= 0; j--) {
-      lcs[i][j] = norm(a[i]) === norm(b[j]) ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      lcs[i][j] =
+        norm(a[i].text) === norm(b[j].text) ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
     }
   }
   const out: DiffToken[] = [];
   let i = 0;
   let j = 0;
   while (i < a.length && j < b.length) {
-    if (norm(a[i]) === norm(b[j])) {
-      out.push({ text: b[j], kind: "same" });
+    if (norm(a[i].text) === norm(b[j].text)) {
+      out.push({ ...b[j], kind: "same" });
       i++;
       j++;
     } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
-      out.push({ text: a[i++], kind: "del" });
+      out.push({ ...a[i++], kind: "del" });
     } else {
-      out.push({ text: b[j++], kind: "ins" });
+      out.push({ ...b[j++], kind: "ins" });
     }
   }
-  while (i < a.length) out.push({ text: a[i++], kind: "del" });
-  while (j < b.length) out.push({ text: b[j++], kind: "ins" });
+  while (i < a.length) out.push({ ...a[i++], kind: "del" });
+  while (j < b.length) out.push({ ...b[j++], kind: "ins" });
   return out;
 }

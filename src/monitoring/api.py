@@ -289,8 +289,10 @@ class ReviewService:
         at, source, text = max(humans)
         return {"source": source, "text": text, "at": at}
 
-    def asr_queue(self, *, status: str, limit: int, session_id: str | None) -> dict[str, Any]:
-        """User turns with audio, open ones first, most live-vs-reference disagreement first."""
+    def asr_queue(
+        self, *, status: str, limit: int, session_id: str | None, sort: str = "recent", offset: int = 0
+    ) -> dict[str, Any]:
+        """User turns with audio, most recent first (or most live-vs-reference disagreement first)."""
         reference = self._reference_name
         session_ids = [session_id] if session_id else self.store.ended_session_ids()
         items = []
@@ -341,9 +343,12 @@ class ReviewService:
             items = [i for i in items if not i["human_reference"]]
         elif status == "reviewed":
             items = [i for i in items if i["human_reference"]]
-        # Known disagreement first (largest first), then turns still waiting for the reference model.
-        items.sort(key=lambda i: (i["disagreement"] is None, -(i["disagreement"] or 0.0), -i["started_at"]))
-        return {**counts, "items": items[:limit]}
+        if sort == "disagreement":
+            # Known disagreement first (largest first), then turns still waiting for the reference model.
+            items.sort(key=lambda i: (i["disagreement"] is None, -(i["disagreement"] or 0.0), -i["started_at"]))
+        else:
+            items.sort(key=lambda i: (-i["started_at"], -i["turn_idx"]))
+        return {**counts, "matching": len(items), "items": items[offset : offset + limit]}
 
     def save_references(self, annotator: str, items: list[ReferenceIn]) -> dict[str, Any]:
         """Store human references and rescore the affected sessions inline."""
@@ -473,9 +478,11 @@ def create_review_router(
     async def asr_queue(
         status: str = Query("open", pattern="^(open|reviewed|all)$"),
         limit: int = Query(50, ge=0, le=1000),
+        offset: int = Query(0, ge=0),
+        sort: str = Query("recent", pattern="^(recent|disagreement)$"),
         session_id: str | None = None,
     ):
-        return await run(service.asr_queue, status=status, limit=limit, session_id=session_id)
+        return await run(service.asr_queue, status=status, limit=limit, offset=offset, sort=sort, session_id=session_id)
 
     @router.post("/asr/references")
     async def save_references(payload: ReferenceBatchIn):
