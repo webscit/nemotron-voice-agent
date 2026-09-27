@@ -277,6 +277,15 @@ export function Header({ onClientReset }: Readonly<HeaderProps>) {
         </h1>
         <div className="d-flex items-center gap-3">
           {isConnected && <DevicesSection />}
+          <a
+            className="btn-ghost"
+            href="#/review"
+            target="_blank"
+            rel="noopener"
+            title="Review recorded sessions (opens a new tab)"
+          >
+            Review
+          </a>
           <button
             className={isConnected ? "btn-secondary" : "btn-primary"}
             onClick={handleClick}

@@ -79,6 +79,10 @@ class LocalArtifactStore:
         """Return whether ``key`` exists."""
         return self._path(key).exists()
 
+    def read_path(self, key: str) -> Path:
+        """Return the local file path of ``key`` for serving (no directories created)."""
+        return self._path(key)
+
     def local_path(self, key: str) -> Path:
         """Return a local path to stream-write ``key``; call ``commit`` when done."""
         path = self._path(key)
@@ -236,6 +240,19 @@ class SessionStore:
             return
         with self.engine.begin() as conn:
             conn.execute(schema.annotations.insert(), payload)
+
+    def replace_annotations(self, session_id: str, kinds: Sequence[str], rows: Iterable[dict[str, Any]]) -> None:
+        """Atomically replace a session's annotations of ``kinds`` (derived data) with ``rows``."""
+        now = time.time()
+        payload = [{"created_at": now, **row} for row in rows]
+        with self.engine.begin() as conn:
+            conn.execute(
+                schema.annotations.delete().where(
+                    schema.annotations.c.session_id == session_id, schema.annotations.c.kind.in_(list(kinds))
+                )
+            )
+            if payload:
+                conn.execute(schema.annotations.insert(), payload)
 
     def annotations_for(self, session_id: str, *, kind: str | None = None) -> list[dict[str, Any]]:
         """Return a session's annotations, optionally of one ``kind``."""

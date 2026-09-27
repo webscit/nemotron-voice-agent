@@ -623,6 +623,24 @@ async def _ensure_services_ready_for_connection(config: dict, example: dict) -> 
     await _ensure_tts_ready_for_connection(config, example)
 
 
+def _include_review_router(app: FastAPI) -> None:
+    """Mount ``/api/review`` when session recording is enabled."""
+    from monitoring.config import load_monitoring_config
+
+    settings = load_monitoring_config()
+    if not settings.enabled:
+        return
+    try:
+        from monitoring.api import create_review_router
+        from monitoring.store import open_stores
+
+        store, artifacts = open_stores(settings)
+        app.include_router(create_review_router(settings, store, artifacts))
+        logger.info("Review API enabled at /api/review")
+    except Exception as exc:
+        logger.opt(exception=exc).error("Review API unavailable")
+
+
 def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
     """Build and return the FastAPI application with all routes."""
     if prompt_file:
@@ -1124,6 +1142,10 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
         candidates, which is fine for local/LAN deployments).
         """
         return {"iceServers": _build_ice_servers(request)}
+
+    # ---- Review API (recorded sessions; MONITORING_ENABLED) ----
+
+    _include_review_router(app)
 
     # ---- Static client UI ----
 

@@ -87,6 +87,27 @@ Each group shows:
 - prompt tokens and interruption rate;
 - WER per ASR source, once `reasr` has run.
 
+## Review in the web UI
+
+Click **Review** in the header of the web client, or open `#/review` directly.
+It opens a separate tab, so a call in progress isn't interrupted. The review
+API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
+
+- **Sessions.** Recorded conversations with their models, review progress and
+  live WER. Opening a session shows each turn with:
+  - the user audio, every transcript diffed against the reference, and the human reference;
+  - images, and the LLM calls (the full stored input on click);
+  - the assistant reply, plus the whole-call stereo recording.
+- **ASR reference.** Every recorded user turn, with the ones where the live
+  ASR and the reference model (Voxtral) disagree first.
+  - Listen, then take the live (`1`) or reference (`2`) text, or edit it (`e`),
+    and save (`Enter`). Saving rescores WER immediately, on the CPU only.
+  - Turns where both agree can be accepted in bulk.
+  - Your annotator name is kept in the browser and stored as
+    `source="human:<name>"`.
+- **Dreamer.** Whether jobs may run (idle or live), job counts, running jobs,
+  and failures with a retry button.
+
 ## Offline post-processing (dreamer)
 
 ```bash
