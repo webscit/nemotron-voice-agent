@@ -122,7 +122,8 @@ class SessionStore:
         schema.metadata.create_all(self.engine)
         with self.engine.begin() as conn:
             current = conn.execute(select(func.max(schema.schema_version.c.version))).scalar()
-            if current is None:
+            # Schema changes so far only add tables, which ``create_all`` handles.
+            if current is None or current < schema.SCHEMA_VERSION:
                 conn.execute(schema.schema_version.insert().values(version=schema.SCHEMA_VERSION))
 
     # ---------------------------------------------------------------- sessions
@@ -262,6 +263,20 @@ class SessionStore:
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(stmt.order_by(schema.annotations.c.id)).mappings()]
 
+    # ---------------------------------------------------------------------- kv
+    def get_kv(self, key: str) -> dict[str, Any] | None:
+        """Return ``{"value", "updated_at"}`` for ``key``, or None."""
+        with self.engine.connect() as conn:
+            row = conn.execute(select(schema.kv).where(schema.kv.c.key == key)).mappings().first()
+        return {"value": row["value"], "updated_at": row["updated_at"]} if row else None
+
+    def set_kv(self, key: str, value: Any) -> None:
+        """Upsert ``key``."""
+        now = time.time()
+        stmt = self._insert(schema.kv).values(key=key, value=value, updated_at=now)
+        with self.engine.begin() as conn:
+            conn.execute(stmt.on_conflict_do_update(index_elements=["key"], set_={"value": value, "updated_at": now}))
+
     # -------------------------------------------------------------------- jobs
     def enqueue_job(self, kind: str, target: str, params: dict[str, Any] | None = None) -> bool:
         """Queue a job; returns False when the same (kind, target) already exists."""
@@ -321,6 +336,38 @@ class SessionStore:
         """Update columns of a job row."""
         with self.engine.begin() as conn:
             conn.execute(update(schema.jobs).where(schema.jobs.c.id == job_id).values(**values))
+
+    def cancel_job(self, job_id: int) -> bool:
+        """Cancel a pending job (running jobs are stopped by pausing the dreamer instead)."""
+        with self.engine.begin() as conn:
+            return (
+                conn.execute(
+                    update(schema.jobs)
+                    .where(schema.jobs.c.id == job_id, schema.jobs.c.status == "pending")
+                    .values(status="cancelled", finished_at=time.time())
+                ).rowcount
+                > 0
+            )
+
+    def list_jobs(
+        self, *, status: str | None = None, kind: str | None = None, limit: int = 100, offset: int = 0
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Return ``(total, jobs)`` newest first, optionally filtered."""
+        conditions = []
+        if status:
+            conditions.append(schema.jobs.c.status == status)
+        if kind:
+            conditions.append(schema.jobs.c.kind == kind)
+        with self.engine.connect() as conn:
+            total = conn.execute(select(func.count()).select_from(schema.jobs).where(*conditions)).scalar_one()
+            rows = conn.execute(
+                select(schema.jobs)
+                .where(*conditions)
+                .order_by(schema.jobs.c.created_at.desc(), schema.jobs.c.id.desc())
+                .limit(limit)
+                .offset(offset)
+            ).mappings()
+            return total, [dict(r) for r in rows]
 
     def requeue_running_jobs(self) -> int:
         """Return jobs left ``running`` by a dead runner to ``pending``."""

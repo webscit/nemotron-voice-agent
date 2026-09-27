@@ -105,8 +105,28 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - Turns where both agree can be accepted in bulk.
   - Your annotator name is kept in the browser and stored as
     `source="human:<name>"`.
-- **Dreamer.** Whether jobs may run (idle or live), job counts, running jobs,
-  and failures with a retry button.
+- **Metrics.** Compares pipeline variants over a time range (24 h, 7 days,
+  30 days, all). A variant is the combination of the config fields you
+  compare by: LLM, ASR, TTS, voice, language, turn detection, transport. Each
+  variant keeps its color across filter changes. The page shows:
+  - user→bot latency: median with a p10–p90 whisker, plus a per-session trend
+    (click a point to open the session);
+  - time to first byte per service;
+  - LLM time to first token, text-only vs with images;
+  - ASR WER per transcript source;
+  - a table with all the numbers.
+- **Dreamer.**
+  - **Status:** what the worker is doing and why (idle, waiting for a live
+    session to end, running a job, paused), its heartbeat, and job counts.
+  - **Controls:** Pause/Resume (a running job stops at its next checkpoint and
+    resumes later), the state of the on-demand model containers, and the job
+    queue filtered by status, with Cancel for pending jobs and Retry/Re-run for
+    the others.
+  - **Queue for all sessions:** runs a job kind on every ended session that has
+    never had it.
+  - **How it works:** the dreamer publishes its state and reads the pause flag
+    through the database (`kv` table). The voice server therefore needs no
+    Docker access.
 
 ## Offline post-processing (dreamer)
 

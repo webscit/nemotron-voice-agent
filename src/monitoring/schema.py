@@ -24,7 +24,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 metadata = MetaData()
 
@@ -164,7 +164,7 @@ jobs = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("kind", String(64), nullable=False),
     Column("target", String(128), nullable=False),
-    # pending | running | done | failed
+    # pending | running | done | failed | cancelled
     Column("status", String(16), nullable=False, default="pending"),
     Column("params", JSON),
     Column("progress", JSON),
@@ -175,4 +175,13 @@ jobs = Table(
     Column("finished_at", Float),
     UniqueConstraint("kind", "target", name="uq_jobs_kind_target"),
     Index("ix_jobs_status", "status", "created_at"),
+)
+
+# Small shared state between processes (dreamer status heartbeat, pause flag).
+kv = Table(
+    "kv",
+    metadata,
+    Column("key", String(128), primary_key=True),
+    Column("value", JSON),
+    Column("updated_at", Float, nullable=False),
 )

@@ -93,6 +93,18 @@ class DockerServiceManager:
             time.sleep(2.0)
         raise TimeoutError(f"Service {service} not healthy after {wait_secs:.0f}s")
 
+    def state(self, service: str) -> str:
+        """``running`` / ``healthy`` / ``starting`` / ``unhealthy`` / ``exited`` / ``missing`` / ``unavailable``."""
+        try:
+            state = self._state(self._container_for(service))
+        except RuntimeError:
+            return "missing"
+        except OSError:
+            return "unavailable"  # no Docker socket
+        if not state.get("Running"):
+            return "exited"
+        return (state.get("Health") or {}).get("Status") or "running"
+
     def stop_started(self) -> None:
         """Stop every container this manager started (most recent first)."""
         while self.started:

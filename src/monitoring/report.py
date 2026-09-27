@@ -63,6 +63,13 @@ def _service(processor: str | None) -> str:
 
 def collect(store: SessionStore, *, since: float | None, session_ids: list[str] | None, group_by: list[str]):
     """Return ``{group_key: stats}`` for the selected sessions."""
+    return collect_with_sessions(store, since=since, session_ids=session_ids, group_by=group_by)[0]
+
+
+def collect_with_sessions(
+    store: SessionStore, *, since: float | None, session_ids: list[str] | None, group_by: list[str]
+) -> tuple[dict[tuple, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Return ``({group_key: stats}, {session_id: per-session stats})``."""
     with store.engine.connect() as conn:
         stmt = select(schema.sessions)
         if since:
@@ -102,6 +109,9 @@ def collect(store: SessionStore, *, since: float | None, session_ids: list[str] 
             "wer": defaultdict(lambda: [0, 0]),
         }
     )
+    per_session: dict[str, dict[str, Any]] = {
+        s["id"]: {"started_at": s["started_at"], "group": group_of[s["id"]], "latency": [], "wer": {}} for s in sessions
+    }
     for session in sessions:
         groups[group_of[session["id"]]]["sessions"] += 1
     for turn in turns:
@@ -113,6 +123,7 @@ def collect(store: SessionStore, *, since: float | None, session_ids: list[str] 
         g = groups[group_of[metric["session_id"]]]
         if metric["name"] == "user_bot_latency":
             g["latency"].append(metric["value"])
+            per_session[metric["session_id"]]["latency"].append(metric["value"])
         elif metric["name"] == "first_bot_speech_latency":
             g["first_latency"].append(metric["value"])
         elif metric["name"] == "ttfb":
@@ -130,7 +141,79 @@ def collect(store: SessionStore, *, since: float | None, session_ids: list[str] 
         acc = groups[group_of[session_id]]["wer"][source]
         acc[0] += value.get("word_errors") or 0
         acc[1] += value.get("ref_words") or 0
-    return groups
+        per_session[session_id]["wer"][source] = value.get("wer")
+    return groups, per_session
+
+
+def _service_role(service: str) -> str:
+    """ASR / LLM / TTS for pipecat service class names, else the name itself."""
+    for marker, role in (("STT", "ASR"), ("ASR", "ASR"), ("LLM", "LLM"), ("TTS", "TTS")):
+        if marker in service:
+            return role
+    return service
+
+
+def _dist(values: list[float]) -> dict[str, float | int | None]:
+    return {"n": len(values), "p10": _pct(values, 10), "p50": _pct(values, 50), "p90": _pct(values, 90)}
+
+
+def metrics_json(
+    store: SessionStore, *, since: float | None, group_by: list[str], session_ids: list[str] | None = None
+) -> dict[str, Any]:
+    """Numeric, JSON-ready variant comparison (used by the review UI)."""
+    groups, per_session = collect_with_sessions(store, since=since, session_ids=session_ids, group_by=group_by)
+    keys = sorted(groups, key=lambda k: (-groups[k]["sessions"], k))
+    index = {key: i for i, key in enumerate(keys)}
+    variants = []
+    for key in keys:
+        g = groups[key]
+        ttfb: dict[str, list[float]] = defaultdict(list)
+        for service, values in g["ttfb"].items():
+            ttfb[_service_role(service)].extend(values)
+        variants.append(
+            {
+                "key": dict(zip(group_by, key, strict=True)),
+                "label": " · ".join(v or "–" for v in key) or "all sessions",
+                "sessions": g["sessions"],
+                "turns": g["turns"],
+                "interrupt_rate": g["interrupted"] / g["turns"] if g["turns"] else None,
+                "latency": _dist(g["latency"]),
+                "first_speech": _dist(g["first_latency"]),
+                "ttfb": {role: _dist(values) for role, values in sorted(ttfb.items())},
+                "ttft": {"text": _dist(g["ttft_text"]), "vision": _dist(g["ttft_vision"])},
+                "prompt_tokens_p50": _pct(g["prompt_tokens"], 50),
+                "wer": {
+                    source: {"wer": errors / words if words else None, "ref_words": words}
+                    for source, (errors, words) in sorted(g["wer"].items())
+                },
+            }
+        )
+    all_latency = [v for g in groups.values() for v in g["latency"]]
+    live_errors = sum(e for g in groups.values() for s, (e, _) in g["wer"].items() if s.startswith("live:"))
+    live_words = sum(w for g in groups.values() for s, (_, w) in g["wer"].items() if s.startswith("live:"))
+    return {
+        "group_by": group_by,
+        "totals": {
+            "sessions": sum(g["sessions"] for g in groups.values()),
+            "turns": sum(g["turns"] for g in groups.values()),
+            "latency_p50": _pct(all_latency, 50),
+            "live_wer": live_errors / live_words if live_words else None,
+        },
+        "variants": variants,
+        "sessions": sorted(
+            (
+                {
+                    "id": sid,
+                    "started_at": s["started_at"],
+                    "variant": index[s["group"]],
+                    "latency_p50": _pct(s["latency"], 50),
+                    "live_wer": next((w for src, w in s["wer"].items() if src.startswith("live:")), None),
+                }
+                for sid, s in per_session.items()
+            ),
+            key=lambda s: s["started_at"],
+        ),
+    }
 
 
 def summarize(groups, group_by: list[str]) -> list[dict[str, str]]:

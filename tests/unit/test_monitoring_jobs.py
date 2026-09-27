@@ -275,3 +275,31 @@ def test_openai_transcriber_sends_iso_language(tmp_path):
     assert received["path"] == "/v1/audio/transcriptions"
     assert b'name="language"\r\n\r\nfr\r\n' in received["body"]
     assert b'name="model"\r\n\r\nvoxtral\r\n' in received["body"]
+
+
+def test_pause_blocks_and_preempts(stores):
+    store, _ = stores
+    clock = FakeClock()
+    _session(store, "s1", started=clock.now - 500, ended=clock.now - 400)
+    dreamer = _dreamer(stores, clock)
+
+    store.set_kv("dreamer.paused", {"paused": True})
+    assert not dreamer.run_once()
+    assert store.get_kv("dreamer.status")["value"]["state"] == "paused"
+
+    store.set_kv("dreamer.paused", {"paused": False})
+
+    def on_step(step):
+        if step == 0:
+            store.set_kv("dreamer.paused", {"paused": True})
+            clock.now += 2
+
+    StepJob.on_step = on_step
+    try:
+        assert dreamer.run_once()
+    finally:
+        StepJob.on_step = None
+    (job,) = store.jobs()
+    assert job["status"] == "pending" and job["progress"] == {"next": 1}
+    status = store.get_kv("dreamer.status")["value"]
+    assert status["heartbeat_at"] == clock.now and "jobs" in status

@@ -14,11 +14,16 @@ so it keeps working unchanged once the store is a remote database:
 Jobs run one at a time; when a session opens mid-job the job raises
 ``Preempted`` at its next checkpoint, returns to ``pending`` (without consuming
 an attempt) and every on-demand container the runner started is stopped.
+
+The runner publishes its state in the ``kv`` table (``dreamer.status``: heartbeat,
+current activity, on-demand service states) and obeys ``dreamer.paused``, so the
+review UI can show and control it without Docker access of its own.
 """
 
 from __future__ import annotations
 
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +36,9 @@ from monitoring.jobs.services import DockerServiceManager
 from monitoring.store import ArtifactStore, SessionStore
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("dreamer.yaml")
+STATUS_KEY = "dreamer.status"
+PAUSE_KEY = "dreamer.paused"
+_HEARTBEAT_SECS = 10.0
 
 _DEFAULTS: dict[str, Any] = {
     "poll_secs": 10.0,
@@ -41,6 +49,13 @@ _DEFAULTS: dict[str, Any] = {
     "auto_enqueue": ["reasr"],
     "compose_project": None,
 }
+
+
+def declared_services(config: dict[str, Any]) -> list[str]:
+    """On-demand compose services referenced by the job configuration."""
+    reasr = config.get("reasr") or {}
+    endpoints = [reasr.get("reference") or {}, *(reasr.get("candidates") or [])]
+    return sorted({e["service"] for e in endpoints if e.get("service")})
 
 
 def load_dreamer_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -70,6 +85,9 @@ class Dreamer:
         self._clock = clock
         self._preempt_checked_at = 0.0
         self._preempted = False
+        self._paused = False
+        self._activity: dict[str, Any] = {"state": "starting"}
+        self._reported_at = 0.0
 
     # ------------------------------------------------------------ idle state
     def live_sessions(self) -> int:
@@ -83,13 +101,46 @@ class Dreamer:
         last = self.store.last_session_activity()
         return last is None or self._clock() - last >= self.config["idle_grace_secs"]
 
+    def is_paused(self) -> bool:
+        """Whether the review UI paused the dreamer."""
+        row = self.store.get_kv(PAUSE_KEY)
+        return bool(row and (row["value"] or {}).get("paused"))
+
     def is_preempted(self) -> bool:
-        """Cheap (rate-limited) check used by jobs between steps."""
+        """Cheap (rate-limited) check used by jobs between steps: live session or pause."""
         now = self._clock()
         if self._preempted or now - self._preempt_checked_at >= 1.0:
             self._preempt_checked_at = now
-            self._preempted = self.live_sessions() > 0
+            self._paused = self.is_paused()
+            self._preempted = self._paused or self.live_sessions() > 0
+            self.report()
         return self._preempted
+
+    # ---------------------------------------------------------------- status
+    def report(self, *, force: bool = False, **activity: Any) -> None:
+        """Publish the heartbeat + current activity (rate-limited unless ``force``)."""
+        if activity:
+            self._activity = activity
+        now = self._clock()
+        if not force and now - self._reported_at < _HEARTBEAT_SECS:
+            return
+        self._reported_at = now
+        try:
+            services = {name: self.services.state(name) for name in declared_services(self.config)}
+        except Exception:
+            services = {}
+        self.store.set_kv(
+            STATUS_KEY,
+            {
+                **self._activity,
+                "heartbeat_at": now,
+                "host": socket.gethostname(),
+                "poll_secs": self.config["poll_secs"],
+                "jobs": sorted(JOB_REGISTRY),
+                "services": services,
+                "started_services": list(self.services.started),
+            },
+        )
 
     # ------------------------------------------------------------------ loop
     def startup(self) -> None:
@@ -116,17 +167,25 @@ class Dreamer:
         """Run at most one job; return whether one was attempted."""
         self.store.close_orphaned_sessions(now=self._clock(), stale_after_secs=self.config["orphan_after_secs"])
         self.enqueue_ended_sessions()
+        if self.is_paused():
+            self.services.stop_started()
+            self.report(force=True, state="paused")
+            return False
         if not self.is_idle():
             self.services.stop_started()
+            self.report(state="waiting", reason="live session or grace period")
             return False
         job = self.store.claim_next_job(list(JOB_REGISTRY), max_attempts=self.config["max_attempts"])
         if job is None:
             self.services.stop_started()
+            self.report(state="idle")
             return False
         self._preempted = False
+        self.report(force=True, state="running", job_id=job["id"], kind=job["kind"], target=job["target"])
         self._run_job(job)
         if self._preempted:
             self.services.stop_started()
+        self.report(force=True, state="idle")
         return True
 
     def run_forever(self) -> None:
@@ -159,7 +218,8 @@ class Dreamer:
                 ctx.check_preempted()
             handler.run(ctx)
         except Preempted:
-            logger.info(f"Job {job['kind']}#{job['id']} preempted by a live session; will resume")
+            reason = "paused" if self._paused else "preempted by a live session"
+            logger.info(f"Job {job['kind']}#{job['id']} {reason}; will resume")
             self._preempted = True
             self.store.update_job(job["id"], status="pending", attempts=job["attempts"] - 1)
             return

@@ -7,6 +7,7 @@ import { queryClient } from "../api";
 import { useActivities } from "./api";
 import { AsrReview } from "./AsrReview";
 import { DreamerStatusView } from "./Dreamer";
+import { MetricsView } from "./Metrics";
 import { SessionDetailView, SessionsList } from "./Sessions";
 import { ANNOTATOR_PATTERN, reviewHref, reviewRoute, useAnnotator, useHash } from "./utils";
 import "./review.scss";
@@ -50,6 +51,7 @@ function Nav({ view }: Readonly<{ view: string }>) {
     <nav className="rv-nav">
       <span className="rv-nav-section">Browse</span>
       {link("sessions", "Sessions")}
+      {link("metrics", "Metrics")}
       <span className="rv-nav-section">Activities</span>
       {(activities.data?.activities ?? []).map((a) => link(a.id, a.title, a.open))}
       {activities.error && <span className="text-xs rv-error">review API unavailable</span>}
@@ -67,6 +69,8 @@ function Content({ view, arg }: Readonly<{ view: string; arg: string }>) {
       return <AsrReview />;
     case "dreamer":
       return <DreamerStatusView />;
+    case "metrics":
+      return <MetricsView />;
     default:
       return <SessionsList />;
   }
@@ -77,7 +81,7 @@ export function ReviewApp() {
   return (
     <QueryClientProvider client={queryClient}>
       <div className="h-screen d-flex flex-col overflow-hidden rv-root">
-        <header className="px-4 py-3 border-b d-flex justify-between items-center">
+        <header className="px-4 py-3 border-b d-flex justify-between items-center rv-header">
           <h1 className="text-lg font-semibold">
             <span style={{ color: "#76b900", fontWeight: 700, letterSpacing: "0.08em" }}>Nemotron</span> Voice Agent ·
             Review

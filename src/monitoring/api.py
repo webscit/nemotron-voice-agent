@@ -25,8 +25,9 @@ from monitoring import schema
 from monitoring.config import MonitoringConfig
 from monitoring.jobs import JOB_REGISTRY
 from monitoring.jobs.reasr import live_source_name, score_session
-from monitoring.jobs.runner import load_dreamer_config
+from monitoring.jobs.runner import PAUSE_KEY, STATUS_KEY, declared_services, load_dreamer_config
 from monitoring.jobs.wer import error_rates, normalize
+from monitoring.report import DEFAULT_GROUP_BY, metrics_json
 from monitoring.store import ArtifactStore, SessionStore
 
 _ANNOTATOR_RE = re.compile(r"^[\w .@-]{1,64}$")
@@ -45,6 +46,18 @@ class ReferenceBatchIn(BaseModel):
 
     annotator: str
     items: list[ReferenceIn] = Field(min_length=1, max_length=500)
+
+
+class PauseIn(BaseModel):
+    """Pause or resume the dreamer."""
+
+    paused: bool
+
+
+class EnqueueAllIn(BaseModel):
+    """Queue a job kind for every ended session that does not have it yet."""
+
+    kind: str
 
 
 class JobsIn(BaseModel):
@@ -389,15 +402,56 @@ class ReviewService:
         def brief(job):
             return {k: job[k] for k in ("id", "kind", "target", "status", "attempts", "error", "progress")}
 
+        status_row = self.store.get_kv(STATUS_KEY)
+        worker = dict(status_row["value"] or {}) if status_row else None
+        if worker is not None:
+            # Heartbeats come every ~10 s (also mid-job); allow a few missed polls.
+            stale_after = max(3 * float(worker.get("poll_secs") or 10.0), 45.0)
+            worker["alive"] = now - float(worker.get("heartbeat_at") or 0.0) <= stale_after
+        pause_row = self.store.get_kv(PAUSE_KEY)
+        pause = (pause_row["value"] or {}) if pause_row else {}
+        reported = (worker or {}).get("services") or {}
         return {
             "live_sessions": live,
             "idle": live == 0 and (last is None or now - last >= self.dreamer_config["idle_grace_secs"]),
             "last_activity": last,
+            "paused": bool(pause.get("paused")),
+            "paused_at": pause_row["updated_at"] if pause_row and pause.get("paused") else None,
+            "worker": worker,
+            "services": [
+                {"name": name, "state": reported.get(name, "unknown")}
+                for name in declared_services(self.dreamer_config)
+            ],
+            "job_kinds": sorted(JOB_REGISTRY),
             "counts": {kind: dict(v) for kind, v in counts.items()},
             "running": [brief(j) for j in jobs if j["status"] == "running"],
             "failed": [brief(j) for j in jobs if j["status"] == "failed" or (j["error"] and j["status"] != "done")],
             "pending": sum(1 for j in jobs if j["status"] == "pending"),
         }
+
+    def set_paused(self, paused: bool) -> dict[str, Any]:
+        """Pause (the running job stops at its next checkpoint) or resume the dreamer."""
+        self.store.set_kv(PAUSE_KEY, {"paused": paused})
+        return {"paused": paused}
+
+    def list_jobs(self, *, status: str | None, kind: str | None, limit: int, offset: int) -> dict[str, Any]:
+        """Job queue page, newest first."""
+        total, jobs = self.store.list_jobs(status=status, kind=kind, limit=limit, offset=offset)
+        keys = ("id", "kind", "target", "status", "attempts", "error", "progress", "created_at", "started_at")
+        return {"total": total, "jobs": [{k: job[k] for k in (*keys, "finished_at")} for job in jobs]}
+
+    def cancel_job(self, job_id: int) -> bool:
+        """Cancel a pending job."""
+        return self.store.cancel_job(job_id)
+
+    def enqueue_all(self, kind: str) -> int:
+        """Queue ``kind`` for every ended session lacking it (existing runs are kept)."""
+        return sum(self.store.enqueue_job(kind, sid) for sid in self.store.ended_session_ids())
+
+    def metrics(self, *, since_days: float | None, group_by: list[str]) -> dict[str, Any]:
+        """Variant comparison for the metrics charts."""
+        since = time.time() - since_days * 86400 if since_days else None
+        return metrics_json(self.store, since=since, group_by=group_by)
 
     def requeue(self, kind: str, session_ids: list[str]) -> int:
         """Queue ``kind`` from scratch for sessions (the dreamer still waits for idle)."""
@@ -493,10 +547,47 @@ def create_review_router(
     async def dreamer():
         return await run(service.dreamer_status)
 
+    @router.post("/dreamer/pause")
+    async def pause(payload: PauseIn):
+        return await run(service.set_paused, payload.paused)
+
+    def check_kind(kind: str) -> str:
+        if kind not in JOB_REGISTRY:
+            raise HTTPException(status_code=422, detail=f"unknown job kind {kind!r}")
+        return kind
+
+    @router.get("/jobs")
+    async def list_jobs(
+        status: str | None = Query(None, pattern="^(pending|running|done|failed|cancelled)$"),
+        kind: str | None = None,
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        return await run(service.list_jobs, status=status, kind=kind, limit=limit, offset=offset)
+
     @router.post("/jobs")
     async def jobs(payload: JobsIn):
-        if payload.kind not in JOB_REGISTRY:
-            raise HTTPException(status_code=422, detail=f"unknown job kind {payload.kind!r}")
+        check_kind(payload.kind)
         return {"queued": await run(service.requeue, payload.kind, payload.session_ids)}
+
+    @router.post("/jobs/enqueue-all")
+    async def enqueue_all(payload: EnqueueAllIn):
+        return {"queued": await run(service.enqueue_all, check_kind(payload.kind))}
+
+    @router.post("/jobs/{job_id}/cancel")
+    async def cancel(job_id: int):
+        if not await run(service.cancel_job, job_id):
+            raise HTTPException(status_code=409, detail="only pending jobs can be cancelled")
+        return {"cancelled": job_id}
+
+    @router.get("/metrics")
+    async def metrics(
+        since_days: float | None = Query(None, gt=0),
+        group_by: str = Query(DEFAULT_GROUP_BY, max_length=500),
+    ):
+        fields = [f.strip() for f in group_by.split(",") if f.strip()]
+        if not all(re.fullmatch(r"[\w.]{1,64}", f) for f in fields) or len(fields) > 8:
+            raise HTTPException(status_code=422, detail="group_by: up to 8 dotted config fields")
+        return await run(service.metrics, since_days=since_days, group_by=fields)
 
     return router

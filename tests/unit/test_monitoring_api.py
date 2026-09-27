@@ -153,3 +153,56 @@ def test_validation_and_dreamer(env):
     assert client.post("/api/review/jobs", json={"kind": "reasr", "session_ids": ["s1"]}).json() == {"queued": 1}
     status = client.get("/api/review/dreamer").json()
     assert status["live_sessions"] == 0 and status["pending"] == 1
+
+
+def test_dreamer_controls_and_job_queue(env):
+    client, store = env
+    assert client.get("/api/review/dreamer").json()["paused"] is False
+    assert client.post("/api/review/dreamer/pause", json={"paused": True}).json() == {"paused": True}
+    status = client.get("/api/review/dreamer").json()
+    assert status["paused"] is True and status["worker"] is None
+    assert status["services"] == []  # DREAMER config in this test declares no on-demand service
+
+    store.set_kv("dreamer.status", {"state": "paused", "heartbeat_at": time.time(), "poll_secs": 10})
+    worker = client.get("/api/review/dreamer").json()["worker"]
+    assert worker["alive"] is True and worker["state"] == "paused"
+    store.set_kv("dreamer.status", {"state": "idle", "heartbeat_at": time.time() - 3600, "poll_secs": 10})
+    assert client.get("/api/review/dreamer").json()["worker"]["alive"] is False
+
+    assert client.post("/api/review/jobs/enqueue-all", json={"kind": "reasr"}).json() == {"queued": 1}
+    assert client.post("/api/review/jobs/enqueue-all", json={"kind": "reasr"}).json() == {"queued": 0}
+    page = client.get("/api/review/jobs", params={"status": "pending"}).json()
+    assert page["total"] == 1
+    job_id = page["jobs"][0]["id"]
+    assert client.post(f"/api/review/jobs/{job_id}/cancel").json() == {"cancelled": job_id}
+    assert client.post(f"/api/review/jobs/{job_id}/cancel").status_code == 409
+    assert client.get("/api/review/jobs", params={"status": "cancelled"}).json()["total"] == 1
+    # Retry = requeue from scratch.
+    client.post("/api/review/jobs", json={"kind": "reasr", "session_ids": ["s1"]})
+    assert client.get("/api/review/jobs", params={"status": "pending"}).json()["total"] == 1
+
+
+def test_metrics_endpoint(env):
+    client, store = env
+    store.write_batch(
+        [
+            ("metrics", {"session_id": "s1", "turn_idx": 1, "ts": 1.0, "name": "user_bot_latency", "value": 0.8}),
+            ("metrics", {"session_id": "s1", "turn_idx": 2, "ts": 2.0, "name": "user_bot_latency", "value": 1.2}),
+            (
+                "metrics",
+                {"session_id": "s1", "ts": 1.0, "processor": "NvidiaLLMService#0", "name": "ttfb", "value": 0.3},
+            ),
+            (
+                "metrics",
+                {"session_id": "s1", "ts": 1.0, "processor": "NvidiaSTTService#0", "name": "ttfb", "value": 0.1},
+            ),
+        ]
+    )
+    data = client.get("/api/review/metrics", params={"group_by": "language,asr.model"}).json()
+    assert data["totals"]["sessions"] == 1 and data["totals"]["turns"] == 2
+    (variant,) = data["variants"]
+    assert variant["key"] == {"language": "fr-FR", "asr.model": "nemo"} and variant["label"] == "fr-FR · nemo"
+    assert variant["latency"]["n"] == 2 and variant["latency"]["p50"] == pytest.approx(1.0)
+    assert set(variant["ttfb"]) == {"ASR", "LLM"}
+    assert data["sessions"][0]["variant"] == 0 and data["sessions"][0]["latency_p50"] == pytest.approx(1.0)
+    assert client.get("/api/review/metrics", params={"group_by": "bad field!"}).status_code == 422
