@@ -10,7 +10,7 @@ What ASR / LLM / TTS models are available, their VRAM, precision, and known issu
 |-----------|--------|
 | [Configure LLM](how-to/configure-llm.md) | Nemotron LLM models, reasoning on/off, GPU sizing & precision |
 | [Configure ASR](how-to/configure-asr.md) | ASR models, VRAM, hardware support, Domain Adaptation & endpointing |
-| [Configure TTS](how-to/configure-tts.md) | TTS models, VRAM, hardware support, voice selection, pronunciation (IPA), and text filters |
+| [Configure TTS](how-to/configure-tts.md) | TTS models, VRAM, hardware support, voice selection, pronunciation (IPA), text filters, and text normalization |
 
 ## Configuration how-to guides
 

@@ -81,6 +81,10 @@ TTS voices and supported language codes are discovered at runtime by prewarming 
 | `tools.py` | validates client-declared tool schemas into a `ToolsSchema` for the LLM context |
 | `tool_handlers.py` | server-side RTVI forwarding handler for those client-executed tools |
 
+### TTS text normalization
+
+Before synthesis, the pipeline rewrites numbers, currency, percentages, units, dates, times, phone numbers, and emails into spoken words for English and French sessions. Other languages pass through unchanged. The transcript and chat history keep the original text. Set `TTS_TEXT_NORMALIZATION=false` in `.env` to turn it off. For details and the `*/single-gpu` grammar limits, refer to [Configure TTS](../../../docs/how-to/configure-tts.md#text-normalization).
+
 ### Client-executed tools
 
 Tools demonstrate Pipecat's RTVI client-side function calling: the LLM calls a tool as normal, but the *browser* executes it and returns the result. Unlike a fixed server-side schema, the set of tools is declared **by the client at connect time** (Pattern B: dynamic discovery) rather than hardcoded on the server — different client builds can expose different capabilities without any server change.
@@ -158,6 +162,7 @@ Multilingual behavior depends on the ASR model, the LLM, and the selected TTS vo
 | Bot slips in foreign words | Quantized small-model sampling artifacts | Lower the LLM `temperature` in `services.*.yaml`, or use a larger LLM |
 | Session language is unavailable or startup is rejected | The selected locale is not supported by the active ASR, TTS, or built-in LLM | Select a locale shown in Voice Settings. For built-in LLM support, see [Configure LLM](../../../docs/how-to/configure-llm.md#multilingual-session-languages). |
 | TTS uses the wrong voice or language | Selected session language is not supported by the active TTS service | Check the configured TTS service exposes that language code, or pick a supported language |
+| TTS skips or misreads numbers or prices | Pipeline normalization covers only English and French; on `*/single-gpu`, the server grammars also cover only English and French | For other languages, prompt the LLM to write numbers as words. Refer to [Configure TTS](../../../docs/how-to/configure-tts.md#text-normalization) |
 | No voices discovered at startup | TTS prewarm failed | For Cloud, confirm `NVIDIA_API_KEY` in `.env`. For Server, also confirm NGC login and TTS sidecar health with `docker compose ps`. For Single-GPU, confirm that the NeMo-Speech.cpp sidecar is healthy and `models/nemo-speech` contains the downloaded weights. |
 | Bot does not respond to a turn (no transcript) | Nemotron ASR Multilingual can drop a turn in noisy environments | Speak again, reduce background noise, and use a good microphone. See [Configure ASR](../../../docs/how-to/configure-asr.md#choosing-a-multilingual-asr-model) |
 | Weak or awkward replies in some languages (for example Hindi) | Nemotron 3.5 Lightning has weaker conversation quality in a few languages | Use Nemotron 3 Super for better multilingual quality. See [Configure LLM](../../../docs/how-to/configure-llm.md) |

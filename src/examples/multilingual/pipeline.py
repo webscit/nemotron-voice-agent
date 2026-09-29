@@ -67,6 +67,7 @@ from examples.shared.prewarm import (
     resolve_voice_for_language,
     validate_llm_session_language,
 )
+from examples.shared.tts_text_normalizer import LanguageAwareVoiceFormatter
 from monitoring.recorder import SessionRecorder
 from tracing import IS_TRACING_ENABLED
 from utils import (
@@ -352,6 +353,11 @@ async def bot(runner_args: RunnerArguments) -> None:
     if tts_zero_shot_audio_prompt_file:
         tts_kwargs["zero_shot_audio_prompt_file"] = tts_zero_shot_audio_prompt_file
     tts = NvidiaTTSService(**tts_kwargs)
+    # Verbalize numbers, currencies, times, units... for EN/FR before synthesis. The
+    # NeMo-Speech.cpp French TN grammar misses several of them; other languages pass through.
+    tts_text_normalization = parse_env_bool("TTS_TEXT_NORMALIZATION", True)
+    if tts_text_normalization:
+        tts.add_text_transformer(LanguageAwareVoiceFormatter(lambda: tts._settings.language))
 
     logger.info(
         f"TTS: server={tts_server}, ssl={tts_ssl}, voice={tts_voice}, "
@@ -359,7 +365,7 @@ async def bot(runner_args: RunnerArguments) -> None:
         f"synthesis_mode={tts_synthesis_mode or '(pipecat default)'}, "
         f"zero_shot_audio_prompt_file={tts_zero_shot_audio_prompt_file or '(none)'}, "
         f"lang_codes={lang_codes or '(no voices discovered)'}, "
-        f"text_filters=[NemotronSpeechTextFilter]"
+        f"text_filters=[NemotronSpeechTextFilter], text_normalization={tts_text_normalization}"
     )
 
     # --- Context ---
