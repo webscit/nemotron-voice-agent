@@ -54,7 +54,9 @@ _SLOT_CONFIG_KEYS: dict[str, frozenset[str]] = {
         }
     ),
 }
-_SLOT_AGNOSTIC_KEYS: frozenset[str] = frozenset({"pipeline_mode", "prompt_key", "prompt_content", "tool_choice"})
+_SLOT_AGNOSTIC_KEYS: frozenset[str] = frozenset(
+    {"pipeline_mode", "prompt_key", "prompt_content", "tool_choice", "person_id"}
+)
 _active_slots: frozenset[str] | None = None
 _active_slot_order: tuple[str, ...] | None = None
 
@@ -491,6 +493,8 @@ SESSION_CONFIG_KEYS: frozenset[str] = frozenset(
         "tts_model",
         "tts_synthesis_mode",
         "tts_language_code",
+        # Person picked in the live client ("who's talking"), used for memories.
+        "person_id",
     }
 )
 

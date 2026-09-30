@@ -4,14 +4,19 @@
 import { useState } from "react";
 import {
   artifactUrl,
+  useAssignSpeaker,
   useLlmCall,
+  usePeople,
   useRequeueJob,
   useSaveReferences,
   useSessionDetail,
   useSessions,
   type LlmCallBrief,
+  type MemoryRow,
+  type Person,
   type TurnDetail,
 } from "./api";
+import { MemoryStatusBadge } from "./Memories";
 import { AudioClips, ImageStrip, StatusLine, TranscriptTable, WerBadge } from "./components";
 import { formatDate, formatDuration, formatSecs, reviewHref, useAnnotator } from "./utils";
 
@@ -36,6 +41,7 @@ export function SessionsList() {
               <th>Started</th>
               <th>Session</th>
               <th>Lang</th>
+              <th>Person</th>
               <th>Models (ASR · LLM · TTS)</th>
               <th>Turns</th>
               <th>Reviewed</th>
@@ -55,6 +61,7 @@ export function SessionsList() {
                   </td>
                   <td className="rv-mono">{s.id}</td>
                   <td>{s.language ?? "–"}</td>
+                  <td>{s.person?.name ?? "–"}</td>
                   <td className="text-xs">
                     {s.models.asr ?? "?"} · {s.models.llm ?? "?"} · {s.models.tts ?? "?"}
                   </td>
@@ -134,8 +141,70 @@ function ReferenceEditor({ sessionId, turn }: Readonly<{ sessionId: string; turn
   );
 }
 
-function TurnCard({ sessionId, liveSource, turn }: Readonly<{ sessionId: string; liveSource: string; turn: TurnDetail }>) {
+function SpeakerSelect({
+  sessionId,
+  people,
+  value,
+  turnIdx,
+  inherited,
+}: Readonly<{ sessionId: string; people: Person[]; value: string | null; turnIdx?: number; inherited?: string }>) {
+  const [annotator] = useAnnotator();
+  const assign = useAssignSpeaker();
+  const isTurn = turnIdx !== undefined;
+  return (
+    <label className="text-xs text-muted rv-speaker" title={annotator ? undefined : "Set your annotator name first"}>
+      {isTurn ? "Speaker" : "Who's talking"}
+      <select
+        className="input rv-select"
+        value={value ?? ""}
+        disabled={!annotator || assign.isPending}
+        onChange={(e) =>
+          assign.mutate({ sessionId, annotator, personId: e.target.value || null, turnIdx })
+        }
+      >
+        <option value="">{isTurn ? `same as session${inherited ? ` (${inherited})` : ""}` : "unknown"}</option>
+        {people
+          .filter((p) => !p.archived || p.id === value)
+          .map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+      </select>
+      {assign.error && <span className="rv-error"> {assign.error.message}</span>}
+    </label>
+  );
+}
+
+function MemoryList({ title, memories }: Readonly<{ title: string; memories: MemoryRow[] }>) {
+  if (!memories.length) return null;
+  return (
+    <div className="rv-side">
+      <span className="rv-label">{title}</span>
+      {memories.map((m) => (
+        <p key={m.id} className="text-sm">
+          <MemoryStatusBadge memory={m} /> {m.text}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function TurnCard({
+  sessionId,
+  liveSource,
+  turn,
+  people,
+  sessionSpeaker,
+}: Readonly<{
+  sessionId: string;
+  liveSource: string;
+  turn: TurnDetail;
+  people: Person[];
+  sessionSpeaker: string | null;
+}>) {
   const reference = turn.human_reference?.text;
+  const inherited = people.find((p) => p.id === sessionSpeaker)?.name;
   const liveWer = turn.wer[liveSource];
   return (
     <div className="card rv-turn">
@@ -151,6 +220,15 @@ function TurnCard({ sessionId, liveSource, turn }: Readonly<{ sessionId: string;
       {(turn.user_text || turn.audio.user.length > 0) && (
         <div className="rv-side rv-side-user">
           <span className="rv-label">User</span>
+          {turn.user_text && (
+            <SpeakerSelect
+              sessionId={sessionId}
+              people={people}
+              value={turn.speaker ?? null}
+              turnIdx={turn.idx}
+              inherited={inherited}
+            />
+          )}
           <AudioClips clips={turn.audio.user} />
           <TranscriptTable transcripts={turn.transcripts} referenceText={reference} />
           {reference && (
@@ -178,8 +256,10 @@ function TurnCard({ sessionId, liveSource, turn }: Readonly<{ sessionId: string;
 
 export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>) {
   const detail = useSessionDetail(sessionId);
+  const people = usePeople(true);
   const requeue = useRequeueJob();
   const data = detail.data;
+  const peopleList = people.data?.people ?? [];
   return (
     <section className="rv-page">
       <a className="text-sm" href={reviewHref("sessions")}>
@@ -208,8 +288,22 @@ export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>
               >
                 Re-run reasr
               </button>
+              <button
+                className="btn-secondary"
+                disabled={requeue.isPending}
+                onClick={() => requeue.mutate({ kind: "dream", session_ids: [sessionId] })}
+                title="Extracts memories again when the machine is idle (unreviewed memories from this session are replaced)"
+              >
+                Re-run dream
+              </button>
             </div>
           </div>
+          <div className="rv-filters">
+            <SpeakerSelect sessionId={sessionId} people={peopleList} value={data.speakers.session} />
+            <span className="text-xs text-muted">Changing who is talking re-runs memory extraction (dream).</span>
+          </div>
+          <MemoryList title="Memories used in this session" memories={data.memories_used.used} />
+          <MemoryList title="Memories extracted from this session" memories={data.memories_used.extracted} />
           {data.jobs.length > 0 && (
             <p className="text-xs text-muted">
               Jobs: {data.jobs.map((j) => `${j.kind} ${j.status}${j.error ? ` (${j.error})` : ""}`).join(" · ")}
@@ -222,7 +316,14 @@ export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>
             </div>
           )}
           {data.turns.map((turn) => (
-            <TurnCard key={turn.idx} sessionId={sessionId} liveSource={data.live_source} turn={turn} />
+            <TurnCard
+              key={turn.idx}
+              sessionId={sessionId}
+              liveSource={data.live_source}
+              turn={turn}
+              people={peopleList}
+              sessionSpeaker={data.speakers.session}
+            />
           ))}
         </>
       )}

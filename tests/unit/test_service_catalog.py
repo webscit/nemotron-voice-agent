@@ -421,7 +421,7 @@ llm:
             keys = examples_registry.agent_prompt_keys("multilingual-assistant")
         self.assertEqual(
             keys,
-            frozenset({"fixed_session_language_addon"}),
+            frozenset({"fixed_session_language_addon", "person_memory_addon"}),
         )
 
     def test_multilingual_default_session_language_is_registry_declared(self) -> None:

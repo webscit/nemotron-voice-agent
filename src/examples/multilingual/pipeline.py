@@ -50,6 +50,7 @@ from examples.multilingual.tool_handlers import ClientToolResultBridge, build_cl
 from examples.multilingual.tools import build_client_tools
 from examples.shared.audio_recorder import create_audio_recorder
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
+from examples.shared.person_memory import PERSON_MEMORY_ADDON_KEY, load_person_context, record_person_session
 from examples.shared.pipeline_utils import (
     apply_pinned_prompt_summary,
     build_context_messages,
@@ -376,6 +377,13 @@ async def bot(runner_args: RunnerArguments) -> None:
         FIXED_SESSION_LANGUAGE_ADDON_KEY,
         {"fixed_language_name": describe_language(fixed_session_language)},
     )
+    # "Who's talking" from the client: pin what the agent remembers about them.
+    person_context = await load_person_context(body.get("person_id"))
+    if person_context:
+        base_system_content = render_prompt_addon(
+            base_system_content, prompt_catalog, PERSON_MEMORY_ADDON_KEY, person_context.prompt_replacements()
+        )
+        logger.info(f"Person: {person_context.person['name']} ({len(person_context.memories)} memories)")
 
     client_tools_schema, client_tool_names = build_client_tools(body.get("tools"))
 
@@ -425,6 +433,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             "synthesis_mode": tts_synthesis_mode,
             "language": tts_settings_kwargs.get("language"),
         },
+        person=person_context.snapshot if person_context else None,
     )
     recorder = SessionRecorder.create(
         session_id=body.get("session_id") or None,
@@ -592,6 +601,7 @@ async def bot(runner_args: RunnerArguments) -> None:
     await runner.add_workers(task)
     if recorder:
         await recorder.start()
+        await record_person_session(recorder.session_id, person_context)
     end_reason = "error"
     try:
         await runner.run()

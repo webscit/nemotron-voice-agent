@@ -24,7 +24,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 metadata = MetaData()
 
@@ -184,4 +184,80 @@ kv = Table(
     Column("key", String(128), primary_key=True),
     Column("value", JSON),
     Column("updated_at", Float, nullable=False),
+)
+
+
+# ----------------------------------------------------------------- people
+# People the agent talks to. Until voice identification exists, a session is
+# attributed to the person picked in the live client, and review can reassign
+# whole sessions or single turns (the per-turn rows are voice-ID enrollment data).
+people = Table(
+    "people",
+    metadata,
+    Column("id", String(32), primary_key=True),
+    Column("name", String(128), nullable=False),
+    Column("created_at", Float, nullable=False),
+    Column("archived", Boolean, nullable=False, default=False),
+)
+
+speaker_assignments = Table(
+    "speaker_assignments",
+    metadata,
+    Column("session_id", String(64), primary_key=True),
+    # -1 = the whole session; a turn row overrides it for that turn.
+    Column("turn_idx", Integer, primary_key=True),
+    Column("person_id", String(32), nullable=False),
+    # ``live:picker`` or ``human:<name>``.
+    Column("source", String(256), nullable=False),
+    Column("created_at", Float, nullable=False),
+    Index("ix_speaker_person", "person_id"),
+)
+
+# Facts about a person extracted by the ``dream`` job (or written by a reviewer).
+# Rows are never deleted: forgetting and superseding are status changes.
+memories = Table(
+    "memories",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("person_id", String(32), nullable=False),
+    Column("text", Text, nullable=False),
+    # identity | preference | relationship | routine | event | health | other
+    Column("category", String(32)),
+    Column("language", String(32)),
+    Column("confidence", Float),
+    # proposed (waiting for review) | active (used live) | forgotten | superseded
+    Column("status", String(16), nullable=False),
+    # Model name for extracted memories, ``human:<name>`` for corrections.
+    Column("source", String(256), nullable=False),
+    Column("source_version", String(256)),
+    # Memory this one replaces once approved or used.
+    Column("supersedes", Integer),
+    Column("superseded_by", Integer),
+    Column("reviewed_by", String(256)),
+    Column("reviewed_at", Float),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Index("ix_memories_person", "person_id", "status"),
+)
+
+memory_evidence = Table(
+    "memory_evidence",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("memory_id", Integer, nullable=False),
+    Column("session_id", String(64), nullable=False),
+    Column("turn_idx", Integer),
+    Column("quote", Text),
+    Index("ix_memory_evidence_memory", "memory_id"),
+    Index("ix_memory_evidence_session", "session_id"),
+)
+
+# Memories injected into a live session prompt.
+memory_uses = Table(
+    "memory_uses",
+    metadata,
+    Column("memory_id", Integer, primary_key=True),
+    Column("session_id", String(64), primary_key=True),
+    Column("ts", Float, nullable=False),
+    Index("ix_memory_uses_session", "session_id"),
 )

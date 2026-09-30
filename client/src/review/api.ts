@@ -19,6 +19,7 @@ export interface SessionSummary {
   ended_at: number | null;
   end_reason: string | null;
   language: string | null;
+  person?: { id: string; name: string } | null;
   models: SessionModels;
   user_turns: number;
   audio_turns: number;
@@ -80,6 +81,8 @@ export interface TurnDetail {
   human_reference: HumanReference | null;
   wer: Record<string, WerValue>;
   user_bot_latency: number | null;
+  /** Explicit per-turn speaker override (the session speaker applies otherwise). */
+  speaker?: string | null;
 }
 
 export interface JobBrief {
@@ -98,6 +101,55 @@ export interface SessionDetail {
   turns: TurnDetail[];
   wer_summary: Record<string, { wer: number | null; turns: number; reference_sources: string[] }>;
   jobs: JobBrief[];
+  speakers: { session: string | null };
+  memories_used: { used: MemoryRow[]; extracted: MemoryRow[] };
+}
+
+// ---- People & memories ----
+
+export interface Person {
+  id: string;
+  name: string;
+  created_at: number;
+  archived: boolean;
+  sessions?: number;
+  memories?: Partial<Record<MemoryStatus, number>>;
+}
+
+export type MemoryStatus = "proposed" | "active" | "forgotten" | "superseded";
+export type MemoryFilter = "open" | "usable" | "all" | MemoryStatus;
+
+export interface MemoryRow {
+  id: number;
+  person_id: string;
+  text: string;
+  category: string | null;
+  language: string | null;
+  confidence: number | null;
+  status: MemoryStatus;
+  source: string;
+  supersedes: number | null;
+  superseded_by: number | null;
+  reviewed_by: string | null;
+  reviewed_at: number | null;
+  created_at: number;
+}
+
+export interface MemoryEvidence {
+  session_id: string;
+  turn_idx: number | null;
+  quote: string | null;
+  user_text?: string | null;
+  bot_text?: string | null;
+  audio: { key: string; duration_secs: number | null }[];
+}
+
+export interface MemoryDetail extends MemoryRow {
+  person_name: string | null;
+  supersedes_text: string | null;
+  evidence: MemoryEvidence[];
+  used_in_sessions: number;
+  used_in_replies: number;
 }
 
 export interface AsrQueueItem {
@@ -224,9 +276,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-function postJson<T>(path: string, body: unknown): Promise<T> {
+function postJson<T>(path: string, body: unknown, method = "POST"): Promise<T> {
   return request<T>(path, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -319,6 +371,25 @@ export function useMetrics(sinceDays: number | null, groupBy: string[]) {
   });
 }
 
+export function usePeople(includeArchived = false) {
+  return useQuery({
+    queryKey: ["review", "people", includeArchived],
+    queryFn: () => request<{ people: Person[] }>(`/people${includeArchived ? "?include_archived=true" : ""}`),
+    ...live,
+  });
+}
+
+export function useMemories(status: MemoryFilter, personId: string, page: number, pageSize = 20) {
+  const params = new URLSearchParams({ status, limit: String(pageSize), offset: String(page * pageSize) });
+  if (personId) params.set("person_id", personId);
+  return useQuery({
+    queryKey: ["review", "memories", status, personId, page, pageSize],
+    queryFn: () => request<{ total: number; memories: MemoryDetail[] }>(`/memories?${params}`),
+    ...live,
+    placeholderData: (previous) => previous,
+  });
+}
+
 // ---- Mutations ----
 
 export function useSaveReferences() {
@@ -357,4 +428,42 @@ export function useCancelJob() {
 
 export function useEnqueueAll() {
   return useReviewMutation((kind: string) => postJson<{ queued: number }>("/jobs/enqueue-all", { kind }));
+}
+
+export function useCreatePerson() {
+  return useReviewMutation((name: string) => postJson<Person>("/people", { name }));
+}
+
+export function useUpdatePerson() {
+  return useReviewMutation((input: { id: string; name?: string; archived?: boolean }) =>
+    postJson<Person>(`/people/${encodeURIComponent(input.id)}`, { name: input.name, archived: input.archived }, "PATCH")
+  );
+}
+
+export function useAssignSpeaker() {
+  return useReviewMutation(
+    (input: { sessionId: string; annotator: string; personId: string | null; turnIdx?: number }) =>
+      postJson<{ session: string | null; turns: Record<string, string> }>(
+        `/sessions/${encodeURIComponent(input.sessionId)}/speaker`,
+        { annotator: input.annotator, person_id: input.personId, turn_idx: input.turnIdx ?? null }
+      )
+  );
+}
+
+export function useReviewMemory() {
+  return useReviewMutation(
+    (input: {
+      id: number;
+      annotator: string;
+      action: "approve" | "correct" | "forget";
+      text?: string;
+      personId?: string;
+    }) =>
+      postJson<MemoryDetail>(`/memories/${input.id}/review`, {
+        annotator: input.annotator,
+        action: input.action,
+        text: input.text,
+        person_id: input.personId,
+      })
+  );
 }

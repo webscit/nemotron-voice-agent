@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from monitoring import schema
+from monitoring import memories, schema
 from monitoring.config import MonitoringConfig
 from monitoring.jobs import JOB_REGISTRY
 from monitoring.jobs.reasr import live_source_name, score_session
@@ -67,6 +67,36 @@ class JobsIn(BaseModel):
     session_ids: list[str] = Field(min_length=1, max_length=1000)
 
 
+class PersonIn(BaseModel):
+    """Create a person."""
+
+    name: str = Field(min_length=1, max_length=128)
+
+
+class PersonPatchIn(BaseModel):
+    """Rename or (un)archive a person."""
+
+    name: str | None = Field(None, min_length=1, max_length=128)
+    archived: bool | None = None
+
+
+class SpeakerIn(BaseModel):
+    """Attribute a session (``turn_idx`` omitted) or one turn to a person (``None`` clears it)."""
+
+    annotator: str
+    person_id: str | None = None
+    turn_idx: int | None = Field(None, ge=0)
+
+
+class MemoryReviewIn(BaseModel):
+    """Review one memory: approve, correct (new text and/or person) or forget."""
+
+    annotator: str
+    action: str = Field(pattern="^(approve|correct|forget)$")
+    text: str | None = Field(None, max_length=500)
+    person_id: str | None = None
+
+
 def _turn_target(session_id: str, turn_idx: int) -> str:
     return f"{session_id}:{turn_idx}"
 
@@ -85,6 +115,7 @@ def _session_summary(row: dict[str, Any]) -> dict[str, Any]:
         "ended_at": row["ended_at"],
         "end_reason": row["end_reason"],
         "language": config.get("language"),
+        "person": config.get("person"),
         "models": {
             "asr": (config.get("asr") or {}).get("model"),
             "llm": (config.get("llm") or {}).get("model"),
@@ -156,11 +187,22 @@ class ReviewService:
         jobs: dict[str, dict[str, str]] = defaultdict(dict)
         for row in self._rows(select(j.c.target, j.c.kind, j.c.status).where(j.c.target.in_(ids))):
             jobs[row["target"]][row["kind"]] = row["status"]
+        # Current attribution (review can reassign the person picked live).
+        sa, p = schema.speaker_assignments, schema.people
+        persons = {
+            row["session_id"]: {"id": row["id"], "name": row["name"]}
+            for row in self._rows(
+                select(sa.c.session_id, p.c.id, p.c.name)
+                .join(p, p.c.id == sa.c.person_id)
+                .where(sa.c.session_id.in_(ids), sa.c.turn_idx == memories.SESSION_TURN)
+            )
+        }
         return {
             "total": total,
             "sessions": [
                 {
                     **_session_summary(row),
+                    "person": persons.get(row["id"]),
                     "user_turns": user_turns.get(row["id"], 0),
                     "audio_turns": audio_turns.get(row["id"], 0),
                     "reviewed_turns": reviewed.get(row["id"], 0),
@@ -264,8 +306,13 @@ class ReviewService:
                 }
             )
         jobs = [job for job in self.store.jobs() if job["target"] == session_id]
+        speakers = memories.speakers_for(self.store, session_id)
+        for turn_row in out_turns:
+            turn_row["speaker"] = speakers["turns"].get(turn_row["idx"])
         return {
             "session": {**_session_summary(session), "config": session.get("config")},
+            "speakers": {"session": speakers["session"]},
+            "memories_used": self._session_memories(session_id),
             "live_source": live_source,
             "reference_source": self._reference_name,
             "conversation_audio": conversation_audio,
@@ -273,6 +320,15 @@ class ReviewService:
             "wer_summary": wer_summary,
             "jobs": [{k: job[k] for k in ("kind", "status", "error", "attempts", "finished_at")} for job in jobs],
         }
+
+    def _session_memories(self, session_id: str) -> dict[str, Any]:
+        """Memories injected in this session and those extracted from it."""
+        u, e, m = schema.memory_uses, schema.memory_evidence, schema.memories
+        used = self._rows(select(m).join(u, u.c.memory_id == m.c.id).where(u.c.session_id == session_id))
+        extracted = self._rows(
+            select(m).where(m.c.id.in_(select(e.c.memory_id).where(e.c.session_id == session_id))).order_by(m.c.id)
+        )
+        return {"used": used, "extracted": extracted}
 
     def llm_call(self, session_id: str, call_id: int) -> dict[str, Any]:
         """Full stored LLM input/output of one call."""
@@ -469,8 +525,64 @@ class ReviewService:
                 "job": "reasr",
                 "description": "Set the human reference transcript of user turns; rescored instantly.",
                 "open": queue["open"],
-            }
+            },
+            {
+                "id": "memories",
+                "title": "Memories",
+                "job": "dream",
+                "description": "Audit what the agent remembers about people: approve, correct or forget.",
+                "open": memories.open_memory_count(self.store),
+            },
         ]
+
+    # --------------------------------------------------------------- people
+    def people(self, *, include_archived: bool) -> list[dict[str, Any]]:
+        """People with session and memory counts."""
+        return memories.person_summaries(self.store, include_archived=include_archived)
+
+    def create_person(self, name: str) -> dict[str, Any]:
+        """Add a person."""
+        return memories.create_person(self.store, name)
+
+    def update_person(self, person_id: str, *, name: str | None, archived: bool | None) -> dict[str, Any]:
+        """Rename or (un)archive a person."""
+        return memories.update_person(self.store, person_id, name=name, archived=archived)
+
+    def assign_speaker(self, session_id: str, annotator: str, person_id: str | None, turn_idx: int | None) -> dict:
+        """Attribute a session or turn, then re-run memory extraction for the session."""
+        if self.store.get_session(session_id) is None:
+            raise KeyError(session_id)
+        if person_id and memories.get_person(self.store, person_id) is None:
+            raise ValueError("unknown person")
+        memories.assign_speaker(
+            self.store,
+            session_id,
+            person_id,
+            source=f"human:{annotator}",
+            turn_idx=memories.SESSION_TURN if turn_idx is None else turn_idx,
+        )
+        self.store.reset_job("dream", session_id)
+        return memories.speakers_for(self.store, session_id)
+
+    def list_memories(self, *, person_id: str | None, status: str, limit: int, offset: int) -> dict[str, Any]:
+        """Memories page with evidence and usage."""
+        return memories.list_memories(self.store, person_id=person_id, status=status, limit=limit, offset=offset)
+
+    def review_memory(self, memory_id: int, annotator: str, payload: MemoryReviewIn) -> dict[str, Any]:
+        """Approve, correct or forget a memory."""
+        if payload.person_id and memories.get_person(self.store, payload.person_id) is None:
+            raise ValueError("unknown person")
+        if payload.action == "correct" and not (payload.text or "").strip() and not payload.person_id:
+            raise ValueError("correct needs a new text or person")
+        row = memories.review_memory(
+            self.store,
+            memory_id,
+            payload.action,
+            reviewer=annotator,
+            text=payload.text,
+            person_id=payload.person_id,
+        )
+        return memories.attach_details(self.store, [row])[0]
 
 
 def create_review_router(
@@ -579,6 +691,50 @@ def create_review_router(
         if not await run(service.cancel_job, job_id):
             raise HTTPException(status_code=409, detail="only pending jobs can be cancelled")
         return {"cancelled": job_id}
+
+    @router.get("/people")
+    async def people(include_archived: bool = False):
+        return {"people": await run(service.people, include_archived=include_archived)}
+
+    @router.post("/people")
+    async def create_person(payload: PersonIn):
+        return await run(service.create_person, payload.name)
+
+    @router.patch("/people/{person_id}")
+    async def update_person(person_id: str, payload: PersonPatchIn):
+        try:
+            return await run(service.update_person, person_id, name=payload.name, archived=payload.archived)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="person not found") from None
+
+    @router.post("/sessions/{session_id}/speaker")
+    async def assign_speaker(session_id: str, payload: SpeakerIn):
+        annotator = check_annotator(payload.annotator)
+        try:
+            return await run(service.assign_speaker, session_id, annotator, payload.person_id, payload.turn_idx)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="session not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @router.get("/memories")
+    async def list_memories(
+        person_id: str | None = None,
+        status: str = Query("open", pattern="^(open|usable|all|proposed|active|forgotten|superseded)$"),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        return await run(service.list_memories, person_id=person_id, status=status, limit=limit, offset=offset)
+
+    @router.post("/memories/{memory_id}/review")
+    async def review_memory(memory_id: int, payload: MemoryReviewIn):
+        annotator = check_annotator(payload.annotator)
+        try:
+            return await run(service.review_memory, memory_id, annotator, payload)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="memory not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @router.get("/metrics")
     async def metrics(

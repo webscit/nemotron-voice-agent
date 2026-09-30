@@ -116,6 +116,10 @@ If a client-executed tool "does nothing," check two things: that the client actu
 
 A non-UI client can likewise set the system prompt directly by sending `prompt_content` in `request_data` (the same field the UI uses for a custom, non-catalog prompt; e.g. `{"prompt_content": "You are a pirate. Always say Arr."}`). Omit it to keep the catalog default (`multilingual_voice_assistant`), or send `prompt_key` to select a different catalog entry by name instead.
 
+### Memories about the person talking
+
+When session recording is enabled (`MONITORING_ENABLED=true`), the client header shows a **Who's talking** menu. The selected person id is sent as `person_id` in the session config. The pipeline then renders the `person_memory_addon` prompt block with the person's name and up to 30 of their `active` memories. After the session, the `dream` job of the dreamer extracts new memories, which you review in the web UI. For setup, review, and privacy details, refer to [Remember people between conversations](../../../docs/how-to/enable-conversation-recording.md#remember-people-between-conversations).
+
 ### Switching the multilingual ASR model
 
 **Parakeet 1.1B RNNT Multilingual** offers stronger multilingual recognition quality at higher latency (see [Model Selection Notes](#model-selection-notes)). To run it instead of the default Nemotron ASR Streaming Multilingual on-prem:
@@ -167,6 +171,7 @@ Multilingual behavior depends on the ASR model, the LLM, and the selected TTS vo
 | Bot does not respond to a turn (no transcript) | Nemotron ASR Multilingual can drop a turn in noisy environments | Speak again, reduce background noise, and use a good microphone. See [Configure ASR](../../../docs/how-to/configure-asr.md#choosing-a-multilingual-asr-model) |
 | Weak or awkward replies in some languages (for example Hindi) | Nemotron 3.5 Lightning has weaker conversation quality in a few languages | Use Nemotron 3 Super for better multilingual quality. See [Configure LLM](../../../docs/how-to/configure-llm.md) |
 | Port conflict on the ASR sidecar | Parakeet and Nemotron streaming both bind `50152` | Run only one local ASR. When opting into Parakeet, scale the Nemotron sidecar off (`--scale nemotron-asr-streaming-multilingual=0`) |
+| The bot does not know who is talking or what it remembers | Monitoring is off, no person is selected, the person is archived, or no memory is `active` yet | Set `MONITORING_ENABLED=true`, pick a person in **Who's talking** before connecting, and approve their `proposed` memories in the review UI. The `dream` job runs only after the session ends and while no session is live |
 | Random ASR text while silent | Parakeet RNNT noise sensitivity | Expected with the Parakeet opt-in. The default Nemotron ASR is less prone to this. Otherwise reduce room noise and use a good mic |
 
 For ASR, LLM, and TTS model details and general failure modes, see [Configure ASR](../../../docs/how-to/configure-asr.md), [Configure TTS](../../../docs/how-to/configure-tts.md), [Configure LLM](../../../docs/how-to/configure-llm.md), and the [Troubleshooting guide](../../../docs/06-troubleshooting.md).

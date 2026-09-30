@@ -7,7 +7,9 @@ import { queryClient } from "../api";
 import { useActivities } from "./api";
 import { AsrReview } from "./AsrReview";
 import { DreamerStatusView } from "./Dreamer";
+import { MemoriesView } from "./Memories";
 import { MetricsView } from "./Metrics";
+import { PeopleView } from "./People";
 import { SessionDetailView, SessionsList } from "./Sessions";
 import { ANNOTATOR_PATTERN, reviewHref, reviewRoute, useAnnotator, useHash } from "./utils";
 import "./review.scss";
@@ -51,6 +53,7 @@ function Nav({ view }: Readonly<{ view: string }>) {
     <nav className="rv-nav">
       <span className="rv-nav-section">Browse</span>
       {link("sessions", "Sessions")}
+      {link("people", "People")}
       {link("metrics", "Metrics")}
       <span className="rv-nav-section">Activities</span>
       {(activities.data?.activities ?? []).map((a) => link(a.id, a.title, a.open))}
@@ -67,6 +70,10 @@ function Content({ view, arg }: Readonly<{ view: string; arg: string }>) {
       return <SessionDetailView sessionId={arg} />;
     case "asr":
       return <AsrReview />;
+    case "memories":
+      return <MemoriesView />;
+    case "people":
+      return <PeopleView key={arg} personId={arg} />;
     case "dreamer":
       return <DreamerStatusView />;
     case "metrics":

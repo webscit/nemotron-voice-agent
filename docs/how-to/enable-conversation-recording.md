@@ -4,7 +4,7 @@ Session recording stores every conversation of the multilingual assistant: its
 timeline, per-service metrics, transcripts, the exact LLM inputs (including
 images), and audio. You can then compare pipeline variants, and a background
 runner (the *dreamer*) post-processes past sessions while nobody is talking to
-the agent.
+the agent, for example to extract memories about the people it talks to.
 
 Recording has two parts, a hot path and a cold path:
 
@@ -54,6 +54,11 @@ to these rows.
 | `media` | Audio clips, images and video, deduplicated by SHA-256. `source` is `context`, `tool:<name>`, `user_image` or `camera:<track>`. |
 | `annotations` | Job outputs and human labels: `(target, source, kind, value)` |
 | `jobs` | Post-processing queue with checkpointed `progress` |
+| `people` | People the agent talks to: name and an `archived` flag |
+| `speaker_assignments` | Who spoke: one row for the whole session (`turn_idx=-1`) or per-turn overrides. `source` is `live:picker` or `human:<name>`. |
+| `memories` | Facts about a person: text, category, confidence, `status` (`proposed`, `active`, `forgotten` or `superseded`), source, and review fields. Rows are never deleted. |
+| `memory_evidence` | The session, turn and quote that support each memory |
+| `memory_uses` | Which memories were injected into which live session |
 
 Images are never stored inline. Any `data:` image found in the LLM context or in a
 tool result is replaced by `{"type": "media_ref", "sha256": …}`, and the file is
@@ -97,7 +102,18 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   live WER. Opening a session shows each turn with:
   - the user audio, every transcript diffed against the reference, and the human reference;
   - images, and the LLM calls (the full stored input on click);
-  - the assistant reply, plus the whole-call stereo recording.
+  - the assistant reply, plus the whole-call stereo recording;
+  - a speaker selector for the whole session and for each turn. Changing who
+    spoke re-queues the `dream` job for that session.
+- **People.** Create, rename, and archive the people the agent talks to. Each
+  person shows their session and memory counts.
+- **Memories.** A queue of memories that nobody has reviewed yet. Each memory
+  shows its evidence turns (audio and quote), its confidence, and how often it
+  was used ("used in N sessions / N replies"). You can:
+  - **approve** it, so that it becomes `active`;
+  - **correct** its text or reassign it to another person. This creates a
+    `human:<name>` memory that supersedes the original;
+  - **forget** it, so that it is never used again.
 - **ASR reference.** Every recorded user turn, with the ones where the live
   ASR and the reference model (Voxtral) disagree first.
   - Listen, then take the live (`1`) or reference (`2`) text, or edit it (`e`),
@@ -140,7 +156,7 @@ docker compose exec dreamer uv run python -m monitoring.jobs status
 How the runner behaves:
 
 - **Scheduling.** Every ended session gets the jobs listed in
-  `auto_enqueue`. A job runs only when no session has a recent heartbeat and
+  `auto_enqueue` (default `[reasr, dream]`). A job runs only when no session has a recent heartbeat and
   the last activity is older than `idle_grace_secs`.
 - **On-demand models.** A job can require a compose service from the
   `dreamer-models` profile, for example `dreamer-asr-en`. The runner starts it
@@ -190,6 +206,34 @@ docker compose exec dreamer uv run python -m monitoring.transcripts_csv import /
 docker compose exec dreamer uv run python -m monitoring.jobs enqueue reasr <session_id> ...
 ```
 
+### `dream`: extract memories about people
+
+For each ended session attributed to a person, `dream` extracts durable facts
+about that person, such as their name, preferences, relationships, routines,
+events, and health information they shared. The job works as follows:
+
+- **Skipped sessions.** A session without an attributed person is marked done
+  with `skipped` progress. Attribute it on the session page to run the job again.
+- **Transcript.** For each user turn, the job uses the human reference, then
+  the `reasr` reference model transcript, then the live ASR text.
+- **LLM.** By default, the job calls the session's own LLM (the `base_url` and
+  `model` stored in the session config), for example the always-on vLLM of a
+  `*/single-gpu` recipe. Set `dream.llm` to use another OpenAI-compatible
+  endpoint, or `dream.service` to start an on-demand `dreamer-models`
+  container.
+- **Status.** A memory with a confidence at or above `auto_use_threshold`
+  (default `0.8`) becomes `active` and is used in live prompts right away. You
+  review it afterwards. A memory below the threshold stays `proposed` until you
+  approve it. A memory that would replace a human-reviewed memory is always
+  `proposed`.
+- **Re-runs.** The job never changes a reviewed memory. Before extracting
+  again, it supersedes the unreviewed memories whose only evidence is that
+  session.
+
+The `dream` section of
+[`src/monitoring/jobs/dreamer.yaml`](../../src/monitoring/jobs/dreamer.yaml)
+also sets `reasoning` and `temperature`.
+
 ### Add a job
 
 ```python
@@ -215,10 +259,36 @@ Import the module in `src/monitoring/jobs/__init__.py`, then add its `kind` to
 `auto_enqueue`. Planned jobs follow the same pattern:
 
 - `safety`: kid-safety policy checks on text and images;
-- `dream`: long-term memory consolidation;
 - `rl_export`: JSONL with implicit rewards such as interruptions, rephrasing,
   tool success and latency;
 - `revlm`: replay of `llm_calls` against another model.
+
+## Remember people between conversations
+
+The multilingual assistant can remember facts about the people who talk to it.
+This feature requires `MONITORING_ENABLED=true`. Voice identification is not
+available yet, so you attribute sessions manually:
+
+1. Create people on the **People** page of the review UI.
+2. Before you connect, pick the person in the **Who's talking** menu in the
+   header of the live client. The browser remembers your choice and sends it
+   as `person_id` in the session config.
+3. At session start, the system prompt names the person and lists up to 30 of
+   their `active` memories, most confident first. The prompt block is
+   `person_memory_addon` in
+   [`src/examples/multilingual/prompts.yaml`](../../src/examples/multilingual/prompts.yaml).
+   The session is attributed to the person (source `live:picker`), and the
+   memories used are logged in `memory_uses`.
+4. After the session ends, the dreamer runs `dream` to extract new memories.
+   Review them in the **Memories** activity.
+
+An unknown or archived person, or a database error, never blocks a session.
+The session then starts without memories.
+
+Memories can contain personal and health information. They stay in the local
+monitoring database. The `dream` job sends the session transcript to the LLM it
+calls. With a cloud LLM, either as the session LLM or through `dream.llm`, the
+transcript leaves your machine.
 
 ## Remote storage later
 

@@ -299,6 +299,22 @@
   margin-left: var(--space-2);
 }
 
+.rv-memory-text {
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.rv-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rv-speaker {
+  display: inline-flex;
+  align-items: center;
+}
+
 .rv-mono {
   font-family: var(--font-mono);
 }

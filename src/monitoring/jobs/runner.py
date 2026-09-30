@@ -46,7 +46,7 @@ _DEFAULTS: dict[str, Any] = {
     "live_stale_secs": 60.0,
     "orphan_after_secs": 120.0,
     "max_attempts": 3,
-    "auto_enqueue": ["reasr"],
+    "auto_enqueue": ["reasr", "dream"],
     "compose_project": None,
 }
 
@@ -54,7 +54,7 @@ _DEFAULTS: dict[str, Any] = {
 def declared_services(config: dict[str, Any]) -> list[str]:
     """On-demand compose services referenced by the job configuration."""
     reasr = config.get("reasr") or {}
-    endpoints = [reasr.get("reference") or {}, *(reasr.get("candidates") or [])]
+    endpoints = [reasr.get("reference") or {}, *(reasr.get("candidates") or []), config.get("dream") or {}]
     return sorted({e["service"] for e in endpoints if e.get("service")})
 
 

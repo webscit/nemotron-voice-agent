@@ -11,7 +11,7 @@ live_stale_secs: 60
 orphan_after_secs: 120
 max_attempts: 3
 # Jobs queued automatically for every ended session.
-auto_enqueue: [reasr]
+auto_enqueue: [reasr, dream]
 # Compose project name used to find on-demand containers (default: any project).
 compose_project: null
 
@@ -40,3 +40,21 @@ reasr:
       server: dreamer-asr-en:50051
       service: dreamer-asr-en
       languages: [en]
+
+dream:
+  # Extract long-term memories about the people attributed to a session.
+  # Memories at or above this confidence are used in live prompts right away and
+  # reviewed afterwards; the others wait for approval in the review UI.
+  auto_use_threshold: 0.8
+  # Let the model reason before answering (slower, better extraction).
+  reasoning: true
+  temperature: 0.2
+  # Shared by the reasoning trace and the JSON answer.
+  max_tokens: 8192
+  # By default the job calls the session's own LLM (its base_url/model/extra from
+  # the session config), e.g. the always-on vLLM of a single-GPU recipe. Override:
+  #   llm:
+  #     base_url: https://integrate.api.nvidia.com/v1
+  #     model: nvidia/nemotron-3.5-lightning-30b-a3b
+  # A compose service started only while idle (profile `dreamer-models`):
+  #   service: dreamer-llm
