@@ -55,7 +55,8 @@ to these rows.
 | `annotations` | Job outputs and human labels: `(target, source, kind, value)` |
 | `jobs` | Post-processing queue with checkpointed `progress` |
 | `people` | People the agent talks to: name and an `archived` flag |
-| `speaker_assignments` | Who spoke: one row for the whole session (`turn_idx=-1`) or per-turn overrides. `source` is `live:picker` or `human:<name>`. |
+| `speaker_assignments` | Who spoke: one row for the whole session (`turn_idx=-1`) or per-turn overrides. `source` is `live:picker`, `live:voice-id:<model key>` (suffixed with `:low` or `:unknown` for an uncertain attribution), or `human:<name>`. |
+| `voice_embeddings` | Voice ID enrollment data: speaker embeddings per person and model key, written by the `enroll_speaker` tool. |
 | `memories` | Facts about a person: text, category, confidence, `status` (`proposed`, `active`, `forgotten` or `superseded`), source, and review fields. Rows are never deleted. |
 | `memory_evidence` | The session, turn and quote that support each memory |
 | `memory_uses` | Which memories were injected into which live session |
@@ -275,8 +276,10 @@ Import the module in `src/monitoring/jobs/__init__.py`, then add its `kind` to
 ## Remember people between conversations
 
 The multilingual assistant can remember facts about the people who talk to it.
-This feature requires `MONITORING_ENABLED=true`. Voice identification is not
-available yet, so you attribute sessions manually:
+This feature requires `MONITORING_ENABLED=true`. A client that supports voice
+identification attributes each turn automatically. Refer to
+[Identify Speakers by Voice](#identify-speakers-by-voice). With the browser
+client, you attribute sessions manually:
 
 1. Create people on the **People** page of the review UI.
 2. Before you connect, pick the person in the **Who's talking** menu in the
@@ -298,6 +301,65 @@ Memories can contain personal and health information. They stay in the local
 monitoring database. The `dream` job sends the session transcript to the LLM it
 calls. With a cloud LLM, either as the session LLM or through `dream.llm`, the
 transcript leaves your machine.
+
+## Identify Speakers by Voice
+
+A client that computes speaker embeddings, such as the Reachy Mini conversation
+app, can tell the multilingual assistant who speaks in each turn. The server
+stores the embedding gallery and applies the result. The browser client does
+not send speaker updates, so its sessions behave as before. The wire format is
+specified in [Voice ID protocol](../voice-id-protocol.md).
+
+Voice identification requires `MONITORING_ENABLED=true`, because people and
+their embeddings live in the monitoring database. It works as follows:
+
+1. The client fetches `GET /api/voice-id/gallery?model=<model key>`. The
+   response lists one centroid per non-archived person who has embeddings for
+   that model key. The endpoint returns `503` when monitoring is disabled.
+2. During a session, the client sends `speaker-update` messages with its
+   running estimate. The first valid update activates voice identification for
+   the session: the `voice_id_addon` prompt block is added to the system
+   prompt and the `enroll_speaker` tool is offered to the LLM.
+3. When a user turn is committed, the pipeline attributes it by using the
+   latest update received for that turn. Without one, it reuses the previous
+   speaker at tier `low`.
+4. The user message that the LLM receives starts with a tag such as
+   `[speaker: Alice]`, `[speaker: Alice (uncertain)]`, or
+   `[speaker: unknown guest]`. The recorded transcript is not tagged.
+5. The turn is attributed in `speaker_assignments` with the source
+   `live:voice-id:<model key>`, so the `dream` job extracts memories for the
+   right person.
+6. The `person_memory_addon` block follows the speaker. A confident match
+   (tier `high`) loads that person's memories. A different or unknown speaker
+   removes them. An uncertain turn of the same person keeps them.
+
+To enroll a new voice, the person tells the assistant their name and agrees
+that it remembers their voice. The assistant then calls `enroll_speaker`,
+which runs on the server. The tool binds the embeddings of the current speaker
+to the person with that name, or creates the person, and sends
+`speaker-enrolled` to the client. To enroll a person you created in the review
+UI, have them give the same name. The tool refuses to rename a voice that is
+confidently recognized as another person.
+
+Per-person policies must use `VoiceIdSession.current_speaker()` in
+[`src/examples/shared/voice_id.py`](../../src/examples/shared/voice_id.py).
+Its `trusted_person_id` is set only for a confident match. For every other
+speaker it is `None`, and guest policies apply. A voice match is not
+authentication: a recording of a voice can pass it.
+
+Speaker embeddings are biometric data. They stay in the monitoring database
+and are never sent to the LLM. To delete the embeddings of a person, call
+`DELETE /api/voice-id/people/<person id>/embeddings`. Archiving a person
+removes them from the gallery but keeps the embeddings.
+
+Voice identification has the following limits:
+
+- A turn of an unknown speaker has no row in `speaker_assignments`. If you
+  also picked a person in **Who's talking**, the review UI and the `dream` job
+  attribute that turn to the picked person.
+- The assistant does not enroll voices on its own. Embeddings are stored only
+  through `enroll_speaker`.
+- Only the multilingual assistant handles `speaker-update` messages.
 
 ## Remote storage later
 

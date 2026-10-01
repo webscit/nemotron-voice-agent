@@ -58,6 +58,19 @@ def create_person(store: SessionStore, name: str) -> dict[str, Any]:
     return row
 
 
+def find_person_by_name(store: SessionStore, name: str) -> dict[str, Any] | None:
+    """The oldest non-archived person with this name (case-insensitive), or None."""
+    # Compared in Python: SQLite's ``lower()`` only folds ASCII ("Élodie" != "élodie").
+    wanted = name.strip().casefold()
+    matches = [p for p in list_people(store) if p["name"].strip().casefold() == wanted]
+    return min(matches, key=lambda p: p["created_at"]) if matches else None
+
+
+def find_or_create_person(store: SessionStore, name: str) -> dict[str, Any]:
+    """The non-archived person named ``name`` (case-insensitive), created when missing."""
+    return find_person_by_name(store, name) or create_person(store, name)
+
+
 def update_person(
     store: SessionStore, person_id: str, *, name: str | None = None, archived: bool | None = None
 ) -> dict[str, Any]:
