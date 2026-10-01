@@ -10,7 +10,7 @@ What ASR / LLM / TTS models are available, their VRAM, precision, and known issu
 |-----------|--------|
 | [Configure LLM](how-to/configure-llm.md) | Nemotron LLM models, reasoning on/off, GPU sizing & precision |
 | [Configure ASR](how-to/configure-asr.md) | ASR models, VRAM, hardware support, Domain Adaptation & endpointing |
-| [Configure TTS](how-to/configure-tts.md) | TTS models, VRAM, hardware support, voice selection, pronunciation (IPA), and text filters |
+| [Configure TTS](how-to/configure-tts.md) | TTS models, VRAM, hardware support, voice selection, pronunciation (IPA), text filters, and text normalization |
 
 ## Configuration how-to guides
 
@@ -22,6 +22,7 @@ What ASR / LLM / TTS models are available, their VRAM, precision, and known issu
 | [Enable OpenTelemetry Tracing](how-to/enable-opentelemetry-tracing.md) | Monitor latency and conversation flows with Phoenix or any OTLP backend |
 | [Enable a TURN Server](how-to/enable-turn-server.md) | TURN server for remote / cross-network WebRTC access |
 | [Enable the Audio Recorder](how-to/enable-audio-recorder.md) | Capture raw ASR/TTS audio per turn for debugging |
+| [Record Conversations](how-to/enable-conversation-recording.md) | Persist sessions, metrics, LLM inputs, audio and images; compare variants and post-process offline |
 | [Use the Realtime Gateway](how-to/use-realtime-gateway.md) | OpenAI Realtime–compatible `WS /v1/realtime` for external clients |
 
 ## Welcome Message

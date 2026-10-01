@@ -46,6 +46,7 @@ class PromptCatalogTests(unittest.TestCase):
             PROJECT_ROOT / "src/examples/multilingual/prompts.yaml": {
                 "fixed_session_language_addon",
                 "multilingual_voice_assistant",
+                "person_memory_addon",
             },
         }
         for path, expected in cases.items():

@@ -50,6 +50,7 @@ from examples.multilingual.tool_handlers import ClientToolResultBridge, build_cl
 from examples.multilingual.tools import build_client_tools
 from examples.shared.audio_recorder import create_audio_recorder
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
+from examples.shared.person_memory import PERSON_MEMORY_ADDON_KEY, load_person_context, record_person_session
 from examples.shared.pipeline_utils import (
     apply_pinned_prompt_summary,
     build_context_messages,
@@ -63,9 +64,12 @@ from examples.shared.pipeline_utils import (
 from examples.shared.prewarm import (
     prewarm_asr,
     prewarm_tts,
+    resolve_locale_for_language,
     resolve_voice_for_language,
     validate_llm_session_language,
 )
+from examples.shared.tts_text_normalizer import LanguageAwareVoiceFormatter
+from monitoring.recorder import SessionRecorder
 from tracing import IS_TRACING_ENABLED
 from utils import (
     is_nvcf,
@@ -150,6 +154,30 @@ async def _prepare_session_language_codes(
     if llm_supported_languages is not None:
         language_catalog_kwargs["llm_supported_languages"] = llm_supported_languages
     return get_lang_codes(**language_catalog_kwargs)
+
+
+def _session_snapshot(**sections) -> dict:
+    """Pipeline variant description stored with each recorded session (A/B key)."""
+    return {
+        **sections,
+        "turn_detection": {
+            "silero_vad_only": parse_env_bool("USE_SILERO_VAD_TURN_DETECTION", default=False),
+            "silero_vad_stop_secs": parse_env_float("SILERO_VAD_STOP_SECS", 0.5, min_value=0.0),
+        },
+        "chat_history_recent_turns": CHAT_HISTORY_RECENT_TURNS,
+    }
+
+
+def _span_attributes(snapshot: dict) -> dict[str, str]:
+    """Flatten the variant-defining fields into OpenTelemetry span attributes."""
+    return {
+        "session.example": str(snapshot.get("example", "")),
+        "session.language": str(snapshot.get("language", "")),
+        "asr.model": str(snapshot["asr"].get("model", "")),
+        "llm.model": str(snapshot["llm"].get("model", "")),
+        "tts.model": str(snapshot["tts"].get("model", "")),
+        "tts.voice": str(snapshot["tts"].get("voice", "")),
+    }
 
 
 def _resolve_llm_supported_languages(body: dict, default_llm: dict):
@@ -289,7 +317,16 @@ async def bot(runner_args: RunnerArguments) -> None:
     if tts_synthesis_mode:
         tts_settings_kwargs["synthesis_mode"] = tts_synthesis_mode
     if fixed_session_language:
-        tts_settings_kwargs["language"] = fixed_session_language
+        # A caller (e.g. an external client passing request_data.asr_language_code) may
+        # only know the bare base language ("fr"), not the full locale the TTS voice
+        # catalog is keyed by ("fr-FR"); expand it here so synthesis gets the locale the
+        # engine actually expects rather than silently keeping the previous voice/language.
+        tts_settings_kwargs["language"] = resolve_locale_for_language(
+            fixed_session_language,
+            server=tts_server,
+            function_id=tts_function_id,
+            model=tts_model,
+        )
         resolved_voice = resolve_voice_for_language(
             fixed_session_language,
             tts_voice,
@@ -317,6 +354,11 @@ async def bot(runner_args: RunnerArguments) -> None:
     if tts_zero_shot_audio_prompt_file:
         tts_kwargs["zero_shot_audio_prompt_file"] = tts_zero_shot_audio_prompt_file
     tts = NvidiaTTSService(**tts_kwargs)
+    # Verbalize numbers, currencies, times, units... for EN/FR before synthesis. The
+    # NeMo-Speech.cpp French TN grammar misses several of them; other languages pass through.
+    tts_text_normalization = parse_env_bool("TTS_TEXT_NORMALIZATION", True)
+    if tts_text_normalization:
+        tts.add_text_transformer(LanguageAwareVoiceFormatter(lambda: tts._settings.language))
 
     logger.info(
         f"TTS: server={tts_server}, ssl={tts_ssl}, voice={tts_voice}, "
@@ -324,7 +366,7 @@ async def bot(runner_args: RunnerArguments) -> None:
         f"synthesis_mode={tts_synthesis_mode or '(pipecat default)'}, "
         f"zero_shot_audio_prompt_file={tts_zero_shot_audio_prompt_file or '(none)'}, "
         f"lang_codes={lang_codes or '(no voices discovered)'}, "
-        f"text_filters=[NemotronSpeechTextFilter]"
+        f"text_filters=[NemotronSpeechTextFilter], text_normalization={tts_text_normalization}"
     )
 
     # --- Context ---
@@ -335,6 +377,13 @@ async def bot(runner_args: RunnerArguments) -> None:
         FIXED_SESSION_LANGUAGE_ADDON_KEY,
         {"fixed_language_name": describe_language(fixed_session_language)},
     )
+    # "Who's talking" from the client: pin what the agent remembers about them.
+    person_context = await load_person_context(body.get("person_id"))
+    if person_context:
+        base_system_content = render_prompt_addon(
+            base_system_content, prompt_catalog, PERSON_MEMORY_ADDON_KEY, person_context.prompt_replacements()
+        )
+        logger.info(f"Person: {person_context.person['name']} ({len(person_context.memories)} memories)")
 
     client_tools_schema, client_tool_names = build_client_tools(body.get("tools"))
 
@@ -368,7 +417,35 @@ async def bot(runner_args: RunnerArguments) -> None:
 
     reminder_processor = PerTurnReminderProcessor(build_reminder(fixed_session_language))
 
-    audio_recorder = create_audio_recorder()
+    session_snapshot = _session_snapshot(
+        example="multilingual-assistant",
+        pipeline_mode=body.get("pipeline_mode", ""),
+        transport=type(transport).__name__,
+        language=fixed_session_language,
+        prompt_key=prompt_key,
+        client_tools=client_tool_names,
+        asr={"server": asr_server, "model": asr_model, "function_id": asr_function_id},
+        llm={"model": model_id, "base_url": base_url, "temperature": llm_temperature, "extra": base_extra},
+        tts={
+            "server": tts_server,
+            "model": tts_model,
+            "voice": tts_voice,
+            "synthesis_mode": tts_synthesis_mode,
+            "language": tts_settings_kwargs.get("language"),
+        },
+        person=person_context.snapshot if person_context else None,
+    )
+    recorder = SessionRecorder.create(
+        session_id=body.get("session_id") or None,
+        example="multilingual-assistant",
+        config=session_snapshot,
+        llm=llm,
+        language=fixed_session_language,
+    )
+    # The session recorder owns audio capture when enabled; otherwise keep the
+    # legacy ENABLE_*_AUDIO_DUMP per-turn recorder.
+    audio_processors = recorder.processors() if recorder else [p for p in [create_audio_recorder()] if p]
+    conversation_id = recorder.session_id if recorder else (body.get("session_id") or None)
 
     pipeline = Pipeline(
         [
@@ -379,7 +456,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             llm,
             tts,
             transport.output(),
-            *([audio_recorder] if audio_recorder else []),
+            *audio_processors,
             client_tool_bridge,
             assistant_aggregator,
         ]
@@ -449,12 +526,19 @@ async def bot(runner_args: RunnerArguments) -> None:
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
-        observers=with_realtime_observers(latency_observer, transport=transport),
+        observers=with_realtime_observers(
+            latency_observer, *(recorder.observers() if recorder else []), transport=transport
+        ),
         enable_tracing=IS_TRACING_ENABLED,
+        conversation_id=conversation_id,
+        additional_span_attributes=_span_attributes(session_snapshot),
         rtvi_observer_params=RTVIObserverParams(
             function_call_report_level={name: RTVIFunctionCallReportLevel.FULL for name in client_tool_names}
         ),
     )
+
+    if recorder:
+        recorder.attach(task, user_aggregator, assistant_aggregator, latency_observer)
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
@@ -470,8 +554,11 @@ async def bot(runner_args: RunnerArguments) -> None:
         )
 
     async def _on_session_start() -> None:
-        if audio_recorder:
-            await audio_recorder.start_recording()
+        if recorder:
+            await recorder.on_session_started()
+        else:
+            for audio_processor in audio_processors:
+                await audio_processor.start_recording()
 
     register_session_start_handlers(
         transport=transport,
@@ -486,6 +573,9 @@ async def bot(runner_args: RunnerArguments) -> None:
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
+        if recorder:
+            # Flush buffered audio while the pipeline is still alive.
+            await recorder.stop_audio()
         await task.cancel()
 
     @task.rtvi.event_handler("on_client_message")
@@ -509,4 +599,13 @@ async def bot(runner_args: RunnerArguments) -> None:
 
     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
     await runner.add_workers(task)
-    await runner.run()
+    if recorder:
+        await recorder.start()
+        await record_person_session(recorder.session_id, person_context)
+    end_reason = "error"
+    try:
+        await runner.run()
+        end_reason = "completed"
+    finally:
+        if recorder:
+            await recorder.close(end_reason)

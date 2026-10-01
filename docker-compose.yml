@@ -43,6 +43,7 @@ name: nemotron-voice-agent
 # Observability profiles compose orthogonally with any recipe:
 #   docker compose --profile <recipe> --profile tracing up   # Phoenix OTel
 #   docker compose --profile <recipe> --profile turn up      # coturn TURN
+#   docker compose --profile <recipe> --profile dreamer up   # offline post-processing
 
 include:
   - path: docker/docker-compose.nemotron35-lightning-nim.yaml
@@ -58,6 +59,7 @@ include:
   - path: docker/docker-compose.nemo-speech-cpp.yaml
   - path: docker/docker-compose.coturn.yaml
   - path: docker/docker-compose.phoenix.yaml
+  - path: docker/docker-compose.dreamer.yaml
   - path: src/examples/frontend_backend_agent/airline/database/docker-compose.yml
 
 x-app: &app-base
@@ -73,6 +75,8 @@ x-app: &app-base
   volumes:
     - ./src:/app/src:ro
     - ./examples_registry.yaml:/app/examples_registry.yaml:ro
+    # Recorded sessions (MONITORING_ENABLED=true): SQLite DB + audio/images.
+    - ./data:/app/data
   extra_hosts:
     - "host.docker.internal:host-gateway"
   healthcheck:

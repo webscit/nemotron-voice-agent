@@ -541,6 +541,24 @@ def load_voice_map(
     return result
 
 
+def _match_catalog_locale(normalized: str, voice_map: dict[str, str]) -> str:
+    """Return the ``voice_map`` locale key matching ``normalized``, by exact code then by base language.
+
+    Callers of this module (the UI, but also external clients like the Reachy
+    Mini integration) may only know a bare base language code (``fr``) rather
+    than the full locale the voice catalog is keyed by (``fr-fr``). Falling
+    back to a base-language match lets those bare codes still resolve to a
+    voice instead of silently keeping whatever voice was already selected.
+    """
+    if normalized in voice_map:
+        return normalized
+    base = normalized.split("-", 1)[0]
+    for lang in voice_map:
+        if lang.split("-", 1)[0] == base:
+            return lang
+    return ""
+
+
 def resolve_voice_for_language(
     language_code: str,
     preferred_voice_id: str = "",
@@ -564,8 +582,27 @@ def resolve_voice_for_language(
         for voice in tts_config.get("voices", []):
             if voice.get("id") == preferred_voice_id and voice.get("language", "").lower() == normalized:
                 return preferred_voice_id
-    voice_id = voice_map.get(normalized)
-    if voice_id:
-        return voice_id
+    matched_locale = _match_catalog_locale(normalized, voice_map)
+    if matched_locale:
+        return voice_map[matched_locale]
     logger.warning(f"Multilingual: no TTS voice for language {language_code!r}")
     return ""
+
+
+def resolve_locale_for_language(
+    language_code: str,
+    *,
+    server: str = "",
+    function_id: str = "",
+    model: str = "",
+) -> str:
+    """Expand a bare base language code (``fr``) to the catalog's full locale (``fr-FR``).
+
+    Returns ``language_code`` unchanged (normalized casing only) when the
+    catalog has no matching entry, so a locale the caller already spelled
+    out correctly is never altered.
+    """
+    normalized = normalize_lang_code(language_code).lower()
+    voice_map = load_voice_map(server=server, function_id=function_id, model=model)
+    matched_locale = _match_catalog_locale(normalized, voice_map)
+    return normalize_lang_code(matched_locale) if matched_locale else normalize_lang_code(language_code)

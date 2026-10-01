@@ -14,6 +14,8 @@ import {
   type SimpleService,
 } from "../api";
 import { DevicesSection } from "./status-panel/DevicesSection";
+import { PersonPicker } from "./PersonPicker";
+import { useLivePerson, usePeopleOptions } from "../hooks/useLivePerson";
 import { clientToolDeclarations } from "../lib/clientTools";
 
 type StartBotClient = {
@@ -37,6 +39,7 @@ type SessionConfigOptions = {
   selectedPrompt?: Prompt;
   selectedPromptKey: string;
   selectedSessionLanguage?: string;
+  selectedPersonId?: string;
 };
 
 type HeaderProps = {
@@ -120,6 +123,7 @@ function buildSessionConfig({
   selectedPrompt,
   selectedPromptKey,
   selectedSessionLanguage = "",
+  selectedPersonId = "",
 }: SessionConfigOptions): Record<string, string> {
   const slots = new Set(selectedExample.slots);
   const config: Record<string, string> = { pipeline_mode: selectedExample.key };
@@ -156,6 +160,10 @@ function buildSessionConfig({
     if (selectedPrompt && !selectedPrompt.builtIn) config.prompt_content = selectedPrompt.content;
   }
 
+  if (selectedPersonId && selectedExample.capabilities?.includes("memories")) {
+    config.person_id = selectedPersonId;
+  }
+
   return config;
 }
 
@@ -181,6 +189,11 @@ export function Header({ onClientReset }: Readonly<HeaderProps>) {
     setCurrentSessionId,
   } = useApp();
   const [connectionError, setConnectionError] = useState("");
+  const memoriesEnabled = selectedExample?.capabilities?.includes("memories") ?? false;
+  const people = usePeopleOptions(memoriesEnabled);
+  const [storedPersonId, setPersonId] = useLivePerson();
+  // Ignore a remembered person that no longer exists (or was archived).
+  const personId = people.data?.some((p) => p.id === storedPersonId) ? storedPersonId : "";
 
   useLayoutEffect(() => {
     mountedRef.current = true;
@@ -217,6 +230,7 @@ export function Header({ onClientReset }: Readonly<HeaderProps>) {
           selectedPrompt,
           selectedPromptKey,
           selectedSessionLanguage,
+          selectedPersonId: personId,
         });
 
         const clientTools = JSON.stringify(clientToolDeclarations());
@@ -277,6 +291,23 @@ export function Header({ onClientReset }: Readonly<HeaderProps>) {
         </h1>
         <div className="d-flex items-center gap-3">
           {isConnected && <DevicesSection />}
+          {memoriesEnabled && people.data && (
+            <PersonPicker
+              people={people.data}
+              value={personId}
+              onChange={setPersonId}
+              disabled={isConnected || isConnecting}
+            />
+          )}
+          <a
+            className="btn-ghost"
+            href="#/review"
+            target="_blank"
+            rel="noopener"
+            title="Review recorded sessions (opens a new tab)"
+          >
+            Review
+          </a>
           <button
             className={isConnected ? "btn-secondary" : "btn-primary"}
             onClick={handleClick}

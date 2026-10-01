@@ -1,0 +1,63 @@
+# Post-processing runner ("dreamer") configuration.
+# Override the path with DREAMER_CONFIG=/path/to/dreamer.yaml.
+
+# Seconds between polls when there is nothing to do.
+poll_secs: 10
+# Wait this long after the last session activity before using the GPU.
+idle_grace_secs: 60
+# A session without heartbeat for this long no longer blocks jobs...
+live_stale_secs: 60
+# ...and is closed as "orphaned" after this long (server crash).
+orphan_after_secs: 120
+max_attempts: 3
+# Jobs queued automatically for every ended session.
+auto_enqueue: [reasr, dream]
+# Compose project name used to find on-demand containers (default: any project).
+compose_project: null
+
+reasr:
+  # Pseudo ground truth: the strongest ASR you can run offline. Human corrections
+  # (python -m monitoring.transcripts_csv) always take precedence over it.
+  # Voxtral (vLLM, OpenAI-compatible API) covers French, English, German, Spanish,
+  # Italian, Portuguese, Dutch, Hindi, ...; the container is started only while idle.
+  # Every endpoint accepts `enabled: false` to keep it configured without running
+  # it (its container is then never started).
+  reference:
+    name: voxtral-mini-4b
+    protocol: openai
+    base_url: http://dreamer-asr-voxtral:8000/v1
+    model: mistralai/Voxtral-Mini-4B-Realtime-2602
+    service: dreamer-asr-voxtral
+  # A Riva-compatible gRPC reference looks like:
+  #   name: canary-1b-cloud
+  #   server: grpc.nvcf.nvidia.com:443
+  #   function_id: <function id>
+
+  # ASR variants to compare against the live one. `service` is a compose service
+  # started only while idle (profile `dreamer-models`) and stopped on preemption;
+  # omit it for endpoints that are always up. `languages` restricts the sessions
+  # an endpoint is used for (base codes). Set `enabled: true` to start comparing.
+  candidates:
+    - name: nemotron-speech-streaming-en-0.6b
+      enabled: false
+      server: dreamer-asr-en:50051
+      service: dreamer-asr-en
+      languages: [en]
+
+dream:
+  # Extract long-term memories about the people attributed to a session.
+  # Memories at or above this confidence are used in live prompts right away and
+  # reviewed afterwards; the others wait for approval in the review UI.
+  auto_use_threshold: 0.8
+  # Let the model reason before answering (slower, better extraction).
+  reasoning: true
+  temperature: 0.2
+  # Shared by the reasoning trace and the JSON answer.
+  max_tokens: 8192
+  # By default the job calls the session's own LLM (its base_url/model/extra from
+  # the session config), e.g. the always-on vLLM of a single-GPU recipe. Override:
+  #   llm:
+  #     base_url: https://integrate.api.nvidia.com/v1
+  #     model: nvidia/nemotron-3.5-lightning-30b-a3b
+  # A compose service started only while idle (profile `dreamer-models`):
+  #   service: dreamer-llm

@@ -81,6 +81,10 @@ TTS voices and supported language codes are discovered at runtime by prewarming 
 | `tools.py` | validates client-declared tool schemas into a `ToolsSchema` for the LLM context |
 | `tool_handlers.py` | server-side RTVI forwarding handler for those client-executed tools |
 
+### TTS text normalization
+
+Before synthesis, the pipeline rewrites numbers, currency, percentages, units, dates, times, phone numbers, and emails into spoken words for English and French sessions. Other languages pass through unchanged. The transcript and chat history keep the original text. Set `TTS_TEXT_NORMALIZATION=false` in `.env` to turn it off. For details and the `*/single-gpu` grammar limits, refer to [Configure TTS](../../../docs/how-to/configure-tts.md#text-normalization).
+
 ### Client-executed tools
 
 Tools demonstrate Pipecat's RTVI client-side function calling: the LLM calls a tool as normal, but the *browser* executes it and returns the result. Unlike a fixed server-side schema, the set of tools is declared **by the client at connect time** (Pattern B: dynamic discovery) rather than hardcoded on the server — different client builds can expose different capabilities without any server change.
@@ -105,10 +109,16 @@ If a client-executed tool "does nothing," check two things: that the client actu
 
 ### How it works
 
-1. The user selects a locale compatible with the active ASR, TTS, and LLM in the UI (default `de-DE`) before connecting.
+1. The user selects a locale compatible with the active ASR, TTS, and LLM in the UI (default `de-DE`) before connecting. A non-UI client can set the same thing directly by sending `asr_language_code` in the WebRTC offer's `request_data` (e.g. `{"asr_language_code": "fr"}`) — the [Reachy Mini conversation app](https://codefloe.com/fcollonval/reachy_mini_pipecat_app) integration does this since it has no UI of its own. A bare base code like `fr` is expanded against the prewarmed TTS voice catalog to the full locale (`fr-FR`) the TTS engine expects — critical for TTS voice/language selection, which otherwise silently keeps whatever voice was already selected.
 2. The ASR and the TTS voice are pinned to that language when the connection starts. They do not change mid-session.
 3. The fixed-session prompt addon instructs the LLM to reply only in that language, and the LLM returns plain spoken text (no JSON, labels, or metadata) that flows straight to TTS, the client transcript, and chat history.
 4. `PerTurnReminderProcessor` re-states the "reply only in <language>" reminder on each user turn at request time only, so the reminder never pollutes stored history.
+
+A non-UI client can likewise set the system prompt directly by sending `prompt_content` in `request_data` (the same field the UI uses for a custom, non-catalog prompt; e.g. `{"prompt_content": "You are a pirate. Always say Arr."}`). Omit it to keep the catalog default (`multilingual_voice_assistant`), or send `prompt_key` to select a different catalog entry by name instead.
+
+### Memories about the person talking
+
+When session recording is enabled (`MONITORING_ENABLED=true`), the client header shows a **Who's talking** menu. The selected person id is sent as `person_id` in the session config. The pipeline then renders the `person_memory_addon` prompt block with the person's name and up to 30 of their `active` memories. After the session, the `dream` job of the dreamer extracts new memories, which you review in the web UI. For setup, review, and privacy details, refer to [Remember people between conversations](../../../docs/how-to/enable-conversation-recording.md#remember-people-between-conversations).
 
 ### Switching the multilingual ASR model
 
@@ -156,10 +166,12 @@ Multilingual behavior depends on the ASR model, the LLM, and the selected TTS vo
 | Bot slips in foreign words | Quantized small-model sampling artifacts | Lower the LLM `temperature` in `services.*.yaml`, or use a larger LLM |
 | Session language is unavailable or startup is rejected | The selected locale is not supported by the active ASR, TTS, or built-in LLM | Select a locale shown in Voice Settings. For built-in LLM support, see [Configure LLM](../../../docs/how-to/configure-llm.md#multilingual-session-languages). |
 | TTS uses the wrong voice or language | Selected session language is not supported by the active TTS service | Check the configured TTS service exposes that language code, or pick a supported language |
+| TTS skips or misreads numbers or prices | Pipeline normalization covers only English and French; on `*/single-gpu`, the server grammars also cover only English and French | For other languages, prompt the LLM to write numbers as words. Refer to [Configure TTS](../../../docs/how-to/configure-tts.md#text-normalization) |
 | No voices discovered at startup | TTS prewarm failed | For Cloud, confirm `NVIDIA_API_KEY` in `.env`. For Server, also confirm NGC login and TTS sidecar health with `docker compose ps`. For Single-GPU, confirm that the NeMo-Speech.cpp sidecar is healthy and `models/nemo-speech` contains the downloaded weights. |
 | Bot does not respond to a turn (no transcript) | Nemotron ASR Multilingual can drop a turn in noisy environments | Speak again, reduce background noise, and use a good microphone. See [Configure ASR](../../../docs/how-to/configure-asr.md#choosing-a-multilingual-asr-model) |
 | Weak or awkward replies in some languages (for example Hindi) | Nemotron 3.5 Lightning has weaker conversation quality in a few languages | Use Nemotron 3 Super for better multilingual quality. See [Configure LLM](../../../docs/how-to/configure-llm.md) |
 | Port conflict on the ASR sidecar | Parakeet and Nemotron streaming both bind `50152` | Run only one local ASR. When opting into Parakeet, scale the Nemotron sidecar off (`--scale nemotron-asr-streaming-multilingual=0`) |
+| The bot does not know who is talking or what it remembers | Monitoring is off, no person is selected, the person is archived, or no memory is `active` yet | Set `MONITORING_ENABLED=true`, pick a person in **Who's talking** before connecting, and approve their `proposed` memories in the review UI. The `dream` job runs only after the session ends and while no session is live |
 | Random ASR text while silent | Parakeet RNNT noise sensitivity | Expected with the Parakeet opt-in. The default Nemotron ASR is less prone to this. Otherwise reduce room noise and use a good mic |
 
 For ASR, LLM, and TTS model details and general failure modes, see [Configure ASR](../../../docs/how-to/configure-asr.md), [Configure TTS](../../../docs/how-to/configure-tts.md), [Configure LLM](../../../docs/how-to/configure-llm.md), and the [Troubleshooting guide](../../../docs/06-troubleshooting.md).

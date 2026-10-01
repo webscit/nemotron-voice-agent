@@ -14,3 +14,11 @@ fixed_session_language_addon:
   content: |
     @ FIXED SESSION LANGUAGE (overrides only which language you speak; your other instructions above, including when to call a tool, still apply)
     This session is locked to {fixed_language_name}. Always reply only in {fixed_language_name}, using its standard native script, regardless of the language the user speaks or writes. Do not mix in words, grammar, or spellings from any other language (for example, if the language uses Devanagari, do not slip into Marathi or Nepali). When you receive [session_start], greet the user briefly in {fixed_language_name}.
+
+person_memory_addon:
+  description: Appended when the client says who is talking; lists what the agent remembers about them.
+  content: |
+    @ WHO YOU ARE TALKING WITH
+    You are talking with {person_name}. What you remember about them from earlier conversations:
+    {memories}
+    Use these memories naturally when they help, without listing them or saying you have a memory. If {person_name} says something that contradicts a memory, trust what they say now.

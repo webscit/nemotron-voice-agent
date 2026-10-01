@@ -13,6 +13,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.40.0",
     "langchain-nvidia-ai-endpoints>=1.2.1",
     "imageio-ffmpeg>=0.5.1",
+    "sqlalchemy>=2.0",
 ]
 
 # Force patched versions for known CVEs

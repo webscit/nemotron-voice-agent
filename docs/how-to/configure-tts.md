@@ -56,7 +56,7 @@ TTS runs one of these ways, and the repo wires the right one per profile:
   Then select the matching catalog key in the Services tab (or `defaults.tts`). Omitting the opt-in profile leaves that sidecar running and holding the ports—stop it before Magpie Multilingual can bind again (`docker compose --profile <profile> stop <service>`, then recipe `up -d`).
 
   Magpie Zeroshot NGC access is restricted — apply at the [Magpie TTS Zeroshot NGC page](https://catalog.ngc.nvidia.com/orgs/nim/teams/nvidia/containers/magpie-tts-zeroshot). For audio-prompt cloning, see [Voice cloning / zero-shot](#voice-cloning--zero-shot).
-- **NeMo-Speech.cpp (single GPU, including Jetson Thor)**: on `*/single-gpu`, an on-device sidecar serves Magpie TTS from local GGUF weights: `nemo-speech` / `nemo-speech-multilingual` (ASR + TTS together) or `nemo-speech-tts` (TTS only, for Omni). `scripts/download-nemo-speech-models.sh` also fetches Sparrowhawk TN grammars so digits and dates are spoken as words (`--tts.tn-model-dir=/models/tn_configs`). See [Jetson Thor](../03-jetson-thor.md).
+- **NeMo-Speech.cpp (single GPU, including Jetson Thor)**: on `*/single-gpu`, an on-device sidecar serves Magpie TTS from local GGUF weights: `nemo-speech` / `nemo-speech-multilingual` (ASR + TTS together) or `nemo-speech-tts` (TTS only, for Omni). `scripts/download-nemo-speech-models.sh` also fetches Sparrowhawk TN grammars so digits and dates are spoken as words (`--tts.tn-model-dir=/models/tn_configs`). The v0.1.0 grammar archive covers only English and French. For other languages, refer to [Text Normalization](#text-normalization). See [Jetson Thor](../03-jetson-thor.md).
 
 ### VRAM & Hardware Support
 
@@ -245,6 +245,28 @@ tts = NvidiaTTSService(
     text_filters=[NemotronSpeechMarkdownTextFilter()],
 )
 ```
+
+### Text Normalization
+
+Text normalization (TN) rewrites written forms such as numbers, currency, and dates into spoken words before synthesis. Without it, TTS can read `12,50 €` digit by digit or skip it entirely.
+
+The Multilingual Assistant example normalizes text in the pipeline before it reaches TTS. `LanguageAwareVoiceFormatter` in [`src/examples/shared/tts_text_normalizer.py`](../../src/examples/shared/tts_text_normalizer.py) selects a chain from the session TTS language:
+
+- **English (`en`)**: Pipecat's `VoiceFormatter` strips Markdown and expands emails, US phone numbers, dates, currency, percentages, and units.
+- **French (`fr`)**: French transforms in [`src/examples/shared/tts_text_transforms_fr.py`](../../src/examples/shared/tts_text_transforms_fr.py) expand currency (`12,50 €` to "douze euros cinquante"), percentages (`25 %`), units (`3,5 km`), ISO and `DD/MM/YYYY` dates, times (`15h30` or `15:30`), French phone numbers read in pairs, and emails. They also remove space and non-breaking space thousands separators (`1 234` to `1234`). Plain integers and ordinals such as `1er` and `2e` pass through to the TTS service's own normalization.
+- **Other languages**: Text passes through unchanged.
+
+Both chains leave acronyms as written, so `NVIDIA` is not spelled out letter by letter.
+
+Only the text sent to TTS changes. The transcript and the LLM context keep the original text. The formatter applies to every Multilingual Assistant deployment, cloud and local. To turn it off, set the following value in `.env`:
+
+```bash
+TTS_TEXT_NORMALIZATION=false
+```
+
+The default is `true`. The other examples do not register this formatter.
+
+On `*/single-gpu`, the NeMo-Speech.cpp server also applies its own Sparrowhawk grammars from `tn_configs`. The v0.1.0 archive contains only `en` and `fr` grammars, and the French grammar is partial. It misses decimal currency, `15h30`-style times, and units, which the pipeline formatter covers. For German, Spanish, Italian, and other languages, the server can silently drop digits and currency symbols. Prompt the LLM to write numbers as words in those languages.
 
 ### Voice Cloning / Zero-Shot
 
