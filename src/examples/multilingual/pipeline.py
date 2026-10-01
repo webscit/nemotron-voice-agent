@@ -69,6 +69,14 @@ from examples.shared.prewarm import (
     validate_llm_session_language,
 )
 from examples.shared.tts_text_normalizer import LanguageAwareVoiceFormatter
+from examples.shared.voice_id import (
+    ENROLL_TOOL_NAME,
+    SPEAKER_UPDATE_MESSAGE,
+    VOICE_ID_ADDON_KEY,
+    SpeakerTurnProcessor,
+    VoiceIdSession,
+    voice_id_available,
+)
 from monitoring.recorder import SessionRecorder
 from tracing import IS_TRACING_ENABLED
 from utils import (
@@ -377,13 +385,24 @@ async def bot(runner_args: RunnerArguments) -> None:
         FIXED_SESSION_LANGUAGE_ADDON_KEY,
         {"fixed_language_name": describe_language(fixed_session_language)},
     )
+    prompt_without_person = base_system_content
+
+    def render_pinned_prompt(person, voice_id_active: bool = False) -> str:
+        """Prompt catalog content for the person being talked with (re-rendered when voice ID changes it)."""
+        content = prompt_without_person
+        if voice_id_active:
+            content = render_prompt_addon(content, prompt_catalog, VOICE_ID_ADDON_KEY, {})
+        if person:
+            content = render_prompt_addon(
+                content, prompt_catalog, PERSON_MEMORY_ADDON_KEY, person.prompt_replacements()
+            )
+        return content
+
     # "Who's talking" from the client: pin what the agent remembers about them.
     person_context = await load_person_context(body.get("person_id"))
     if person_context:
-        base_system_content = render_prompt_addon(
-            base_system_content, prompt_catalog, PERSON_MEMORY_ADDON_KEY, person_context.prompt_replacements()
-        )
         logger.info(f"Person: {person_context.person['name']} ({len(person_context.memories)} memories)")
+    base_system_content = render_pinned_prompt(person_context)
 
     client_tools_schema, client_tool_names = build_client_tools(body.get("tools"))
 
@@ -416,6 +435,27 @@ async def bot(runner_args: RunnerArguments) -> None:
     )
 
     reminder_processor = PerTurnReminderProcessor(build_reminder(fixed_session_language))
+
+    # Voice ID: the client streams who is speaking (``speaker-update``); it needs the
+    # people store for names, memories and enrollment, so it is off without monitoring.
+    voice_id_session: VoiceIdSession | None = None
+    if ENROLL_TOOL_NAME in client_tool_names:
+        logger.warning(f"Voice ID disabled: the client declares its own '{ENROLL_TOOL_NAME}' tool")
+    elif await asyncio.to_thread(voice_id_available):
+        voice_id_session = VoiceIdSession(
+            context=context,
+            # The prompt catalog content is the last initial message (system, or user after a control prompt).
+            pinned_index=len(messages) - 1,
+            render_pinned=render_pinned_prompt,
+            queue_frame=lambda frame: task.queue_frame(frame),
+            session_id=lambda: recorder.session_id if recorder else None,
+            turn_idx=lambda: recorder.turn_idx if recorder else -1,
+            initial_person=person_context,
+        )
+        # Runs on the server (the people store lives here). It only enters the LLM's
+        # tool list once the client sends its first speaker-update.
+        llm.register_function(ENROLL_TOOL_NAME, voice_id_session.enroll_speaker, cancel_on_interruption=True)
+    voice_id_processors = [SpeakerTurnProcessor(voice_id_session)] if voice_id_session else []
 
     session_snapshot = _session_snapshot(
         example="multilingual-assistant",
@@ -452,6 +492,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             transport.input(),
             stt,
             user_aggregator,
+            *voice_id_processors,
             reminder_processor,
             llm,
             tts,
@@ -533,12 +574,22 @@ async def bot(runner_args: RunnerArguments) -> None:
         conversation_id=conversation_id,
         additional_span_attributes=_span_attributes(session_snapshot),
         rtvi_observer_params=RTVIObserverParams(
-            function_call_report_level={name: RTVIFunctionCallReportLevel.FULL for name in client_tool_names}
+            function_call_report_level={
+                **{name: RTVIFunctionCallReportLevel.FULL for name in client_tool_names},
+                # Server-side tool: never reported to the client as a call to run.
+                ENROLL_TOOL_NAME: RTVIFunctionCallReportLevel.DISABLED,
+            }
         ),
     )
 
     if recorder:
         recorder.attach(task, user_aggregator, assistant_aggregator, latency_observer)
+
+    if voice_id_session:
+
+        @user_aggregator.event_handler("on_user_turn_started")
+        async def on_user_turn_started(aggregator, strategy):
+            voice_id_session.on_user_turn_started()
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
@@ -581,6 +632,10 @@ async def bot(runner_args: RunnerArguments) -> None:
     @task.rtvi.event_handler("on_client_message")
     async def on_client_message(rtvi, message):
         payload = message.data if isinstance(message.data, dict) else {}
+        if message.type == SPEAKER_UPDATE_MESSAGE:
+            if voice_id_session:
+                await voice_id_session.on_speaker_update(payload)
+            return
         if message.type == "set-voice":
             voice_id = payload.get("voice_id", "")
             language = payload.get("language", "")

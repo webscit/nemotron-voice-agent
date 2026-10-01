@@ -81,3 +81,39 @@ async def record_person_session(session_id: str | None, context: PersonContext |
         await asyncio.to_thread(_record, session_id, context)
     except Exception as exc:
         logger.opt(exception=exc).warning("Could not record the session person / memory uses")
+
+
+def _record_turn(session_id: str, turn_idx: int, person_id: str | None, source: str) -> None:
+    from monitoring import memories
+
+    store = memories.live_store()
+    if store is not None:
+        memories.assign_speaker(store, session_id, person_id, source=source, turn_idx=turn_idx)
+
+
+async def record_turn_speaker(session_id: str | None, turn_idx: int, person_id: str | None, source: str) -> None:
+    """Attribute one turn to a person (``None`` clears the turn row); best effort."""
+    if not session_id or turn_idx < 0:
+        return
+    try:
+        await asyncio.to_thread(_record_turn, session_id, turn_idx, person_id, source)
+    except Exception as exc:
+        logger.opt(exception=exc).warning("Could not record the turn speaker")
+
+
+def _record_uses(session_id: str, context: PersonContext) -> None:
+    from monitoring import memories
+
+    store = memories.live_store()
+    if store is not None:
+        memories.record_uses(store, session_id, [m["id"] for m in context.memories])
+
+
+async def record_memory_uses(session_id: str | None, context: PersonContext | None) -> None:
+    """Log the memories injected mid-session for a newly identified speaker (best effort)."""
+    if not session_id or context is None or not context.memories:
+        return
+    try:
+        await asyncio.to_thread(_record_uses, session_id, context)
+    except Exception as exc:
+        logger.opt(exception=exc).warning("Could not record the memory uses")

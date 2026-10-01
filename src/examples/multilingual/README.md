@@ -120,6 +120,10 @@ A non-UI client can likewise set the system prompt directly by sending `prompt_c
 
 When session recording is enabled (`MONITORING_ENABLED=true`), the client header shows a **Who's talking** menu. The selected person id is sent as `person_id` in the session config. The pipeline then renders the `person_memory_addon` prompt block with the person's name and up to 30 of their `active` memories. After the session, the `dream` job of the dreamer extracts new memories, which you review in the web UI. For setup, review, and privacy details, refer to [Remember people between conversations](../../../docs/how-to/enable-conversation-recording.md#remember-people-between-conversations).
 
+### Voice identification
+
+A client that computes speaker embeddings can identify who speaks in each turn by sending `speaker-update` messages over RTVI. The pipeline then tags each user message with the speaker for the LLM, attributes the turn, loads the memories of the recognized person, and offers a server-side `enroll_speaker` tool to remember a new voice. This also requires `MONITORING_ENABLED=true`. For details, refer to [Identify Speakers by Voice](../../../docs/how-to/enable-conversation-recording.md#identify-speakers-by-voice) and the [Voice ID protocol](../../../docs/voice-id-protocol.md).
+
 ### Switching the multilingual ASR model
 
 **Parakeet 1.1B RNNT Multilingual** offers stronger multilingual recognition quality at higher latency (see [Model Selection Notes](#model-selection-notes)). To run it instead of the default Nemotron ASR Streaming Multilingual on-prem:
