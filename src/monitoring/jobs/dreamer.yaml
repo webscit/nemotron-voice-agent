@@ -20,6 +20,8 @@ reasr:
   # (python -m monitoring.transcripts_csv) always take precedence over it.
   # Voxtral (vLLM, OpenAI-compatible API) covers French, English, German, Spanish,
   # Italian, Portuguese, Dutch, Hindi, ...; the container is started only while idle.
+  # Every endpoint accepts `enabled: false` to keep it configured without running
+  # it (its container is then never started).
   reference:
     name: voxtral-mini-4b
     protocol: openai
@@ -34,9 +36,10 @@ reasr:
   # ASR variants to compare against the live one. `service` is a compose service
   # started only while idle (profile `dreamer-models`) and stopped on preemption;
   # omit it for endpoints that are always up. `languages` restricts the sessions
-  # an endpoint is used for (base codes).
+  # an endpoint is used for (base codes). Set `enabled: true` to start comparing.
   candidates:
     - name: nemotron-speech-streaming-en-0.6b
+      enabled: false
       server: dreamer-asr-en:50051
       service: dreamer-asr-en
       languages: [en]

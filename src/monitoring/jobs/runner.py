@@ -32,6 +32,7 @@ import yaml
 from loguru import logger
 
 from monitoring.jobs.base import JOB_REGISTRY, JobContext, Preempted
+from monitoring.jobs.reasr import reasr_endpoints
 from monitoring.jobs.services import DockerServiceManager
 from monitoring.store import ArtifactStore, SessionStore
 
@@ -53,9 +54,10 @@ _DEFAULTS: dict[str, Any] = {
 
 def declared_services(config: dict[str, Any]) -> list[str]:
     """On-demand compose services referenced by the job configuration."""
-    reasr = config.get("reasr") or {}
-    endpoints = [reasr.get("reference") or {}, *(reasr.get("candidates") or []), config.get("dream") or {}]
-    return sorted({e["service"] for e in endpoints if e.get("service")})
+    reference, candidates = reasr_endpoints(config)
+    services = [e.service for e in [reference, *candidates] if e]
+    services.append((config.get("dream") or {}).get("service"))
+    return sorted({s for s in services if s})
 
 
 def load_dreamer_config(path: str | Path | None = None) -> dict[str, Any]:

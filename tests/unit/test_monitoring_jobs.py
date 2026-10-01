@@ -303,3 +303,28 @@ def test_pause_blocks_and_preempts(stores):
     assert job["status"] == "pending" and job["progress"] == {"next": 1}
     status = store.get_kv("dreamer.status")["value"]
     assert status["heartbeat_at"] == clock.now and "jobs" in status
+
+
+def test_disabled_reasr_endpoints_are_skipped():
+    from monitoring.jobs.reasr import reasr_endpoints
+    from monitoring.jobs.runner import declared_services, load_dreamer_config
+
+    config = {
+        "reasr": {
+            "reference": {"name": "voxtral", "protocol": "openai", "service": "voxtral-svc"},
+            "candidates": [
+                {"name": "on", "server": "a:1", "service": "on-svc"},
+                {"name": "off", "server": "b:1", "service": "off-svc", "enabled": False},
+            ],
+        }
+    }
+    reference, candidates = reasr_endpoints(config)
+    assert reference.name == "voxtral" and [c.name for c in candidates] == ["on"]
+    assert declared_services(config) == ["on-svc", "voxtral-svc"]
+
+    config["reasr"]["reference"]["enabled"] = False
+    assert reasr_endpoints(config)[0] is None
+    assert declared_services(config) == ["on-svc"]
+
+    # Shipped default: only the Voxtral reference container is started.
+    assert declared_services(load_dreamer_config()) == ["dreamer-asr-voxtral"]

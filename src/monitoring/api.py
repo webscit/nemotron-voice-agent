@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 from monitoring import memories, schema
 from monitoring.config import MonitoringConfig
 from monitoring.jobs import JOB_REGISTRY
-from monitoring.jobs.reasr import live_source_name, score_session
+from monitoring.jobs.reasr import live_source_name, reasr_endpoints, score_session
 from monitoring.jobs.runner import PAUSE_KEY, STATUS_KEY, declared_services, load_dreamer_config
 from monitoring.jobs.wer import error_rates, normalize
 from monitoring.report import DEFAULT_GROUP_BY, metrics_json
@@ -137,12 +137,12 @@ class ReviewService:
     # ------------------------------------------------------------- helpers
     @property
     def _reference_name(self) -> str | None:
-        reference = (self.dreamer_config.get("reasr") or {}).get("reference")
-        return reference.get("name") if reference else None
+        reference, _ = reasr_endpoints(self.dreamer_config)
+        return reference.name if reference else None
 
     @property
     def _candidate_names(self) -> list[str]:
-        return [c["name"] for c in (self.dreamer_config.get("reasr") or {}).get("candidates") or []]
+        return [c.name for c in reasr_endpoints(self.dreamer_config)[1]]
 
     def _rows(self, stmt) -> list[dict[str, Any]]:
         with self.store.engine.connect() as conn:

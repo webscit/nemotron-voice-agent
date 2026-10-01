@@ -30,6 +30,7 @@ from loguru import logger
 
 from monitoring import memories
 from monitoring.jobs.base import Job, JobContext, register
+from monitoring.jobs.reasr import reasr_endpoints
 
 DEFAULTS: dict[str, Any] = {
     # Memories at or above this confidence are used live before review.
@@ -172,8 +173,8 @@ def _ints(values: Any) -> list[int]:
 
 
 def _reference_name(config: dict[str, Any]) -> str | None:
-    reference = (config.get("reasr") or {}).get("reference")
-    return reference.get("name") if reference else None
+    reference, _ = reasr_endpoints(config)
+    return reference.name if reference else None
 
 
 def session_transcript(ctx: JobContext, session_id: str, speakers: dict[str, Any]) -> list[dict[str, Any]]:

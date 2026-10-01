@@ -161,7 +161,10 @@ How the runner behaves:
 - **On-demand models.** A job can require a compose service from the
   `dreamer-models` profile, for example `dreamer-asr-en`. The runner starts it
   through the Docker socket only while idle, and stops it when the queue is
-  empty or a conversation starts.
+  empty or a conversation starts. After `docker compose down`, run
+  `docker compose --profile dreamer-models create --force-recreate` again:
+  containers created before keep a reference to the removed network and fail to
+  start with `network ... not found`.
 - **Crash recovery.** Sessions orphaned by a crash are closed after
   `orphan_after_secs`.
 
@@ -186,6 +189,12 @@ Endpoints can use either protocol:
   or NeMo-Speech.cpp. Set `server: host:port`.
 - `protocol: openai`: an OpenAI-compatible `POST /v1/audio/transcriptions`
   endpoint. Set `base_url` and `model`.
+
+Choose which models run with `enabled` on each endpoint (default `true`). A
+disabled endpoint stays configured, but `reasr` skips it and its container is
+never started. By default only the Voxtral reference runs: the shipped
+`nemotron-speech-streaming-en-0.6b` candidate has `enabled: false`. Set it to
+`true` to compare that model on English sessions; it starts `dreamer-asr-en`.
 
 The default reference is **Voxtral Mini 4B**
 (`mistralai/Voxtral-Mini-4B-Realtime-2602`). It is served by vLLM in the

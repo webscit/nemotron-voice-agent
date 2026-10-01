@@ -29,10 +29,12 @@ from monitoring.jobs.base import Job, JobContext, register
 from monitoring.jobs.wer import error_rates
 
 
-def _endpoints(config: dict[str, Any]) -> tuple[AsrEndpoint | None, list[AsrEndpoint]]:
+def reasr_endpoints(config: dict[str, Any]) -> tuple[AsrEndpoint | None, list[AsrEndpoint]]:
+    """Enabled ``reasr`` reference and candidates (an entry with ``enabled: false`` is skipped)."""
     section = config.get("reasr") or {}
-    reference = AsrEndpoint.from_config(section["reference"]) if section.get("reference") else None
-    candidates = [AsrEndpoint.from_config(raw) for raw in section.get("candidates") or []]
+    raw_reference = section.get("reference")
+    reference = AsrEndpoint.from_config(raw_reference) if raw_reference and raw_reference.get("enabled", True) else None
+    candidates = [AsrEndpoint.from_config(raw) for raw in section.get("candidates") or [] if raw.get("enabled", True)]
     return reference, candidates
 
 
@@ -68,7 +70,7 @@ class ReAsrJob(Job):
         return (session.get("config") or {}).get("language") or "en-US"
 
     def _endpoints_for(self, ctx: JobContext) -> list[AsrEndpoint]:
-        reference, candidates = _endpoints(ctx.config)
+        reference, candidates = reasr_endpoints(ctx.config)
         language = self._session_language(ctx)
         return [e for e in [reference, *candidates] if e and e.supports(language)]
 
@@ -76,7 +78,7 @@ class ReAsrJob(Job):
         """Transcribe missing (turn, endpoint) pairs, then (re)compute WER."""
         session_id = ctx.job["target"]
         language = self._session_language(ctx)
-        reference, candidates = _endpoints(ctx.config)
+        reference, candidates = reasr_endpoints(ctx.config)
         endpoints = self._endpoints_for(ctx)
 
         segments_by_turn: dict[int, list[dict[str, Any]]] = defaultdict(list)
