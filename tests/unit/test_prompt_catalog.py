@@ -48,6 +48,7 @@ class PromptCatalogTests(unittest.TestCase):
                 "multilingual_voice_assistant",
                 "person_memory_addon",
                 "voice_id_addon",
+                "face_id_addon",
             },
         }
         for path, expected in cases.items():

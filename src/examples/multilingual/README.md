@@ -122,7 +122,7 @@ When session recording is enabled (`MONITORING_ENABLED=true`), the client header
 
 ### Voice identification
 
-A client that computes speaker embeddings can identify who speaks in each turn by sending `speaker-update` messages over RTVI. The pipeline then tags each user message with the speaker for the LLM, attributes the turn, loads the memories of the recognized person, and offers a server-side `enroll_speaker` tool to remember a new voice. This also requires `MONITORING_ENABLED=true`. For details, refer to [Identify Speakers by Voice](../../../docs/how-to/enable-conversation-recording.md#identify-speakers-by-voice) and the [Voice ID protocol](../../../docs/voice-id-protocol.md).
+A client that computes speaker embeddings can identify who speaks in each turn by sending `speaker-update` messages over RTVI. The pipeline then tags each user message with the speaker for the LLM, attributes the turn, loads the memories of the recognized person, and offers a server-side `enroll_speaker` tool to remember a new voice. This also requires `MONITORING_ENABLED=true`. A client with a camera can also confirm the speaker by face (tier `verified`) and report who is in view with `presence-update` messages; the pipeline then names the people in view to the LLM and greets a recognized person who comes into view while nobody speaks. For details, refer to [Identify Speakers by Voice](../../../docs/how-to/enable-conversation-recording.md#identify-speakers-by-voice) and the [Voice ID protocol](../../../docs/voice-id-protocol.md).
 
 ### Switching the multilingual ASR model
 

@@ -55,8 +55,8 @@ to these rows.
 | `annotations` | Job outputs and human labels: `(target, source, kind, value)` |
 | `jobs` | Post-processing queue with checkpointed `progress` |
 | `people` | People the agent talks to: name and an `archived` flag |
-| `speaker_assignments` | Who spoke: one row for the whole session (`turn_idx=-1`) or per-turn overrides. `source` is `live:picker`, `live:voice-id:<model key>` (suffixed with `:low` or `:unknown` for an uncertain attribution), or `human:<name>`. |
-| `voice_embeddings` | Voice ID enrollment data: speaker embeddings per person and model key, written by the `enroll_speaker` tool. |
+| `speaker_assignments` | Who spoke: one row for the whole session (`turn_idx=-1`) or per-turn overrides. `source` is `live:picker`, `live:voice-id:<model key>` (suffixed with `:verified` when the speaker's face confirmed the voice, or with `:low` or `:unknown` for an uncertain attribution), or `human:<name>`. |
+| `voice_embeddings` | Voice and face ID enrollment data: speaker and face embeddings per person and model key, written by the `enroll_speaker` tool. |
 | `memories` | Facts about a person: text, category, confidence, `status` (`proposed`, `active`, `forgotten` or `superseded`), source, and review fields. Rows are never deleted. |
 | `memory_evidence` | The session, turn and quote that support each memory |
 | `memory_uses` | Which memories were injected into which live session |
@@ -360,6 +360,40 @@ Voice identification has the following limits:
 - The assistant does not enroll voices on its own. Embeddings are stored only
   through `enroll_speaker`.
 - Only the multilingual assistant handles `speaker-update` messages.
+
+### Confirm Speakers by Face
+
+A client with a camera can also recognize faces. Face identification never
+replaces the voice: it confirms it and reports who is in view. No image leaves
+the client. The client sends only face embeddings, which are stored next to the
+voice embeddings under their own model key and served by the same gallery
+endpoint.
+
+- **Tier `verified`.** A `speaker-update` can carry the face that the client
+  linked to the speaker. When the voice and that face name the same person, the
+  tier is `verified`. The server treats `verified` like `high` for memories and
+  trust, and records the turn with the source
+  `live:voice-id:<model key>:verified`. A policy that needs both factors must
+  check `current_speaker().verified`. The server downgrades a `verified` update
+  whose face does not name the same person to `high`.
+- **Who is in view.** The client sends `presence-update` messages with the
+  people it sees. The first face message adds the `face_id_addon` prompt block.
+  The speaker tag then lists the other people in view, for example
+  `[speaker: Alice; also in view: Bob, unknown guest]`.
+- **Greeting.** When a person recognized at face tier `high` comes into view
+  for the first time in a session, and nobody speaks and no reply is pending,
+  the server adds `[presence: Alice came into view]` to the context and runs
+  the LLM once so that the assistant can greet them by name. A person is
+  greeted at most once per session. A person who already spoke, or who appeared
+  while the conversation stayed busy for 10 seconds, is not greeted.
+- **Enrollment.** `enroll_speaker` also binds the face embeddings that the
+  client linked to the current speaker. The assistant asks for consent to
+  remember both voice and face. Enrollment still works when no face was seen.
+
+Presence alone never loads the memories of a person, never changes
+`current_speaker()`, and never grants a policy. There is no liveness check: a
+photo of an enrolled person produces a face match. For this reason a face
+without a matching voice is never trusted.
 
 ## Remote storage later
 

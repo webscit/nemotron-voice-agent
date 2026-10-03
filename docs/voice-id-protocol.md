@@ -120,3 +120,83 @@ The client adds/updates that person in its cached gallery and relabels the provi
   their voice before calling the tool.
 - If no usable embedding is buffered, the tool returns an error asking the person to say a
   full sentence first.
+
+## Face identification
+
+The client can also recognise faces with its camera. Face identification never replaces the
+voice: it confirms it, and reports who is in view when nobody speaks. No image leaves the
+client, only embeddings.
+
+### Face embeddings and gallery
+
+Face vectors use the same wire format as voice vectors and their own model key (e.g.
+`insightface-buffalo-s-mbf@1`). The client fetches the face gallery with the same endpoint,
+`GET /api/voice-id/gallery?model=<face model key>`; the server stores face vectors next to
+voice vectors, told apart by model key only.
+
+### Tiers
+
+`tier` in `speaker-update` gains a top value:
+
+- `verified`: the voice matched a person at `high` **and** the face linked to the speaker
+  matched the same person. The server treats it as at least `high`; policies may require it.
+- A voice matched at `high` with no linked face stays `high`.
+- A face alone (speech too short to embed, or a voice that matches nobody) never yields more
+  than `low`.
+- A linked face that confidently matches a different person than the voice yields `low` with
+  the voice's `person_id`.
+
+There is no liveness check: a photo of an enrolled person can produce a face match. This is
+why a face alone never exceeds `low` and never grants memory or elevated policies.
+
+### `speaker-update` additions
+
+```json
+{
+  "tier": "verified",
+  "face": {"model": "insightface-buffalo-s-mbf@1", "person_id": "a1b2", "score": 0.62, "link": "doa"},
+  "face_embedding": "<base64, only when final and a face was linked>"
+}
+```
+
+- `face` is `null`/absent when no face could be linked to the speaker. `face.person_id` is
+  `null` for an unrecognised face. `link` says how the face was tied to the speaker: `doa`
+  (sound direction matched the face's bearing) or `single` (the only face in view, no usable
+  sound direction).
+- `provisional_id` is shared between modalities: an unknown person has one `unk-<n>` for both
+  face and voice.
+
+### Client → server: `presence-update`
+
+Sent as an RTVI `client-message` whenever the set of people in view changes (the client
+debounces it), with an empty list when nobody is visible:
+
+```json
+{
+  "t": "presence-update",
+  "d": {
+    "model": "insightface-buffalo-s-mbf@1",
+    "people": [
+      {"person_id": "a1b2", "provisional_id": null, "score": 0.64, "tier": "high"},
+      {"person_id": null, "provisional_id": "unk-2", "score": 0.12, "tier": "unknown"}
+    ]
+  }
+}
+```
+
+- `tier` here is face-only: `high`, `low` or `unknown`.
+- The server keeps the latest presence for the session and makes it visible to the LLM (who is
+  in view) on the next turn. When a person recognised at `high` comes into view for the first
+  time in a session while the conversation is idle, the server may trigger one turn so the
+  agent can greet them by name. Presence alone never loads a person's memories and never
+  grants policies.
+
+### Enrollment additions
+
+- `enroll_speaker` also binds the buffered `face_embedding` vectors of the current speaker,
+  stored under the face model key. The consent question must cover both voice and face.
+- `speaker-enrolled` gains an optional `face` object when face vectors were bound:
+
+```json
+{"face": {"model": "insightface-buffalo-s-mbf@1", "centroid": "<base64>", "count": 3}}
+```
