@@ -71,6 +71,8 @@ from examples.shared.prewarm import (
 from examples.shared.tts_text_normalizer import LanguageAwareVoiceFormatter
 from examples.shared.voice_id import (
     ENROLL_TOOL_NAME,
+    FACE_ID_ADDON_KEY,
+    PRESENCE_UPDATE_MESSAGE,
     SPEAKER_UPDATE_MESSAGE,
     VOICE_ID_ADDON_KEY,
     SpeakerTurnProcessor,
@@ -387,11 +389,13 @@ async def bot(runner_args: RunnerArguments) -> None:
     )
     prompt_without_person = base_system_content
 
-    def render_pinned_prompt(person, voice_id_active: bool = False) -> str:
+    def render_pinned_prompt(person, voice_id_active: bool = False, face_id_active: bool = False) -> str:
         """Prompt catalog content for the person being talked with (re-rendered when voice ID changes it)."""
         content = prompt_without_person
         if voice_id_active:
             content = render_prompt_addon(content, prompt_catalog, VOICE_ID_ADDON_KEY, {})
+        if face_id_active:
+            content = render_prompt_addon(content, prompt_catalog, FACE_ID_ADDON_KEY, {})
         if person:
             content = render_prompt_addon(
                 content, prompt_catalog, PERSON_MEMORY_ADDON_KEY, person.prompt_replacements()
@@ -635,6 +639,10 @@ async def bot(runner_args: RunnerArguments) -> None:
         if message.type == SPEAKER_UPDATE_MESSAGE:
             if voice_id_session:
                 await voice_id_session.on_speaker_update(payload)
+            return
+        if message.type == PRESENCE_UPDATE_MESSAGE:
+            if voice_id_session:
+                await voice_id_session.on_presence_update(payload)
             return
         if message.type == "set-voice":
             voice_id = payload.get("voice_id", "")
