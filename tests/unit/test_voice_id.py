@@ -414,8 +414,9 @@ def test_session_tags_turns_swaps_memories_and_records_speakers(store):
         assert h.pinned["content"] == "BASE|VOICE"
 
         # Unknown voice, then an id the store does not know (stale client gallery).
-        assert await h.turn("Hello", provisional_id="unk-1", tier="unknown") == "[speaker: unknown guest] Hello"
-        assert await h.turn("Hey", person_id="ghost", tier="high") == "[speaker: unknown guest] Hey"
+        hint = "[speaker: unknown guest, not introduced yet: ask their name]"
+        assert await h.turn("Hello", provisional_id="unk-1", tier="unknown") == f"{hint} Hello"
+        assert await h.turn("Hey", person_id="ghost", tier="high") == f"{hint} Hey"
         assert h.session.current_speaker().is_guest
 
     asyncio.run(run())
@@ -732,7 +733,9 @@ def test_presence_is_named_in_the_speaker_tag_without_changing_the_speaker(store
 
         # An unknown speaker is not repeated among the people in view (shared provisional id).
         tagged = await h.turn("Hello", provisional_id="unk-1", tier="unknown")
-        assert tagged.startswith("[speaker: unknown guest; also in view: Alice, Bob, Carol (uncertain), 2 unknown")
+        assert tagged.startswith(
+            "[speaker: unknown guest, not introduced yet: ask their name; also in view: Alice, Bob, Carol (uncertain)"
+        )
 
         await h.session.on_presence_update(_presence())
         assert await h.turn("Seul", person_id=alice["id"], tier="high") == "[speaker: Alice] Seul"
@@ -1024,5 +1027,20 @@ def test_session_follows_a_merge_made_while_it_is_running(store):
         assert await h.turn("Re", person_id=duplicate["id"], tier="high") == "[speaker: Alice] Re"
         assert "Alice aime le thé" in h.pinned["content"]
         assert h.session.current_speaker().trusted_person_id == alice["id"]
+
+    asyncio.run(run())
+
+
+def test_new_unknown_guest_is_prompted_for_their_name_once(store):
+    async def run():
+        h = _Harness(store)
+        hint = "[speaker: unknown guest, not introduced yet: ask their name]"
+        # Opening words too short for a voice sample, then the same guest's voice gets a provisional id.
+        assert await h.turn("Bonjour", tier="none") == f"{hint} Bonjour"
+        assert await h.turn("Ça va ?", provisional_id="unk-1", tier="unknown") == "[speaker: unknown guest] Ça va ?"
+        assert await h.turn("Oui", provisional_id="unk-1", tier="unknown") == "[speaker: unknown guest] Oui"
+        # Another unknown voice is a new guest.
+        assert await h.turn("Salut", provisional_id="unk-2", tier="unknown") == f"{hint} Salut"
+        assert await h.turn("Re", provisional_id="unk-2", tier="unknown") == "[speaker: unknown guest] Re"
 
     asyncio.run(run())

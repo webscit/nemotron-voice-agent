@@ -345,8 +345,11 @@ their embeddings live in the monitoring database. It works as follows:
    (tier `high`) loads that person's memories. A different or unknown speaker
    removes them. An uncertain turn of the same person keeps them.
 
-To enroll a new voice, the person tells the assistant their name and agrees
-that it remembers their voice. The assistant then calls `enroll_speaker`,
+To enroll a new voice, the assistant asks an unknown guest for their name and
+whether it may remember their voice: the first turn of each new unknown guest
+in a session is tagged `[speaker: unknown guest, not introduced yet: ask their
+name]`, and the prompt tells the assistant to ask in that reply, once per
+person. When the person gives their name and agrees, the assistant calls `enroll_speaker`,
 which runs on the server. The tool binds the embeddings of the current speaker
 to the person with that name, or creates the person, and sends
 `speaker-enrolled` to the client. To enroll a person you created in the review

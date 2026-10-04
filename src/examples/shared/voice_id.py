@@ -68,6 +68,9 @@ SPEAKER_ENROLLED_MESSAGE = "speaker-enrolled"
 VOICE_ID_ADDON_KEY = "voice_id_addon"
 FACE_ID_ADDON_KEY = "face_id_addon"
 ENROLL_TOOL_NAME = "enroll_speaker"
+# Added once to the tag of a new unknown guest so the LLM asks who they are.
+INTRODUCTION_HINT = ", not introduced yet: ask their name"
+_ANONYMOUS_GUEST = ""
 
 # Voice and the face linked to the speaker agree on the person.
 TIER_VERIFIED = "verified"
@@ -502,8 +505,8 @@ def enroll_tool_schema() -> FunctionSchema:
         name=ENROLL_TOOL_NAME,
         description=(
             "Remember the voice of the person who is speaking right now (and their face, when the camera "
-            "sees them) so you recognise them next time. Call it only after the person told you their name "
-            "and agreed that you remember them this way."
+            "sees them) so you recognise them next time. Call it as soon as an unknown guest told you their "
+            "name and agreed that you remember them; do not wait for a later turn."
         ),
         properties={"name": {"type": "string", "description": "The person's name, as they said it."}},
         required=["name"],
@@ -658,6 +661,8 @@ class VoiceIdSession:
         self._last_activity_at = time.monotonic()
         # People who were greeted, spoke, or missed their greeting window: never greeted (again).
         self._greeted: set[str] = {initial_person.person["id"]} if initial_person else set()
+        # Unknown guests already prompted for their name, by provisional id.
+        self._introduced: set[str] = set()
         self._greeting_deadlines: dict[str, float] = {}
         self._greeter: asyncio.Task | None = None
 
@@ -848,6 +853,8 @@ class VoiceIdSession:
         messages = context.get_messages()
         if messages:
             label = speaker_label(speaker, person.person["name"] if person else None)
+            if person is None and self._first_unknown_turn(speaker):
+                label += INTRODUCTION_HINT
             tag_user_message(messages[-1], label + await self._in_view_label(speaker))
 
         # Memories follow confident identifications only: a fallback or uncertain
@@ -860,6 +867,18 @@ class VoiceIdSession:
 
         self._last_turn_idx = self._turn_idx()
         self._record_turn(speaker, self._last_turn_idx)
+
+    def _first_unknown_turn(self, speaker: Speaker) -> bool:
+        """Whether this unknown guest was never prompted for their name in this session."""
+        key = speaker.provisional_id or _ANONYMOUS_GUEST
+        if key in self._introduced:
+            return False
+        if self._introduced == {_ANONYMOUS_GUEST}:
+            # The first guest's voice got a provisional id only after their opening words: same person.
+            self._introduced.add(key)
+            return False
+        self._introduced.add(key)
+        return True
 
     async def _in_view_label(self, speaker: Speaker) -> str:
         names: list[str] = []
