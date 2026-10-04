@@ -80,10 +80,15 @@ TTS voices and supported language codes are discovered at runtime by prewarming 
 | `services.local.yaml` | on-prem service endpoints (server / single GPU), registry default `nemotron-asr-streaming-multilingual` |
 | `tools.py` | validates client-declared tool schemas into a `ToolsSchema` for the LLM context |
 | `tool_handlers.py` | server-side RTVI forwarding handler for those client-executed tools |
+| `../shared/intent_engine/` | optional intent engine: hassil matching, Home Assistant and client-tool targets, and custom sentences |
 
 ### TTS text normalization
 
 Before synthesis, the pipeline rewrites numbers, currency, percentages, units, dates, times, phone numbers, and emails into spoken words for English and French sessions. Other languages pass through unchanged. The transcript and chat history keep the original text. Set `TTS_TEXT_NORMALIZATION=false` in `.env` to turn it off. For details and the `*/single-gpu` grammar limits, refer to [Configure TTS](../../../docs/how-to/configure-tts.md#text-normalization).
+
+### Intent engine
+
+The pipeline can match device commands, such as "Allume la lampe du salon," before the LLM and execute them directly through the Home Assistant intent API or a client-declared tool. A matched turn skips both LLM calls. Every other turn reaches the LLM unchanged. The engine is off by default. Set `INTENT_ENGINE_ENABLED=true` in `.env` to turn it on, and add `HOME_ASSISTANT_URL` and `HOME_ASSISTANT_TOKEN` to control Home Assistant. Locks and alarm control panels are blocked by default. For the setup, the allowed intents, custom sentences, and the Reachy Mini tool mapping, refer to [Configure the Intent Engine](../../../docs/how-to/configure-intent-engine.md).
 
 ### Client-executed tools
 
