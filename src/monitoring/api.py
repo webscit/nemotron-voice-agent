@@ -18,10 +18,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
+from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from monitoring import memories, schema
+from monitoring import memories, schema, voice_id
 from monitoring.config import MonitoringConfig
 from monitoring.jobs import JOB_REGISTRY
 from monitoring.jobs.reasr import live_source_name, reasr_endpoints, score_session
@@ -78,6 +79,20 @@ class PersonPatchIn(BaseModel):
 
     name: str | None = Field(None, min_length=1, max_length=128)
     archived: bool | None = None
+
+
+class MergeIn(BaseModel):
+    """Merge ``source_id`` into the person in the path, who keeps their name."""
+
+    annotator: str
+    source_id: str = Field(min_length=1, max_length=32)
+
+
+class ForgetIdentityIn(BaseModel):
+    """Delete a person's voice or face samples for one model key (all keys when omitted)."""
+
+    annotator: str
+    model: str | None = Field(None, min_length=1, max_length=128)
 
 
 class SpeakerIn(BaseModel):
@@ -537,8 +552,39 @@ class ReviewService:
 
     # --------------------------------------------------------------- people
     def people(self, *, include_archived: bool) -> list[dict[str, Any]]:
-        """People with session and memory counts."""
-        return memories.person_summaries(self.store, include_archived=include_archived)
+        """People with session, memory, voice-ID turn and identity sample counts."""
+        samples = voice_id.identity_counts(self.store)
+        return [
+            {**person, "identity_samples": samples.get(person["id"], {})}
+            for person in memories.person_summaries(self.store, include_archived=include_archived)
+        ]
+
+    def person_identity(self, person_id: str) -> dict[str, Any]:
+        """Voice and face samples of one person, and the people they may be a duplicate of."""
+        if memories.get_person(self.store, person_id) is None:
+            raise KeyError(person_id)
+        return {
+            "models": voice_id.identity_summary(self.store, person_id),
+            "duplicates": voice_id.duplicate_candidates(self.store, person_id=person_id),
+        }
+
+    def duplicate_people(self) -> list[dict[str, Any]]:
+        """Pairs of people who may be the same person."""
+        return voice_id.duplicate_candidates(self.store)
+
+    def merge_people(self, target_id: str, source_id: str, annotator: str) -> dict[str, Any]:
+        """Merge ``source_id`` into ``target_id``."""
+        merged = memories.merge_people(self.store, source_id, target_id, annotator=annotator)
+        logger.info(f"{annotator} merged person {source_id} into {target_id}: {merged['moved']}")
+        return merged
+
+    def forget_identity(self, person_id: str, model: str | None, annotator: str) -> dict[str, Any]:
+        """Delete a person's voice/face samples."""
+        if memories.get_person(self.store, person_id) is None:
+            raise KeyError(person_id)
+        deleted = voice_id.delete_embeddings(self.store, person_id, model=model)
+        logger.info(f"{annotator} deleted {deleted} identity samples of person {person_id} (model={model or 'all'})")
+        return {"deleted": deleted}
 
     def create_person(self, name: str) -> dict[str, Any]:
         """Add a person."""
@@ -704,6 +750,35 @@ def create_review_router(
     async def update_person(person_id: str, payload: PersonPatchIn):
         try:
             return await run(service.update_person, person_id, name=payload.name, archived=payload.archived)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="person not found") from None
+
+    @router.get("/people/duplicates")
+    async def duplicate_people():
+        return {"duplicates": await run(service.duplicate_people)}
+
+    @router.get("/people/{person_id}/identity")
+    async def person_identity(person_id: str):
+        try:
+            return await run(service.person_identity, person_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="person not found") from None
+
+    @router.post("/people/{person_id}/merge")
+    async def merge_people(person_id: str, payload: MergeIn):
+        annotator = check_annotator(payload.annotator)
+        try:
+            return await run(service.merge_people, person_id, payload.source_id, annotator)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="person not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @router.post("/people/{person_id}/forget-identity")
+    async def forget_identity(person_id: str, payload: ForgetIdentityIn):
+        annotator = check_annotator(payload.annotator)
+        try:
+            return await run(service.forget_identity, person_id, payload.model, annotator)
         except KeyError:
             raise HTTPException(status_code=404, detail="person not found") from None
 

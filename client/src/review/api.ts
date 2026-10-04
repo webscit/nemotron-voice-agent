@@ -114,6 +114,38 @@ export interface Person {
   archived: boolean;
   sessions?: number;
   memories?: Partial<Record<MemoryStatus, number>>;
+  /** Voice/face samples bound at enrollment, by modality (``other`` when the modality is unknown). */
+  identity_samples?: Partial<Record<IdentityModality | "other", number>>;
+  /** Turns attributed live by voice ID, and how many of them a face confirmed. */
+  voice_id_turns?: { turns: number; verified: number };
+}
+
+export type IdentityModality = "voice" | "face";
+
+export interface IdentityModel {
+  model: string;
+  modality: IdentityModality | null;
+  count: number;
+  first_at: number;
+  last_at: number;
+  sessions: string[];
+}
+
+export interface DuplicatePair {
+  people: Person[];
+  scores: { model: string; modality: IdentityModality | null; score: number }[];
+  same_name: boolean;
+}
+
+export interface PersonIdentity {
+  models: IdentityModel[];
+  duplicates: DuplicatePair[];
+}
+
+export interface MergeResult {
+  person: Person;
+  merged: Person;
+  moved: { turns: number; embeddings: number; memories: number };
 }
 
 export type MemoryStatus = "proposed" | "active" | "forgotten" | "superseded";
@@ -379,6 +411,22 @@ export function usePeople(includeArchived = false) {
   });
 }
 
+export function usePersonIdentity(personId: string) {
+  return useQuery({
+    queryKey: ["review", "people", "identity", personId],
+    queryFn: () => request<PersonIdentity>(`/people/${encodeURIComponent(personId)}/identity`),
+    ...live,
+  });
+}
+
+export function useDuplicatePeople() {
+  return useQuery({
+    queryKey: ["review", "people", "duplicates"],
+    queryFn: () => request<{ duplicates: DuplicatePair[] }>("/people/duplicates"),
+    ...live,
+  });
+}
+
 export function useMemories(status: MemoryFilter, personId: string, page: number, pageSize = 20) {
   const params = new URLSearchParams({ status, limit: String(pageSize), offset: String(page * pageSize) });
   if (personId) params.set("person_id", personId);
@@ -437,6 +485,24 @@ export function useCreatePerson() {
 export function useUpdatePerson() {
   return useReviewMutation((input: { id: string; name?: string; archived?: boolean }) =>
     postJson<Person>(`/people/${encodeURIComponent(input.id)}`, { name: input.name, archived: input.archived }, "PATCH")
+  );
+}
+
+export function useMergePeople() {
+  return useReviewMutation((input: { targetId: string; sourceId: string; annotator: string }) =>
+    postJson<MergeResult>(`/people/${encodeURIComponent(input.targetId)}/merge`, {
+      annotator: input.annotator,
+      source_id: input.sourceId,
+    })
+  );
+}
+
+export function useForgetIdentity() {
+  return useReviewMutation((input: { personId: string; annotator: string; model?: string }) =>
+    postJson<{ deleted: number }>(`/people/${encodeURIComponent(input.personId)}/forget-identity`, {
+      annotator: input.annotator,
+      model: input.model ?? null,
+    })
   );
 }
 

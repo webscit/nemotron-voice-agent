@@ -56,7 +56,7 @@ to these rows.
 | `jobs` | Post-processing queue with checkpointed `progress` |
 | `people` | People the agent talks to: name and an `archived` flag |
 | `speaker_assignments` | Who spoke: one row for the whole session (`turn_idx=-1`) or per-turn overrides. `source` is `live:picker`, `live:voice-id:<model key>` (suffixed with `:verified` when the speaker's face confirmed the voice, or with `:low` or `:unknown` for an uncertain attribution), or `human:<name>`. |
-| `voice_embeddings` | Voice and face ID enrollment data: speaker and face embeddings per person and model key, written by the `enroll_speaker` tool. |
+| `voice_embeddings` | Voice and face ID enrollment data: speaker and face embeddings per person and model key, written by the `enroll_speaker` tool. `source` is `live:enroll:voice` or `live:enroll:face`. |
 | `memories` | Facts about a person: text, category, confidence, `status` (`proposed`, `active`, `forgotten` or `superseded`), source, and review fields. Rows are never deleted. |
 | `memory_evidence` | The session, turn and quote that support each memory |
 | `memory_uses` | Which memories were injected into which live session |
@@ -107,7 +107,19 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - a speaker selector for the whole session and for each turn. Changing who
     spoke re-queues the `dream` job for that session.
 - **People.** Create, rename, and archive the people the agent talks to. Each
-  person shows their session and memory counts.
+  person shows their session and memory counts, their enrolled voice and face
+  samples, and how many turns voice ID attributed to them (and how many of
+  those a face verified). Reconcile people who turn out to be the same person:
+  - **Possible duplicates** lists pairs whose enrolled voices or faces are
+    similar (cosine similarity of their centroids, per model) or who share a
+    name. The scores help you decide; nothing is merged automatically.
+  - **Keep** one person of a pair, or on a person's page pick **Same person
+    as**, to merge the other into them. The turns, voice and face samples, and
+    memories of the merged person move to the one you keep, who keeps their
+    name; the merged person is deleted. A merge cannot be undone.
+  - On a person's page, **Forget** deletes their voice or face samples for one
+    model, for example when a sample belongs to someone else. They must enroll
+    again to be recognized.
 - **Memories.** A queue of memories that nobody has reviewed yet. Each memory
   shows its evidence turns (audio and quote), its confidence, and how often it
   was used ("used in N sessions / N replies"). You can:
@@ -348,9 +360,16 @@ speaker it is `None`, and guest policies apply. A voice match is not
 authentication: a recording of a voice can pass it.
 
 Speaker embeddings are biometric data. They stay in the monitoring database
-and are never sent to the LLM. To delete the embeddings of a person, call
+and are never sent to the LLM. To delete the embeddings of a person, use
+**Forget** on their page in the review UI, or call
 `DELETE /api/voice-id/people/<person id>/embeddings`. Archiving a person
 removes them from the gallery but keeps the embeddings.
+
+A client loads the gallery when it connects, so after a merge it keeps
+reporting the merged person's old id until it reconnects. The merge is
+recorded as an alias (`person_alias:<old id>` in the `kv` table), and the
+server resolves it wherever a live session turns an id into a person: the
+speaker is tagged, trusted and attributed as the person you kept.
 
 Voice identification has the following limits:
 
