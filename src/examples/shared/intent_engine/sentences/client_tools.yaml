@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Intent -> client tool mapping for the intent engine.
+#
+# The sentences live in <language>/*.yaml next to this file. An intent listed
+# here runs as a tool call on the client instead of going to Home Assistant, and
+# is only active when the client declared that tool at connect time.
+#
+#   tool:          client tool name
+#   arguments:     tool arguments; a value is a literal, or
+#                  {slot: <slot name>, default: <value>} to copy a matched slot
+#                  (an argument whose slot did not match is left out)
+#   then:          optional second call to the same tool. Its arguments can also be
+#                  {result: <key>, add: <literal or slot>, min: <n>, max: <n>},
+#                  computed from the first call's result
+#   defer_to_llm:  true reserves the intent's sentences for the LLM (no tool call)
+#
+# These entries follow the tool schemas of the Reachy Mini conversation app
+# (reachy_mini_conversation_app/tools). Adjust them to your client.
+intents:
+  ReachySetVolume:
+    tool: volume_control
+    arguments:
+      device: speaker
+      level: {slot: level}
+  # volume_control only takes an absolute level: read the current one (no level
+  # argument), then set it shifted by the matched step.
+  ReachyVolumeRelative:
+    tool: volume_control
+    arguments:
+      device: speaker
+    then:
+      arguments:
+        device: speaker
+        level: {result: volume, add: {slot: step}, min: 0, max: 100}
+  ReachyMoveHead:
+    tool: move_head
+    arguments:
+      direction: {slot: direction}
+  # Without a move the client picks a random dance.
+  ReachyDance:
+    tool: dance
+    arguments:
+      repeat: {slot: repeat}
+  # The tool schema requires this placeholder argument.
+  ReachyStopDance:
+    tool: stop_dance
+    arguments:
+      dummy: true
+  # Without an emotion the client picks a random one.
+  ReachyPlayEmotion:
+    tool: play_emotion
+    arguments:
+      emotion: {slot: emotion}
+  ReachyGoToSleep:
+    tool: go_to_sleep
+  ReachySweepLook:
+    tool: sweep_look

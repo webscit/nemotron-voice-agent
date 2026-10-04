@@ -49,6 +49,7 @@ from examples.multilingual.multilingual_processor import (
 from examples.multilingual.tool_handlers import ClientToolResultBridge, build_client_tool_handler
 from examples.multilingual.tools import build_client_tools
 from examples.shared.audio_recorder import create_audio_recorder
+from examples.shared.intent_engine import IntentEngineConfig, build_intent_engine
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
 from examples.shared.person_memory import PERSON_MEMORY_ADDON_KEY, load_person_context, record_person_session
 from examples.shared.pipeline_utils import (
@@ -416,6 +417,7 @@ async def bot(runner_args: RunnerArguments) -> None:
     )
 
     reminder_processor = PerTurnReminderProcessor(build_reminder(fixed_session_language))
+    intent_engine_config = IntentEngineConfig.from_env()
 
     session_snapshot = _session_snapshot(
         example="multilingual-assistant",
@@ -434,6 +436,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             "language": tts_settings_kwargs.get("language"),
         },
         person=person_context.snapshot if person_context else None,
+        intent_engine=intent_engine_config.snapshot(),
     )
     recorder = SessionRecorder.create(
         session_id=body.get("session_id") or None,
@@ -447,12 +450,25 @@ async def bot(runner_args: RunnerArguments) -> None:
     audio_processors = recorder.processors() if recorder else [p for p in [create_audio_recorder()] if p]
     conversation_id = recorder.session_id if recorder else (body.get("session_id") or None)
 
+    # Optional: answer matched device commands (Home Assistant, client tools) without
+    # the LLM. Sits right before the LLM so a miss continues unchanged.
+    intent_engine = build_intent_engine(
+        intent_engine_config,
+        language=fixed_session_language,
+        context=context,
+        llm=llm,
+        client_tool_names=client_tool_names,
+        client_tool_timeout_secs=CLIENT_FUNCTION_TIMEOUT_SECS,
+        recorder=recorder,
+    )
+
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             user_aggregator,
             reminder_processor,
+            *([intent_engine] if intent_engine else []),
             llm,
             tts,
             transport.output(),
