@@ -864,3 +864,165 @@ def test_speaker_turn_processor_tracks_bot_speech(store):
         assert h.session.conversation_idle(now=1e12)
 
     asyncio.run(run())
+
+
+# ----------------------------------------------------------- reconciliation
+def _enroll(store, person, model, vectors, kind):
+    voice_id.add_embeddings(store, person["id"], model, vectors, source=voice_id.ENROLL_SOURCES[kind], session_id="s1")
+
+
+def test_identity_summary_labels_modality_and_falls_back_for_untagged_samples(store):
+    alice = memories.create_person(store, "Alice")
+    _enroll(store, alice, MODEL, [_vec(1), _vec(2)], "voice")
+    _enroll(store, alice, FACE_MODEL, [_vec(3)], "face")
+    voice_id.add_embeddings(store, alice["id"], "legacy@1", [_vec(4)], source="live:enroll")
+
+    summary = {entry["model"]: entry for entry in voice_id.identity_summary(store, alice["id"])}
+
+    assert {model: (e["modality"], e["count"]) for model, e in summary.items()} == {
+        MODEL: ("voice", 2),
+        FACE_MODEL: ("face", 1),
+        "legacy@1": (None, 1),
+    }
+    assert summary[MODEL]["sessions"] == ["s1"]
+    assert voice_id.identity_counts(store) == {alice["id"]: {"voice": 2, "face": 1, "other": 1}}
+
+
+def test_duplicate_candidates_rank_similar_voices_and_faces_and_flag_same_names(store):
+    alice = memories.create_person(store, "Alice")
+    alice_again = memories.create_person(store, "Alice")
+    alicia = memories.create_person(store, "Alicia")
+    bob = memories.create_person(store, "Bob")
+    near = voice_id.normalize(_vec(1) + 0.2 * _vec(9))
+    _enroll(store, alice, MODEL, [_vec(1)], "voice")
+    _enroll(store, alicia, MODEL, [near], "voice")
+    _enroll(store, alice, FACE_MODEL, [_vec(5)], "face")
+    _enroll(store, alicia, FACE_MODEL, [_vec(5)], "face")
+    _enroll(store, bob, MODEL, [-_vec(1)], "voice")
+
+    pairs = voice_id.duplicate_candidates(store)
+
+    first = pairs[0]
+    assert {p["id"] for p in first["people"]} == {alice["id"], alicia["id"]}
+    assert {s["modality"] for s in first["scores"]} == {"voice", "face"}
+    assert all(s["score"] > 0.9 for s in first["scores"])
+    same_name = [p for p in pairs if p["same_name"]]
+    assert [{x["id"] for x in p["people"]} for p in same_name] == [{alice["id"], alice_again["id"]}]
+    assert all(bob["id"] not in {x["id"] for x in p["people"]} for p in pairs)
+    assert all(
+        bob["id"] in {x["id"] for x in p["people"]} for p in voice_id.duplicate_candidates(store, person_id=bob["id"])
+    )
+
+
+def test_merge_moves_everything_and_old_ids_keep_resolving(store):
+    alice = memories.create_person(store, "Alice")
+    duplicate = memories.create_person(store, "Alice B")
+    carol = memories.create_person(store, "Carol")
+    _enroll(store, duplicate, MODEL, [_vec(1)], "voice")
+    _memory(store, duplicate, "Elle aime le thé.")
+    memories.assign_speaker(store, "s1", duplicate["id"], source="live:voice-id:x", turn_idx=3)
+
+    merged = memories.merge_people(store, duplicate["id"], alice["id"], annotator="rev")
+
+    assert merged["moved"] == {"turns": 1, "embeddings": 1, "memories": 1}
+    assert memories.get_person(store, duplicate["id"]) is None
+    assert memories.speakers_for(store, "s1")["turns"] == {3: alice["id"]}
+    assert [m["text"] for m in memories.active_memories(store, alice["id"])] == ["Elle aime le thé."]
+    assert set(voice_id.centroids(store, MODEL)) == {alice["id"]}
+
+    # A client that still has the old id attributes turns to the merged person.
+    memories.assign_speaker(store, "s1", duplicate["id"], source="live:voice-id:x", turn_idx=4)
+    assert memories.speakers_for(store, "s1")["turns"][4] == alice["id"]
+
+    # Chained merges keep resolving to the final person.
+    memories.merge_people(store, alice["id"], carol["id"], annotator="rev")
+    assert memories.resolve_person_id(store, duplicate["id"]) == carol["id"]
+
+    with pytest.raises(ValueError):
+        memories.merge_people(store, carol["id"], carol["id"], annotator="rev")
+    memories.update_person(store, carol["id"], archived=True)
+    other = memories.create_person(store, "Dan")
+    with pytest.raises(ValueError):
+        memories.merge_people(store, other["id"], carol["id"], annotator="rev")
+    with pytest.raises(KeyError):
+        memories.merge_people(store, "nope", other["id"], annotator="rev")
+
+
+def test_session_resolves_a_person_merged_while_the_client_kept_its_old_gallery(store):
+    alice = memories.create_person(store, "Alice")
+    duplicate = memories.create_person(store, "Alice B")
+    _memory(store, duplicate, "Alice aime le thé.")
+    memories.merge_people(store, duplicate["id"], alice["id"], annotator="rev")
+
+    async def run():
+        h = _Harness(store)
+        assert await h.turn("Bonjour", person_id=duplicate["id"], tier="high") == "[speaker: Alice] Bonjour"
+        assert "Alice aime le thé" in h.pinned["content"]
+        assert h.session.current_speaker().trusted_person_id == alice["id"]
+
+    asyncio.run(run())
+    assert memories.speakers_for(store, "s1")["turns"] == {1: alice["id"]}
+
+
+def test_review_api_identity_duplicates_merge_and_forget(store, tmp_path):
+    from monitoring.api import create_review_router
+    from monitoring.config import MonitoringConfig
+    from monitoring.store import LocalArtifactStore
+
+    settings = MonitoringConfig(
+        enabled=True,
+        data_dir=tmp_path,
+        db_url=str(store.engine.url),
+        record_audio_turns=False,
+        record_audio_stereo=False,
+        record_video="off",
+        video_fps=1.0,
+    )
+    app = FastAPI()
+    app.include_router(create_review_router(settings, store, LocalArtifactStore(settings.artifacts_dir), {}))
+    client = TestClient(app)
+    alice = memories.create_person(store, "Alice")
+    alicia = memories.create_person(store, "Alicia")
+    _enroll(store, alice, MODEL, [_vec(1)], "voice")
+    _enroll(store, alicia, MODEL, [_vec(1)], "voice")
+    _enroll(store, alicia, FACE_MODEL, [_vec(2)], "face")
+    memories.assign_speaker(store, "s1", alicia["id"], source=f"live:voice-id:{MODEL}:verified", turn_idx=1)
+    memories.assign_speaker(store, "s1", alicia["id"], source=f"live:voice-id:{MODEL}", turn_idx=2)
+
+    people = {p["name"]: p for p in client.get("/api/review/people").json()["people"]}
+    assert people["Alicia"]["identity_samples"] == {"voice": 1, "face": 1}
+    assert people["Alicia"]["voice_id_turns"] == {"turns": 2, "verified": 1}
+    identity = client.get(f"/api/review/people/{alicia['id']}/identity").json()
+    assert {m["modality"] for m in identity["models"]} == {"voice", "face"}
+    assert len(identity["duplicates"]) == 1
+    assert len(client.get("/api/review/people/duplicates").json()["duplicates"]) == 1
+    assert client.get("/api/review/people/nope/identity").status_code == 404
+
+    url = f"/api/review/people/{alice['id']}/merge"
+    assert client.post(url, json={"annotator": "", "source_id": alicia["id"]}).status_code == 422
+    assert client.post(url, json={"annotator": "rev", "source_id": alice["id"]}).status_code == 422
+    assert client.post(url, json={"annotator": "rev", "source_id": "nope"}).status_code == 404
+    merged = client.post(url, json={"annotator": "rev", "source_id": alicia["id"]}).json()
+    assert merged["moved"] == {"turns": 2, "embeddings": 2, "memories": 0}
+    assert [p["name"] for p in client.get("/api/review/people").json()["people"]] == ["Alice"]
+
+    forget = f"/api/review/people/{alice['id']}/forget-identity"
+    assert client.post(forget, json={"annotator": "rev", "model": FACE_MODEL}).json() == {"deleted": 1}
+    assert client.post(forget, json={"annotator": "rev"}).json() == {"deleted": 2}
+    assert client.get("/api/review/people").json()["people"][0]["identity_samples"] == {}
+
+
+def test_session_follows_a_merge_made_while_it_is_running(store):
+    alice = memories.create_person(store, "Alice")
+    duplicate = memories.create_person(store, "Alice B")
+    _memory(store, alice, "Alice aime le thé.")
+
+    async def run():
+        h = _Harness(store)
+        assert await h.turn("Bonjour", person_id=duplicate["id"], tier="high") == "[speaker: Alice B] Bonjour"
+        memories.merge_people(store, duplicate["id"], alice["id"], annotator="rev")
+        assert await h.turn("Re", person_id=duplicate["id"], tier="high") == "[speaker: Alice] Re"
+        assert "Alice aime le thé" in h.pinned["content"]
+        assert h.session.current_speaker().trusted_person_id == alice["id"]
+
+    asyncio.run(run())

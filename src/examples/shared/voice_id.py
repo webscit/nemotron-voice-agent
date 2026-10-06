@@ -55,6 +55,7 @@ from examples.shared.person_memory import (
     load_person_context,
     record_memory_uses,
     record_turn_speaker,
+    resolve_person_id,
 )
 
 if TYPE_CHECKING:
@@ -575,7 +576,9 @@ def _bind_voice(
     if store is None:
         return None
     person = memories.find_or_create_person(store, name)
-    kept = voice_id.add_embeddings(store, person["id"], model, vectors, source="live:enroll", session_id=session_id)
+    kept = voice_id.add_embeddings(
+        store, person["id"], model, vectors, source=voice_id.ENROLL_SOURCES["voice"], session_id=session_id
+    )
     entry = voice_id.centroids(store, model, person_id=person["id"]).get(person["id"])
     if not kept or entry is None:
         return None
@@ -587,7 +590,7 @@ def _bind_voice(
     # The face is optional: the voice alone is a valid enrollment.
     if face_model and face_vectors:
         kept = voice_id.add_embeddings(
-            store, person["id"], face_model, face_vectors, source="live:enroll", session_id=session_id
+            store, person["id"], face_model, face_vectors, source=voice_id.ENROLL_SOURCES["face"], session_id=session_id
         )
         face = voice_id.centroids(store, face_model, person_id=person["id"]).get(person["id"])
         if kept and face is not None:
@@ -672,6 +675,8 @@ class VoiceIdSession:
     async def _person(self, person_id: str | None, *, refresh: bool = False) -> PersonContext | None:
         if not person_id:
             return None
+        # Resolved on every lookup: a reviewer may merge this person while the session runs.
+        person_id = await resolve_person_id(person_id)
         if refresh or person_id not in self._people:
             self._people[person_id] = await load_person_context(person_id)
         return self._people[person_id]
@@ -735,6 +740,9 @@ class VoiceIdSession:
             if corrected.person_id and person is None:
                 self.tracker.set_current(replace(corrected, person_id=None, tier=TIER_UNKNOWN))
                 return
+            if person is not None and person.person["id"] != corrected.person_id:
+                corrected = replace(corrected, person_id=person.person["id"])
+                self.tracker.set_current(corrected)
             self._record_turn(corrected, self._last_turn_idx)
 
     def on_user_turn_started(self) -> None:
@@ -826,6 +834,10 @@ class VoiceIdSession:
         if speaker.person_id and person is None:
             # Unknown or archived id (stale client gallery): a guest.
             speaker = replace(speaker, person_id=None, tier=TIER_UNKNOWN)
+            self.tracker.set_current(speaker)
+        elif person is not None and person.person["id"] != speaker.person_id:
+            # A person merged in review since the client loaded its gallery.
+            speaker = replace(speaker, person_id=person.person["id"])
             self.tracker.set_current(speaker)
 
         if speaker.person_id:

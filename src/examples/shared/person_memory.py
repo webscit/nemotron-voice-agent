@@ -46,14 +46,17 @@ def _load(person_id: str) -> PersonContext | None:
     store = memories.live_store()
     if store is None:
         return None
-    person = memories.get_person(store, person_id)
+    person = memories.get_person(store, memories.resolve_person_id(store, person_id))
     if person is None or person.get("archived"):
         return None
-    return PersonContext(person, memories.active_memories(store, person_id, limit=MAX_PROMPT_MEMORIES))
+    return PersonContext(person, memories.active_memories(store, person["id"], limit=MAX_PROMPT_MEMORIES))
 
 
 async def load_person_context(person_id: object) -> PersonContext | None:
-    """Person and active memories for ``person_id``, or None (unknown, archived, monitoring off, error)."""
+    """Person and active memories for ``person_id`` (or whom they were merged into), or None.
+
+    None when the person is unknown or archived, monitoring is off, or on error.
+    """
     if not isinstance(person_id, str) or not person_id.strip():
         return None
     try:
@@ -61,6 +64,22 @@ async def load_person_context(person_id: object) -> PersonContext | None:
     except Exception as exc:
         logger.opt(exception=exc).warning("Could not load person memories; continuing without them")
         return None
+
+
+def _resolve(person_id: str) -> str:
+    from monitoring import memories
+
+    store = memories.live_store()
+    return memories.resolve_person_id(store, person_id) if store is not None else person_id
+
+
+async def resolve_person_id(person_id: str) -> str:
+    """The id ``person_id`` was merged into in review, or ``person_id`` itself (best effort)."""
+    try:
+        return await asyncio.to_thread(_resolve, person_id)
+    except Exception as exc:
+        logger.opt(exception=exc).warning("Could not resolve a merged person id; using it as is")
+        return person_id
 
 
 def _record(session_id: str, context: PersonContext) -> None:

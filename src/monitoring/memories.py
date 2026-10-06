@@ -4,7 +4,8 @@
 """People, speaker attribution and memories.
 
 - **People**: who the agent talks to. A live session is attributed to the person
-  picked in the client; review can reassign a whole session or single turns.
+  picked in the client; review can reassign a whole session or single turns, and
+  merge two people found to be the same one.
 - **Memories**: facts about a person extracted offline by the ``dream`` job. A
   memory above the confidence threshold is ``active`` right away (used in live
   prompts) and reviewed afterwards; below it, it stays ``proposed`` until a
@@ -27,6 +28,9 @@ from monitoring.store import SessionStore
 SESSION_TURN = -1
 USABLE_STATUSES = ("proposed", "active")
 REVIEW_ACTIONS = ("approve", "correct", "forget")
+# ``kv`` key of a merged person, pointing at the person they were merged into.
+PERSON_ALIAS_PREFIX = "person_alias:"
+_MAX_ALIAS_HOPS = 16
 
 
 def _rows(store: SessionStore, stmt) -> list[dict[str, Any]]:
@@ -56,6 +60,60 @@ def create_person(store: SessionStore, name: str) -> dict[str, Any]:
     with store.engine.begin() as conn:
         conn.execute(insert(schema.people).values(**row))
     return row
+
+
+def resolve_person_id(store: SessionStore, person_id: str) -> str:
+    """The id ``person_id`` was merged into, or ``person_id`` itself.
+
+    Live clients cache the speaker gallery for a whole session, so they keep
+    reporting a merged person's old id until they reconnect.
+    """
+    kv = schema.kv
+    with store.engine.connect() as conn:
+        for _ in range(_MAX_ALIAS_HOPS):
+            alias = conn.execute(select(kv.c.value).where(kv.c.key == PERSON_ALIAS_PREFIX + person_id)).scalar()
+            if not isinstance(alias, dict) or not alias.get("person_id"):
+                break
+            person_id = alias["person_id"]
+    return person_id
+
+
+def merge_people(store: SessionStore, source_id: str, target_id: str, *, annotator: str) -> dict[str, Any]:
+    """Move everything known about ``source_id`` to ``target_id``, then delete ``source_id``.
+
+    Turn attributions, voice and face embeddings and memories move; the target
+    keeps its name. Raises ``KeyError`` for an unknown person and ``ValueError``
+    for a self-merge or an archived target.
+    """
+    if source_id == target_id:
+        raise ValueError("cannot merge a person into themselves")
+    source, target = get_person(store, source_id), get_person(store, target_id)
+    if source is None:
+        raise KeyError(source_id)
+    if target is None:
+        raise KeyError(target_id)
+    if target["archived"]:
+        raise ValueError("unarchive the person to keep before merging into them")
+    moved: dict[str, int] = {}
+    kv = schema.kv
+    now = time.time()
+    with store.engine.begin() as conn:
+        for name, table in (
+            ("turns", schema.speaker_assignments),
+            ("embeddings", schema.voice_embeddings),
+            ("memories", schema.memories),
+        ):
+            result = conn.execute(update(table).where(table.c.person_id == source_id).values(person_id=target_id))
+            moved[name] = result.rowcount or 0
+        # Earlier merges into the source now point at the target directly.
+        for row in conn.execute(select(kv.c.key, kv.c.value).where(kv.c.key.like(PERSON_ALIAS_PREFIX + "%"))).all():
+            if isinstance(row.value, dict) and row.value.get("person_id") == source_id:
+                conn.execute(update(kv).where(kv.c.key == row.key).values(value={**row.value, "person_id": target_id}))
+        alias = {"person_id": target_id, "name": source["name"], "merged_by": annotator, "merged_at": now}
+        conn.execute(delete(kv).where(kv.c.key == PERSON_ALIAS_PREFIX + source_id))
+        conn.execute(insert(kv).values(key=PERSON_ALIAS_PREFIX + source_id, value=alias, updated_at=now))
+        conn.execute(delete(schema.people).where(schema.people.c.id == source_id))
+    return {"person": target, "merged": source, "moved": moved}
 
 
 def find_person_by_name(store: SessionStore, name: str) -> dict[str, Any] | None:
@@ -94,6 +152,8 @@ def assign_speaker(
     store: SessionStore, session_id: str, person_id: str | None, *, source: str, turn_idx: int = SESSION_TURN
 ) -> None:
     """Attribute a session (``turn_idx=-1``) or one turn to a person; ``None`` clears it."""
+    if person_id:
+        person_id = resolve_person_id(store, person_id)
     sa = schema.speaker_assignments
     where = (sa.c.session_id == session_id) & (sa.c.turn_idx == turn_idx)
     with store.engine.begin() as conn:
@@ -376,7 +436,7 @@ def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict
 
 
 def person_summaries(store: SessionStore, *, include_archived: bool = False) -> list[dict[str, Any]]:
-    """People with their session and memory counts."""
+    """People with their session, memory and voice-ID turn counts."""
     people = list_people(store, include_archived=include_archived)
     sa, m = schema.speaker_assignments, schema.memories
     with store.engine.connect() as conn:
@@ -385,12 +445,29 @@ def person_summaries(store: SessionStore, *, include_archived: bool = False) -> 
                 select(sa.c.person_id, func.count(func.distinct(sa.c.session_id))).group_by(sa.c.person_id)
             ).all()
         )
+        voice_turns: dict[str, dict[str, int]] = defaultdict(lambda: {"turns": 0, "verified": 0})
+        for pid, source, count in conn.execute(
+            select(sa.c.person_id, sa.c.source, func.count())
+            .where(sa.c.source.like("live:voice-id:%"), sa.c.turn_idx != SESSION_TURN)
+            .group_by(sa.c.person_id, sa.c.source)
+        ).all():
+            voice_turns[pid]["turns"] += count
+            if source.endswith(":verified"):
+                voice_turns[pid]["verified"] += count
         memory_counts: dict[str, dict[str, int]] = defaultdict(dict)
         for pid, status, count in conn.execute(
             select(m.c.person_id, m.c.status, func.count()).group_by(m.c.person_id, m.c.status)
         ).all():
             memory_counts[pid][status] = count
-    return [{**p, "sessions": sessions.get(p["id"], 0), "memories": memory_counts.get(p["id"], {})} for p in people]
+    return [
+        {
+            **p,
+            "sessions": sessions.get(p["id"], 0),
+            "memories": memory_counts.get(p["id"], {}),
+            "voice_id_turns": dict(voice_turns.get(p["id"], {"turns": 0, "verified": 0})),
+        }
+        for p in people
+    ]
 
 
 # ------------------------------------------------------------- live prompt

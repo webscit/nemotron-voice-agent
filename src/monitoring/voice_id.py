@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, func, insert, select
 
 from monitoring import memories, schema
 from monitoring.store import SessionStore
@@ -31,6 +31,11 @@ MAX_DIM = 4096
 MAX_MODEL_KEY_LEN = 128
 # Centroids use each person's most recent embeddings only.
 MAX_CENTROID_EMBEDDINGS = 200
+# Embedding ``source`` per modality; model keys are opaque, so the source says which is which.
+ENROLL_SOURCES = {"voice": "live:enroll:voice", "face": "live:enroll:face"}
+# Pairs scoring below this on every model are not worth a reviewer's attention.
+DUPLICATE_SCORE_FLOOR = 0.25
+MAX_DUPLICATES = 20
 
 
 def normalize(vector: np.ndarray) -> np.ndarray | None:
@@ -150,6 +155,90 @@ def gallery(store: SessionStore, model: str) -> list[dict[str, Any]]:
         for person in memories.list_people(store)
         if person["id"] in by_person
     ]
+
+
+def modality(source: str) -> str | None:
+    """``voice`` or ``face`` for an embedding source, None when the source does not say."""
+    return next((name for name, enroll in ENROLL_SOURCES.items() if source == enroll), None)
+
+
+def identity_summary(store: SessionStore, person_id: str) -> list[dict[str, Any]]:
+    """Per model key: modality, sample count, enrollment dates and source sessions for one person."""
+    ve = schema.voice_embeddings
+    stmt = (
+        select(ve.c.model, ve.c.source, ve.c.session_id, ve.c.created_at)
+        .where(ve.c.person_id == person_id)
+        .order_by(ve.c.created_at)
+    )
+    with store.engine.connect() as conn:
+        rows = conn.execute(stmt).all()
+    models: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = models.setdefault(
+            row.model,
+            {"model": row.model, "modality": None, "count": 0, "first_at": row.created_at, "sessions": []},
+        )
+        entry["modality"] = entry["modality"] or modality(row.source)
+        entry["count"] += 1
+        entry["last_at"] = row.created_at
+        if row.session_id and row.session_id not in entry["sessions"]:
+            entry["sessions"].append(row.session_id)
+    return list(models.values())
+
+
+def identity_counts(store: SessionStore) -> dict[str, dict[str, int]]:
+    """``{person_id: {modality: samples}}``; samples whose modality is unknown count as ``other``."""
+    ve = schema.voice_embeddings
+    with store.engine.connect() as conn:
+        rows = conn.execute(
+            select(ve.c.person_id, ve.c.source, func.count()).group_by(ve.c.person_id, ve.c.source)
+        ).all()
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for pid, source, count in rows:
+        counts[pid][modality(source) or "other"] += count
+    return {pid: dict(by_modality) for pid, by_modality in counts.items()}
+
+
+def duplicate_candidates(store: SessionStore, *, person_id: str | None = None) -> list[dict[str, Any]]:
+    """Pairs of people who may be the same person, most similar first.
+
+    Each pair carries the cosine similarity of their centroids for every model
+    key both have samples for, and whether their names match. With
+    ``person_id``, only pairs involving that person.
+    """
+    people = {p["id"]: p for p in memories.list_people(store, include_archived=True)}
+    ve = schema.voice_embeddings
+    with store.engine.connect() as conn:
+        model_rows = conn.execute(select(ve.c.model, ve.c.source).distinct()).all()
+    model_modality: dict[str, str | None] = {}
+    for model, source in model_rows:
+        model_modality[model] = model_modality.get(model) or modality(source)
+
+    pairs: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def pair(a: str, b: str) -> dict[str, Any]:
+        key = (a, b) if a < b else (b, a)
+        return pairs.setdefault(key, {"people": [people[key[0]], people[key[1]]], "scores": [], "same_name": False})
+
+    for model, kind in model_modality.items():
+        by_person = {pid: c["centroid"] for pid, c in centroids(store, model).items() if pid in people}
+        ids = sorted(by_person)
+        for i, a in enumerate(ids):
+            for b in ids[i + 1 :]:
+                score = float(by_person[a] @ by_person[b])
+                if score >= DUPLICATE_SCORE_FLOOR:
+                    pair(a, b)["scores"].append({"model": model, "modality": kind, "score": round(score, 4)})
+    by_name: dict[str, list[str]] = defaultdict(list)
+    for pid, p in people.items():
+        by_name[p["name"].strip().casefold()].append(pid)
+    for ids in by_name.values():
+        for i, a in enumerate(ids):
+            for b in ids[i + 1 :]:
+                pair(a, b)["same_name"] = True
+
+    out = [p for (a, b), p in pairs.items() if person_id is None or person_id in (a, b)]
+    out.sort(key=lambda p: (max((s["score"] for s in p["scores"]), default=0.0), p["same_name"]), reverse=True)
+    return out[:MAX_DUPLICATES]
 
 
 def create_voice_id_router() -> APIRouter:
