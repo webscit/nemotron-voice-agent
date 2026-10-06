@@ -17,6 +17,7 @@ from sqlalchemy import (
     Float,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     Table,
@@ -24,7 +25,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 metadata = MetaData()
 
@@ -207,10 +208,28 @@ speaker_assignments = Table(
     # -1 = the whole session; a turn row overrides it for that turn.
     Column("turn_idx", Integer, primary_key=True),
     Column("person_id", String(32), nullable=False),
-    # ``live:picker`` or ``human:<name>``.
+    # ``live:picker``, ``live:voice-id:<model key>`` or ``human:<name>``.
     Column("source", String(256), nullable=False),
     Column("created_at", Float, nullable=False),
     Index("ix_speaker_person", "person_id"),
+)
+
+# Voice-ID enrollment data: speaker embeddings computed by the live client.
+# Vectors are L2-normalised float32 (little-endian) and only comparable within
+# one ``model`` key, so every read filters on it.
+voice_embeddings = Table(
+    "voice_embeddings",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("person_id", String(32), nullable=False),
+    Column("model", String(128), nullable=False),
+    Column("dim", Integer, nullable=False),
+    Column("vector", LargeBinary, nullable=False),
+    # ``live:enroll`` (the ``enroll_speaker`` tool).
+    Column("source", String(256), nullable=False),
+    Column("session_id", String(64)),
+    Column("created_at", Float, nullable=False),
+    Index("ix_voice_embeddings_model_person", "model", "person_id"),
 )
 
 # Facts about a person extracted by the ``dream`` job (or written by a reviewer).

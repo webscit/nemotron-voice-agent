@@ -623,6 +623,16 @@ async def _ensure_services_ready_for_connection(config: dict, example: dict) -> 
     await _ensure_tts_ready_for_connection(config, example)
 
 
+def _include_voice_id_router(app: FastAPI) -> None:
+    """Mount ``/api/voice-id``; it answers ``503`` while the people store is unavailable."""
+    try:
+        from monitoring.voice_id import create_voice_id_router
+
+        app.include_router(create_voice_id_router())
+    except Exception as exc:
+        logger.warning(f"Voice-ID API not mounted: {exc}")
+
+
 def _include_review_router(app: FastAPI) -> None:
     """Mount ``/api/review`` when session recording is enabled."""
     from monitoring.config import load_monitoring_config
@@ -1146,6 +1156,10 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
     # ---- Review API (recorded sessions; MONITORING_ENABLED) ----
 
     _include_review_router(app)
+
+    # ---- Voice-ID gallery (speaker embeddings; 503 unless MONITORING_ENABLED) ----
+
+    _include_voice_id_router(app)
 
     # ---- Static client UI ----
 
