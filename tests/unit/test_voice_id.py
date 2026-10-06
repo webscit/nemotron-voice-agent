@@ -19,6 +19,7 @@ from examples.shared.voice_id import (
     Speaker,
     VoiceIdSession,
     VoiceIdTracker,
+    parse_presence_update,
     parse_speaker_update,
     speaker_label,
     tag_user_message,
@@ -28,6 +29,7 @@ from monitoring import memories, voice_id
 from monitoring.store import SessionStore
 
 MODEL = "test-model@1"
+FACE_MODEL = "test-face@1"
 DIM = 32
 
 
@@ -339,10 +341,12 @@ class _Harness:
         self.pinned = messages[-1]
 
     @staticmethod
-    def _render(person, voice_id_active=False):
+    def _render(person, voice_id_active=False, face_id_active=False):
         content = "BASE"
         if voice_id_active:
             content += "|VOICE"
+        if face_id_active:
+            content += "|FACE"
         if person:
             content += f"|{person.person['name']}:{person.prompt_replacements()['memories']}"
         return content
@@ -547,3 +551,316 @@ def test_speaker_turn_processor_tags_the_turn_before_the_llm(store):
 
     # The second context frame (no open turn) leaves the message alone.
     assert asyncio.run(run()) == "[speaker: Alice] Bonjour"
+
+
+# --------------------------------------------------------------------- face
+def _face(person_id=None, link="doa", **overrides) -> dict:
+    return {"model": FACE_MODEL, "person_id": person_id, "score": 0.6, "link": link, **overrides}
+
+
+def _presence(*people) -> dict:
+    return {
+        "model": FACE_MODEL,
+        "people": [
+            {"person_id": pid, "provisional_id": prov, "score": 0.6, "tier": tier} for pid, prov, tier in people
+        ],
+    }
+
+
+def test_gallery_serves_face_vectors_under_their_own_model_key(store):
+    app = FastAPI()
+    app.include_router(voice_id.create_voice_id_router())
+    client = TestClient(app)
+    alice = memories.create_person(store, "Alice")
+    voice_id.add_embeddings(store, alice["id"], MODEL, [_vec(1)], source="t")
+    voice_id.add_embeddings(store, alice["id"], FACE_MODEL, [np.ones(512), np.ones(512)], source="t")
+
+    faces = client.get("/api/voice-id/gallery", params={"model": FACE_MODEL}).json()["people"]
+    assert [(p["person_id"], p["count"]) for p in faces] == [(alice["id"], 2)]
+    assert voice_id.decode_vector(faces[0]["centroid"]).size == 512
+    voices = client.get("/api/voice-id/gallery", params={"model": MODEL}).json()["people"]
+    assert voices[0]["count"] == 1 and voice_id.decode_vector(voices[0]["centroid"]).size == DIM
+
+
+def test_parse_speaker_update_face_fields_and_verified_tier():
+    emb = voice_id.encode_vector(_vec(5))
+    verified = _update(person_id="p1", tier="verified", face=_face("p1"), final=True, face_embedding=emb)
+    assert verified.tier == "verified"
+    assert (verified.face.model, verified.face.person_id, verified.face.link) == (FACE_MODEL, "p1", "doa")
+    assert np.allclose(verified.face_embedding, _vec(5), atol=1e-6)
+
+    # ``verified`` without a linked face naming the same person is only a voice match.
+    assert _update(person_id="p1", tier="verified").tier == "high"
+    assert _update(person_id="p1", tier="verified", face=_face("p2")).tier == "high"
+    assert _update(person_id="p1", tier="verified", face=_face(None)).tier == "high"
+    assert _update(tier="verified", provisional_id="unk-1", face=_face(None)).tier == "unknown"
+
+    # Malformed face evidence is dropped, and a face embedding needs both a face and a final update.
+    assert _update(person_id="p1", tier="high", face={"model": FACE_MODEL, "link": "guess"}).face is None
+    assert _update(person_id="p1", tier="high", face={"link": "doa"}).face is None
+    assert _update(person_id="p1", tier="high", face="x", final=True, face_embedding=emb).face_embedding is None
+    assert _update(person_id="p1", tier="high", face=_face("p1"), face_embedding=emb).face_embedding is None
+    assert _update(person_id="p1", tier="high", face=_face(score=9)).face.score == 1.0
+
+
+def test_parse_presence_update():
+    assert parse_presence_update("nope") is None
+    assert parse_presence_update({"model": "", "people": []}) is None
+    assert parse_presence_update({"model": FACE_MODEL}) is None
+    assert parse_presence_update(_presence(), now=1.0).people == ()
+
+    presence = parse_presence_update(
+        {
+            "model": FACE_MODEL,
+            "people": [
+                {"person_id": "p1", "provisional_id": "unk-9", "score": 2, "tier": "high"},
+                {"person_id": "p1", "tier": "low"},  # duplicate
+                {"person_id": "p2", "tier": "verified"},  # not a face tier: unknown
+                {"provisional_id": "unk-2", "tier": "high"},  # a match needs a person
+                {"tier": "unknown"},
+                "junk",
+            ],
+        },
+        now=1.0,
+    )
+    assert [(p.person_id, p.provisional_id, p.tier) for p in presence.people] == [
+        ("p1", None, "high"),
+        (None, None, "unknown"),
+        (None, "unk-2", "unknown"),
+        (None, None, "unknown"),
+    ]
+    assert presence.people[0].score == 1.0
+    crowd = parse_presence_update(_presence(*[(f"p{i}", None, "high") for i in range(40)]))
+    assert len(crowd.people) == live.MAX_PRESENT_PEOPLE
+
+
+def test_verified_speaker_is_trusted_and_falls_back_to_low():
+    tracker = VoiceIdTracker()
+    tracker.start_turn(now=1.0)
+    tracker.on_update(_update(now=1.5, person_id="p1", tier="verified", face=_face("p1")))
+    speaker = tracker.commit_turn(now=2.0)
+    assert speaker.verified and speaker.trusted_person_id == "p1" and speaker.face_model == FACE_MODEL
+    assert tracker.face_active and tracker.face_model == FACE_MODEL
+    assert not Speaker(person_id="p1", tier="high").verified
+    assert speaker_label(speaker, "Alice") == "Alice"
+
+    tracker.start_turn(now=10.0)
+    speaker = tracker.commit_turn(now=11.0)
+    assert (speaker.person_id, speaker.tier, speaker.verified, speaker.is_guest) == ("p1", "low", False, True)
+
+
+def test_tracker_buffers_face_embeddings_only_for_the_attributed_speaker():
+    tracker = VoiceIdTracker()
+    voice, face = voice_id.encode_vector(_vec(1)), voice_id.encode_vector(_vec(2))
+    tracker.start_turn(now=1.0)
+    # Voice says p1 but the linked face is recognised as p2: that face is not p1's.
+    tracker.on_update(
+        _update(now=1.5, person_id="p1", tier="low", final=True, embedding=voice, face=_face("p2"), face_embedding=face)
+    )
+    tracker.commit_turn(now=2.0)
+    assert len(tracker.enrollment_sample()) == 1 and tracker.face_enrollment_sample() == []
+
+    tracker.start_turn(now=10.0)
+    tracker.on_update(
+        _update(now=10.5, person_id="p1", tier="high", final=True, embedding=voice, face=_face(), face_embedding=face)
+    )
+    tracker.commit_turn(now=11.0)
+    assert len(tracker.face_enrollment_sample()) == 1
+    assert len(tracker.face_enrollment_sample(latest_turn_only=True)) == 1
+    tracker.mark_enrolled("p1")
+    assert tracker.face_enrollment_sample() == [] and tracker.enrollment_sample() == []
+
+
+def test_session_verified_turn_loads_memories_and_records_its_source(store):
+    alice = memories.create_person(store, "Alice")
+    _memory(store, alice, "Alice aime le thé.")
+
+    async def run():
+        h = _Harness(store)
+        tagged = await h.turn("Bonjour", person_id=alice["id"], tier="verified", face=_face(alice["id"]))
+        assert tagged == "[speaker: Alice] Bonjour"
+        assert h.pinned["content"] == "BASE|VOICE|FACE|Alice:- Alice aime le thé."
+        assert h.session.current_speaker().verified
+        # The face prompt block appears with the first face evidence, not before.
+        h2 = _Harness(store)
+        h2.turn_idx = 10
+        await h2.turn("Bonjour", person_id=alice["id"], tier="high")
+        assert h2.pinned["content"].startswith("BASE|VOICE|Alice")
+        await h2.turn("Encore", person_id=alice["id"], tier="high", face=_face(None, link="single"))
+        assert h2.pinned["content"].startswith("BASE|VOICE|FACE|Alice")
+
+    asyncio.run(run())
+    from sqlalchemy import select
+
+    from monitoring import schema
+
+    with store.engine.connect() as conn:
+        sa = schema.speaker_assignments
+        sources = dict(conn.execute(select(sa.c.turn_idx, sa.c.source)).all())
+    assert sources[1] == f"live:voice-id:{MODEL}:verified"
+
+
+def test_presence_is_named_in_the_speaker_tag_without_changing_the_speaker(store, monkeypatch):
+    monkeypatch.setattr(live, "GREETING_WINDOW_SECS", 0.0)  # greetings are covered separately
+    alice = memories.create_person(store, "Alice")
+    bob = memories.create_person(store, "Bob")
+    carol = memories.create_person(store, "Carol")
+    _memory(store, bob, "Bob a un chat.")
+
+    async def run():
+        h = _Harness(store)
+        assert await h.turn("Bonjour") == "Bonjour"  # inert before any voice or face message
+        await h.session.on_presence_update({"model": FACE_MODEL})  # malformed: still inert
+        assert not h.session.tracker.active
+
+        await h.session.on_presence_update(
+            _presence(
+                (alice["id"], None, "high"),
+                (bob["id"], None, "high"),
+                (carol["id"], None, "low"),
+                (None, "unk-1", "unknown"),
+                (None, "unk-2", "unknown"),
+                ("ghost", None, "high"),
+            )
+        )
+        assert h.pinned["content"] == "BASE|VOICE|FACE"  # presence never loads memories
+        assert h.session.current_speaker().is_guest and h.session.current_speaker().person_id is None
+
+        tagged = await h.turn("Salut", person_id=alice["id"], tier="high")
+        assert tagged == "[speaker: Alice; also in view: Bob, Carol (uncertain), 3 unknown guests] Salut"
+        assert "Bob a un chat" not in h.pinned["content"]
+
+        # An unknown speaker is not repeated among the people in view (shared provisional id).
+        tagged = await h.turn("Hello", provisional_id="unk-1", tier="unknown")
+        assert tagged.startswith("[speaker: unknown guest; also in view: Alice, Bob, Carol (uncertain), 2 unknown")
+
+        await h.session.on_presence_update(_presence())
+        assert await h.turn("Seul", person_id=alice["id"], tier="high") == "[speaker: Alice] Seul"
+
+    asyncio.run(run())
+
+
+def test_person_coming_into_view_is_greeted_once_and_only_while_idle(store, monkeypatch):
+    from pipecat.frames.frames import (
+        BotStartedSpeakingFrame,
+        BotStoppedSpeakingFrame,
+        LLMRunFrame,
+        UserStartedSpeakingFrame,
+    )
+
+    monkeypatch.setattr(live, "GREETING_QUIET_SECS", 0.0)
+    monkeypatch.setattr(live, "GREETING_POLL_SECS", 0.01)
+    alice = memories.create_person(store, "Alice")
+    bob = memories.create_person(store, "Bob")
+    carol = memories.create_person(store, "Carol")
+    dave = memories.create_person(store, "Dave")
+
+    async def run():
+        h = _Harness(store)
+        seen = [(alice["id"], None, "high"), (carol["id"], None, "low"), (None, "unk-1", "unknown")]
+        await h.session.on_presence_update(_presence(*seen))
+        await h.drain()
+        assert [type(f) for f in h.frames] == [LLMRunFrame]
+        assert h.context.get_messages()[-1] == {"role": "user", "content": "[presence: Alice came into view]"}
+        assert h.pinned["content"] == "BASE|VOICE|FACE"  # greeted by name, without memories
+        assert h.session.current_speaker().is_guest
+
+        # Once per person per session, even after leaving and coming back.
+        h.session.on_activity(BotStoppedSpeakingFrame())
+        await h.session.on_presence_update(_presence())
+        await h.session.on_presence_update(_presence(*seen))
+        await h.drain()
+        assert len(h.frames) == 1
+
+        # Not while the bot speaks: Bob is greeted once it stopped ...
+        h.session.on_activity(BotStartedSpeakingFrame())
+        await h.session.on_presence_update(_presence((bob["id"], None, "high")))
+        await asyncio.sleep(0.05)
+        assert len(h.frames) == 1
+        h.session.on_activity(BotStoppedSpeakingFrame())
+        await h.drain()
+        assert len(h.frames) == 2 and "Bob came into view" in h.context.get_messages()[-1]["content"]
+
+        # ... and not at all when the conversation stays busy or the person left meanwhile.
+        monkeypatch.setattr(live, "GREETING_WINDOW_SECS", 0.05)
+        h.session.on_activity(UserStartedSpeakingFrame())
+        await h.session.on_presence_update(_presence((dave["id"], None, "high")))
+        await h.drain()
+        assert len(h.frames) == 2
+
+    asyncio.run(run())
+
+
+def test_speaker_and_open_turn_are_not_greeted(store, monkeypatch):
+    monkeypatch.setattr(live, "GREETING_QUIET_SECS", 0.0)
+    monkeypatch.setattr(live, "GREETING_POLL_SECS", 0.01)
+    monkeypatch.setattr(live, "GREETING_WINDOW_SECS", 0.05)
+    alice = memories.create_person(store, "Alice")
+    bob = memories.create_person(store, "Bob")
+
+    async def run():
+        h = _Harness(store)
+        await h.turn("Bonjour", person_id=alice["id"], tier="high")
+        from pipecat.frames.frames import BotStoppedSpeakingFrame
+
+        h.session.on_activity(BotStoppedSpeakingFrame())
+        await h.session.on_presence_update(_presence((alice["id"], None, "high")))  # already talking with her
+        h.session.on_user_turn_started()  # a turn is open when Bob appears
+        await h.session.on_presence_update(_presence((alice["id"], None, "high"), (bob["id"], None, "high")))
+        await h.drain()
+        assert h.frames == []
+
+    asyncio.run(run())
+
+
+def test_enroll_binds_face_with_voice_and_works_without_face(store):
+    voice, face = voice_id.encode_vector(_vec(1)), voice_id.encode_vector(_vec(2))
+
+    async def run():
+        h = _Harness(store)
+        await h.turn(
+            "Je m'appelle Bob",
+            provisional_id="unk-1",
+            tier="unknown",
+            final=True,
+            embedding=voice,
+            face=_face(None),
+            face_embedding=face,
+        )
+        assert await h.session._enroll("Bob") == {"status": "enrolled", "name": "Bob"}
+        # Voice only: no ``face`` object in the reply.
+        await h.turn("Moi c'est Zoé", provisional_id="unk-2", tier="unknown", final=True, embedding=voice)
+        assert (await h.session._enroll("Zoé"))["status"] == "enrolled"
+        await h.drain()
+        return h
+
+    h = asyncio.run(run())
+    bob = memories.find_person_by_name(store, "Bob")
+    with_face, voice_only = (f.data for f in h.frames)
+    assert with_face["face"] == {"model": FACE_MODEL, "centroid": with_face["face"]["centroid"], "count": 1}
+    assert np.allclose(voice_id.decode_vector(with_face["face"]["centroid"]), _vec(2), atol=1e-6)
+    assert (with_face["model"], with_face["count"], with_face["provisional_id"]) == (MODEL, 1, "unk-1")
+    assert "face" not in voice_only
+    assert [p["person_id"] for p in voice_id.gallery(store, FACE_MODEL)] == [bob["id"]]
+    assert len(voice_id.gallery(store, MODEL)) == 2
+
+
+def test_speaker_turn_processor_tracks_bot_speech(store):
+    from pipecat.frames.frames import BotStartedSpeakingFrame, BotStoppedSpeakingFrame
+    from pipecat.processors.frame_processor import FrameDirection
+    from pipecat.tests.utils import run_test
+
+    async def run():
+        h = _Harness(store)
+        processor = live.SpeakerTurnProcessor(h.session)
+        await run_test(
+            processor,
+            frames_to_send=[BotStartedSpeakingFrame()],
+            frames_to_send_direction=FrameDirection.UPSTREAM,
+            expected_up_frames=[BotStartedSpeakingFrame],
+        )
+        assert not h.session.conversation_idle(now=1e12)
+        h.session.on_activity(BotStoppedSpeakingFrame())
+        assert h.session.conversation_idle(now=1e12)
+
+    asyncio.run(run())
