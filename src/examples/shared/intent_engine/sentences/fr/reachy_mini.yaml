@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# French sentences for the Reachy Mini client tools (hassil format, same as the
+# Home Assistant intents repository). ../client_tools.yaml maps each intent to its tool.
+language: fr
+intents:
+  ReachySetVolume:
+    data:
+      - sentences:
+          - "[<regle> ]<ton_volume> (à|a|sur|au) <niveau>"
+  ReachyVolumeRelative:
+    data:
+      - sentences:
+          - "[<parle> ][encore ]plus fort"
+          - "(monte|monter|augmente|augmenter) [encore ](<ton_volume>|le son)"
+        slots:
+          step: 20
+      - sentences:
+          - "[<parle> ](un peu|un petit peu) plus fort"
+          - "(monte|monter|augmente|augmenter) (un peu|un petit peu) (<ton_volume>|le son)"
+        slots:
+          step: 10
+      - sentences:
+          - "[<parle> ][encore ]moins fort"
+          - "(baisse|baisser|diminue|diminuer) [encore ](<ton_volume>|le son)"
+        slots:
+          step: -20
+      - sentences:
+          - "[<parle> ](un peu|un petit peu) moins fort"
+          - "(baisse|baisser|diminue|diminuer) (un peu|un petit peu) (<ton_volume>|le son)"
+        slots:
+          step: -10
+  ReachyMoveHead:
+    data:
+      - sentences:
+          - "(regarde|regarder|tourne la tête|tourner la tête) (à|a|sur|vers|en) [le ]{direction}"
+      - sentences:
+          - "(lève|lever|relève|relever) la tête"
+        slots:
+          direction: up
+      - sentences:
+          - "(baisse|baisser) la tête"
+        slots:
+          direction: down
+      - sentences:
+          - "(regarde|regarder) (devant|devant toi|tout droit|droit devant|en face)"
+          - "(remets|remettre|replace|replacer) (la|ta) tête (droite|au centre|au milieu)"
+        slots:
+          direction: front
+  ReachyDance:
+    data:
+      - sentences:
+          - "(danse|danser)"
+          - "(fais|faire)[-moi] une [petite |autre |nouvelle ]danse"
+          - "(danse|danser) {repeat} fois"
+  ReachyStopDance:
+    data:
+      - sentences:
+          - "(arrête|arrêter|arrêtes) de danser"
+          - "(arrête|arrêter|arrêtes|stoppe|stopper) la danse"
+  ReachyPlayEmotion:
+    data:
+      - sentences:
+          - "<montre>[-moi] [une |l']émotion [comme être |de |de la |d'être ]{emotion}"
+          - "<montre>[-moi] [la |le |l'|de la |du ]{emotion}"
+          - "(sois|être|montre-toi) {emotion}"
+          - "<montre>[-moi] que tu es {emotion}"
+      - sentences:
+          - "<montre>[-moi] une [autre ]émotion"
+  ReachyGoToSleep:
+    data:
+      - sentences:
+          - "(va|aller|vas) (dormir|te coucher|se coucher|au lit)"
+          - "(endors-toi|dors)"
+  ReachySweepLook:
+    data:
+      - sentences:
+          - "(regarde|regarder) (autour de toi|partout|tout autour)"
+          - "(balaye|balayer|balaie) (la pièce|la salle) du regard"
+lists:
+  volume_percent:
+    range:
+      from: 0
+      to: 100
+  volume_named:
+    values:
+      - in: "[le ](maximum|max|fond)"
+        out: 100
+      - in: "[le ](minimum|min)"
+        out: 10
+      - in: "(moitié|la moitié)"
+        out: 50
+  repeat:
+    range:
+      from: 1
+      to: 5
+  # Values of the move_head tool's "direction" enum ("front" has its own sentences).
+  direction:
+    values:
+      - in: "(droite|ta droite)"
+        out: right
+      - in: "(gauche|ta gauche)"
+        out: left
+      - in: "haut"
+        out: up
+      - in: "bas"
+        out: down
+  # Values of the play_emotion tool's "emotion" enum that have a clear spoken form.
+  emotion:
+    values:
+      - in: "(heureux|heureuse|content|contente|joyeux|joyeuse|joie)"
+        out: happy
+      - in: "(excité|excitée|enthousiaste)"
+        out: excited
+      - in: "(amoureux|amoureuse|amour)"
+        out: loving
+      - in: "(reconnaissant|reconnaissante|gratitude)"
+        out: grateful
+      - in: "(pensif|pensive)"
+        out: thinking
+      - in: "(attentif|attentive)"
+        out: attentive
+      - in: "(confus|confuse|perdu|perdue)"
+        out: confused
+      - in: "(triste|tristesse)"
+        out: sad
+      - in: "(en colère|fâché|fâchée|colère)"
+        out: angry
+      - in: "(agacé|agacée|irrité|irritée)"
+        out: irritated
+      - in: "(dégoûté|dégoûtée|dégoût)"
+        out: disgusted
+      - in: "(effrayé|effrayée|apeuré|apeurée|peur)"
+        out: scared
+      - in: "(anxieux|anxieuse|inquiet|inquiète)"
+        out: anxious
+      - in: "(surpris|surprise|étonné|étonnée)"
+        out: surprised
+      - in: "(émerveillé|émerveillée|impressionné|impressionnée)"
+        out: amazed
+      - in: "(soulagé|soulagée|soulagement)"
+        out: relief
+      - in: "(impatient|impatiente|impatience)"
+        out: impatient
+      - in: "(gêné|gênée|embarrassé|embarrassée|timide)"
+        out: embarrassed
+      - in: "(ennuyé|ennuyée|ennui)"
+        out: bored
+      - in: "(fatigué|fatiguée|fatigue)"
+        out: tired
+expansion_rules:
+  regle: "(mets|mettre|règle|régler|monte|monter|baisse|baisser|mettons)"
+  parle: "(parle|parler|parles)"
+  ton_volume: "[ton |le |ta |la |en ]volume"
+  niveau: "({volume_percent:level}[ pour cent| %]|{volume_named:level})"
+  montre: "(fais|faire|montre|montrer|joue|jouer)"
+skip_words:
+  - "maintenant"
+  - "tu pourrais"
+  - "pourrais-tu"
+  - "je veux que tu"
+responses:
+  intents:
+    ReachySetVolume:
+      default: "Volume à {{ slots.level }} pour cent"
+    ReachyVolumeRelative:
+      default: "Volume à {{ slots.level }} pour cent"
+    ReachyMoveHead:
+      default: "Voilà"
+    ReachyDance:
+      default: "C'est parti"
+    ReachyStopDance:
+      default: "J'arrête de danser"
+    ReachyPlayEmotion:
+      default: "Voilà"
+    ReachyGoToSleep:
+      default: "Bonne nuit"
+    ReachySweepLook:
+      default: "Je regarde autour de moi"
