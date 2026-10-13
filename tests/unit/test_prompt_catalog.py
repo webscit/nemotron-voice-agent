@@ -49,6 +49,7 @@ class PromptCatalogTests(unittest.TestCase):
                 "person_memory_addon",
                 "voice_id_addon",
                 "face_id_addon",
+                "messaging_addon",
             },
         }
         for path, expected in cases.items():

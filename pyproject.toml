@@ -14,6 +14,7 @@ dependencies = [
     "langchain-nvidia-ai-endpoints>=1.2.1",
     "imageio-ffmpeg>=0.5.1",
     "sqlalchemy>=2.0",
+    "matrix-nio>=0.26.0",
 ]
 
 # Force patched versions for known CVEs
