@@ -49,6 +49,13 @@ from examples.multilingual.multilingual_processor import (
 from examples.multilingual.tool_handlers import ClientToolResultBridge, build_client_tool_handler
 from examples.multilingual.tools import build_client_tools
 from examples.shared.audio_recorder import create_audio_recorder
+from examples.shared.memory_tools import (
+    FORGET_TOOL_NAME,
+    MEMORY_TOOL_NAMES,
+    REMEMBER_TOOL_NAME,
+    MemoryTools,
+    with_memory_tools,
+)
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
 from examples.shared.person_memory import PERSON_MEMORY_ADDON_KEY, load_person_context, record_person_session
 from examples.shared.pipeline_utils import (
@@ -409,10 +416,16 @@ async def bot(runner_args: RunnerArguments) -> None:
     base_system_content = render_pinned_prompt(person_context)
 
     client_tools_schema, client_tool_names = build_client_tools(body.get("tools"))
+    # Voice ID and the memory tools need the people store, so they are off without monitoring.
+    people_store_available = await asyncio.to_thread(voice_id_available)
+    memory_tools_enabled = people_store_available and not set(MEMORY_TOOL_NAMES) & set(client_tool_names)
+    if people_store_available and not memory_tools_enabled:
+        logger.warning(f"Memory tools disabled: the client declares its own {' or '.join(MEMORY_TOOL_NAMES)} tool")
+    tools_schema = with_memory_tools(client_tools_schema) if memory_tools_enabled else client_tools_schema
 
     messages = build_context_messages(base_system_content, system_prompt)
-    if client_tools_schema is not None:
-        context = LLMContext(messages, tools=client_tools_schema, tool_choice="auto")
+    if tools_schema is not None:
+        context = LLMContext(messages, tools=tools_schema, tool_choice="auto")
     else:
         context = LLMContext(messages)
     preserve_prompt_messages = len(messages)
@@ -440,16 +453,18 @@ async def bot(runner_args: RunnerArguments) -> None:
 
     reminder_processor = PerTurnReminderProcessor(build_reminder(fixed_session_language))
 
+    # The prompt catalog content is the last initial message (system, or user after a control prompt).
+    pinned_index = len(messages) - 1
+
     # Voice ID: the client streams who is speaking (``speaker-update``); it needs the
     # people store for names, memories and enrollment, so it is off without monitoring.
     voice_id_session: VoiceIdSession | None = None
     if ENROLL_TOOL_NAME in client_tool_names:
         logger.warning(f"Voice ID disabled: the client declares its own '{ENROLL_TOOL_NAME}' tool")
-    elif await asyncio.to_thread(voice_id_available):
+    elif people_store_available:
         voice_id_session = VoiceIdSession(
             context=context,
-            # The prompt catalog content is the last initial message (system, or user after a control prompt).
-            pinned_index=len(messages) - 1,
+            pinned_index=pinned_index,
             render_pinned=render_pinned_prompt,
             queue_frame=lambda frame: task.queue_frame(frame),
             session_id=lambda: recorder.session_id if recorder else None,
@@ -460,6 +475,30 @@ async def bot(runner_args: RunnerArguments) -> None:
         # tool list once the client sends its first speaker-update.
         llm.register_function(ENROLL_TOOL_NAME, voice_id_session.enroll_speaker, cancel_on_interruption=True)
     voice_id_processors = [SpeakerTurnProcessor(voice_id_session)] if voice_id_session else []
+
+    async def refresh_picked_person() -> None:
+        """Without voice ID: reload the picked person's memories into the pinned prompt."""
+        nonlocal person_context
+        if person_context is None:
+            return
+        person_context = await load_person_context(person_context.person["id"]) or person_context
+        message = context.get_messages()[pinned_index]
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            message["content"] = render_pinned_prompt(person_context)
+
+    if memory_tools_enabled:
+        # Server-side remember / forget, on the person known for sure (picked, or recognised by voice ID).
+        memory_tools = MemoryTools(
+            current_person=voice_id_session.confirmed_person if voice_id_session else lambda: person_context,
+            refresh=voice_id_session.refresh_memory_person if voice_id_session else refresh_picked_person,
+            session_id=lambda: recorder.session_id if recorder else None,
+            turn_idx=lambda: recorder.turn_idx if recorder else -1,
+            language=fixed_session_language,
+        )
+        # Not cancelled on interruption: the memory is written either way, so the LLM should hear it.
+        llm.register_function(REMEMBER_TOOL_NAME, memory_tools.remember, cancel_on_interruption=False)
+        llm.register_function(FORGET_TOOL_NAME, memory_tools.forget, cancel_on_interruption=False)
+        logger.info(f"Registered memory tools: {', '.join(MEMORY_TOOL_NAMES)}")
 
     session_snapshot = _session_snapshot(
         example="multilingual-assistant",

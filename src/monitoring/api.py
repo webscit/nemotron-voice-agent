@@ -103,11 +103,19 @@ class SpeakerIn(BaseModel):
     turn_idx: int | None = Field(None, ge=0)
 
 
-class MemoryReviewIn(BaseModel):
-    """Review one memory: approve, correct (new text and/or person) or forget."""
+class MemoryIn(BaseModel):
+    """Add a memory about a person."""
 
     annotator: str
-    action: str = Field(pattern="^(approve|correct|forget)$")
+    text: str = Field(min_length=1, max_length=500)
+    category: str = "other"
+
+
+class MemoryReviewIn(BaseModel):
+    """Review one memory: approve, correct (new text and/or person), forget or restore."""
+
+    annotator: str
+    action: str = Field(pattern="^(approve|correct|forget|restore)$")
     text: str | None = Field(None, max_length=500)
     person_id: str | None = None
 
@@ -610,12 +618,23 @@ class ReviewService:
         self.store.reset_job("dream", session_id)
         return memories.speakers_for(self.store, session_id)
 
-    def list_memories(self, *, person_id: str | None, status: str, limit: int, offset: int) -> dict[str, Any]:
+    def list_memories(
+        self, *, person_id: str | None, status: str, origin: str | None, limit: int, offset: int
+    ) -> dict[str, Any]:
         """Memories page with evidence and usage."""
-        return memories.list_memories(self.store, person_id=person_id, status=status, limit=limit, offset=offset)
+        return memories.list_memories(
+            self.store, person_id=person_id, status=status, origin=origin, limit=limit, offset=offset
+        )
+
+    def add_memory(self, person_id: str, annotator: str, payload: MemoryIn) -> dict[str, Any]:
+        """Add a reviewer's memory about a person."""
+        row = memories.add_manual_memory(
+            self.store, person_id, payload.text, reviewer=annotator, category=payload.category
+        )
+        return memories.attach_details(self.store, [row])[0]
 
     def review_memory(self, memory_id: int, annotator: str, payload: MemoryReviewIn) -> dict[str, Any]:
-        """Approve, correct or forget a memory."""
+        """Approve, correct, forget or restore a memory."""
         if payload.person_id and memories.get_person(self.store, payload.person_id) is None:
             raise ValueError("unknown person")
         if payload.action == "correct" and not (payload.text or "").strip() and not payload.person_id:
@@ -796,10 +815,23 @@ def create_review_router(
     async def list_memories(
         person_id: str | None = None,
         status: str = Query("open", pattern="^(open|usable|all|proposed|active|forgotten|superseded)$"),
+        origin: str | None = Query(None, pattern="^(dreamer|conversation|manual)$"),
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ):
-        return await run(service.list_memories, person_id=person_id, status=status, limit=limit, offset=offset)
+        return await run(
+            service.list_memories, person_id=person_id, status=status, origin=origin, limit=limit, offset=offset
+        )
+
+    @router.post("/people/{person_id}/memories")
+    async def add_memory(person_id: str, payload: MemoryIn):
+        annotator = check_annotator(payload.annotator)
+        try:
+            return await run(service.add_memory, person_id, annotator, payload)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="person not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @router.post("/memories/{memory_id}/review")
     async def review_memory(memory_id: int, payload: MemoryReviewIn):

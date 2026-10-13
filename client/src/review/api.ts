@@ -150,6 +150,10 @@ export interface MergeResult {
 
 export type MemoryStatus = "proposed" | "active" | "forgotten" | "superseded";
 export type MemoryFilter = "open" | "usable" | "all" | MemoryStatus;
+/** Who wrote a memory: the dream job, the person in a conversation (remember tool), or a reviewer. */
+export type MemoryOrigin = "dreamer" | "conversation" | "manual";
+export const MEMORY_CATEGORIES = ["identity", "preference", "relationship", "routine", "event", "health", "other"] as const;
+export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 
 export interface MemoryRow {
   id: number;
@@ -178,6 +182,7 @@ export interface MemoryEvidence {
 
 export interface MemoryDetail extends MemoryRow {
   person_name: string | null;
+  origin: MemoryOrigin | null;
   supersedes_text: string | null;
   evidence: MemoryEvidence[];
   used_in_sessions: number;
@@ -427,11 +432,18 @@ export function useDuplicatePeople() {
   });
 }
 
-export function useMemories(status: MemoryFilter, personId: string, page: number, pageSize = 20) {
+export function useMemories(
+  status: MemoryFilter,
+  personId: string,
+  page: number,
+  pageSize = 20,
+  origin: MemoryOrigin | "" = ""
+) {
   const params = new URLSearchParams({ status, limit: String(pageSize), offset: String(page * pageSize) });
   if (personId) params.set("person_id", personId);
+  if (origin) params.set("origin", origin);
   return useQuery({
-    queryKey: ["review", "memories", status, personId, page, pageSize],
+    queryKey: ["review", "memories", status, personId, page, pageSize, origin],
     queryFn: () => request<{ total: number; memories: MemoryDetail[] }>(`/memories?${params}`),
     ...live,
     placeholderData: (previous) => previous,
@@ -516,12 +528,23 @@ export function useAssignSpeaker() {
   );
 }
 
+export function useAddMemory() {
+  return useReviewMutation(
+    (input: { personId: string; annotator: string; text: string; category: MemoryCategory }) =>
+      postJson<MemoryDetail>(`/people/${encodeURIComponent(input.personId)}/memories`, {
+        annotator: input.annotator,
+        text: input.text,
+        category: input.category,
+      })
+  );
+}
+
 export function useReviewMemory() {
   return useReviewMutation(
     (input: {
       id: number;
       annotator: string;
-      action: "approve" | "correct" | "forget";
+      action: "approve" | "correct" | "forget" | "restore";
       text?: string;
       personId?: string;
     }) =>

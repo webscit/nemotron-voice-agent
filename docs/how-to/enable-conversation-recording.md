@@ -120,13 +120,32 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - On a person's page, **Forget** deletes their voice or face samples for one
     model, for example when a sample belongs to someone else. They must enroll
     again to be recognized.
-- **Memories.** A queue of memories that nobody has reviewed yet. Each memory
-  shows its evidence turns (audio and quote), its confidence, and how often it
-  was used ("used in N sessions / N replies"). You can:
+  - A person's page lists their memories. **Add memory** (text and
+    category) creates a `manual` memory that is `active` and already reviewed,
+    with the source `human:<name>`. The API equivalent is
+    `POST /api/review/people/<person id>/memories` with
+    `{"annotator", "text", "category"}`.
+- **Memories.** A queue of memories that nobody has reviewed yet. Filter by
+  status (**To review**, **In use**, **Proposed**, **Forgotten**, **All**), by
+  person, and by origin. Each memory shows an origin badge, derived from its
+  source:
+  - **Dreamer** (`dreamer`, source `dream:*`): extracted by the `dream` job;
+  - **Conversation** (`conversation`, source `live:*`): saved by the
+    `remember` tool during a session;
+  - **Manual** (`manual`, source `human:*`): added or corrected in the review UI.
+
+  Each memory also shows its evidence turns (audio and quote), its confidence,
+  and how often it was used ("used in N sessions / N replies"). You can:
   - **approve** it, so that it becomes `active`;
   - **correct** its text or reassign it to another person. This creates a
     `human:<name>` memory that supersedes the original;
-  - **forget** it, so that it is never used again.
+  - **forget** it, so that it is never used again;
+  - **restore** a forgotten memory, so that it becomes `active` again.
+
+  In the API, `GET /api/review/memories` accepts
+  `origin=dreamer|conversation|manual`, and
+  `POST /api/review/memories/<id>/review` accepts the actions above, including
+  `"action": "restore"`.
 - **ASR reference.** Every recorded user turn, with the ones where the live
   ASR and the reference model (Voxtral) disagree first.
   - Listen, then take the live (`1`) or reference (`2`) text, or edit it (`e`),
@@ -249,8 +268,11 @@ events, and health information they shared. The job works as follows:
   approve it. A memory that would replace a human-reviewed memory is always
   `proposed`.
 - **Re-runs.** The job never changes a reviewed memory. Before extracting
-  again, it supersedes the unreviewed memories whose only evidence is that
-  session.
+  again, it supersedes its own unreviewed `dream:*` memories whose only
+  evidence is that session. Memories saved by the `remember` tool are kept.
+- **Forgotten memories.** The prompt lists each person's `forgotten` memories
+  as facts not to learn again, so the job does not extract a fact that someone
+  forgot.
 
 The `dream` section of
 [`src/monitoring/jobs/dreamer.yaml`](../../src/monitoring/jobs/dreamer.yaml)
@@ -303,7 +325,10 @@ client, you attribute sessions manually:
    [`src/examples/multilingual/prompts.yaml`](../../src/examples/multilingual/prompts.yaml).
    The session is attributed to the person (source `live:picker`), and the
    memories used are logged in `memory_uses`.
-4. After the session ends, the dreamer runs `dream` to extract new memories.
+4. During the session, the assistant can save or forget a fact when the
+   person asks. Refer to
+   [Save and Forget Memories During a Conversation](#save-and-forget-memories-during-a-conversation).
+5. After the session ends, the dreamer runs `dream` to extract new memories.
    Review them in the **Memories** activity.
 
 An unknown or archived person, or a database error, never blocks a session.
@@ -313,6 +338,36 @@ Memories can contain personal and health information. They stay in the local
 monitoring database. The `dream` job sends the session transcript to the LLM it
 calls. With a cloud LLM, either as the session LLM or through `dream.llm`, the
 transcript leaves your machine.
+
+### Save and Forget Memories During a Conversation
+
+When monitoring is enabled and the people store is reachable, the multilingual
+assistant offers two server-side tools to the LLM. They act only on the person
+whose memories are in the prompt: the person picked in **Who's talking** or,
+once voice ID is active, the latest speaker that voice ID recognizes
+confidently (tier `high` or `verified`).
+
+- **`remember(fact)`** stores one short, third-person fact in the language of
+  the conversation. The memory is `active` right away and appears in the
+  **Memories** queue as "active · unreviewed". Its source is
+  `live:<session id>`, and its evidence points to the session, the turn, and
+  the words of the user.
+- **`forget(query)`** searches the active and proposed memories of the person
+  for the phrase, ignoring case. A memory whose text contains the whole phrase
+  wins. Otherwise, at least half of the query words with three or more letters
+  must match. The best match becomes `forgotten`, with `reviewed_by` set to
+  `live:<session id>`. The memory is never deleted, so you can restore it in
+  the review UI. The tool also returns the other memories that match, so the
+  assistant can ask whether to forget them too. When nothing matches well
+  enough, nothing is forgotten and the closest memories are returned instead.
+
+Both tools write to the database immediately and refresh the
+`person_memory_addon` prompt block for the next reply. When the speaker is
+unknown or uncertain, the tool returns an error, and the assistant offers
+enrollment or asks who is talking. The tool description tells the assistant not
+to store sensitive data such as passwords, addresses, or payment information. If a
+client declares its own tool named `remember` or `forget`, the server disables
+both tools.
 
 ## Identify Speakers by Voice
 

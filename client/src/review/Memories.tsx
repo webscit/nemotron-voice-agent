@@ -3,11 +3,15 @@
 
 import { useState } from "react";
 import {
+  MEMORY_CATEGORIES,
+  useAddMemory,
   useMemories,
   usePeople,
   useReviewMemory,
+  type MemoryCategory,
   type MemoryDetail,
   type MemoryFilter,
+  type MemoryOrigin,
   type Person,
 } from "./api";
 import { AudioClips, StatusLine } from "./components";
@@ -19,6 +23,12 @@ const FILTERS: { id: MemoryFilter; label: string }[] = [
   { id: "proposed", label: "Proposed" },
   { id: "forgotten", label: "Forgotten" },
   { id: "all", label: "All" },
+];
+
+const ORIGINS: { id: MemoryOrigin; label: string; title: string }[] = [
+  { id: "dreamer", label: "Dreamer", title: "Extracted from a recorded session by the dream job" },
+  { id: "conversation", label: "Conversation", title: "Saved by the person during a conversation (remember tool)" },
+  { id: "manual", label: "Manual", title: "Written or corrected by a reviewer" },
 ];
 
 const STATUS_TONE: Record<string, string> = {
@@ -33,8 +43,27 @@ export function MemoryStatusBadge({ memory }: Readonly<{ memory: { status: strin
   return <span className={`rv-badge ${STATUS_TONE[memory.status] ?? "rv-badge-muted"}`}>{label}</span>;
 }
 
+export function MemoryOriginBadge({ origin }: Readonly<{ origin: MemoryOrigin | null }>) {
+  const known = ORIGINS.find((o) => o.id === origin);
+  if (!known) return null;
+  return (
+    <span className={`rv-badge ${origin === "manual" ? "rv-badge-muted" : `rv-badge-${origin}`}`} title={known.title}>
+      {known.label}
+    </span>
+  );
+}
+
+/** ``human:<name>`` → ``<name>``; ``live:<session>`` → ``conversation <session>``. */
+function reviewerLabel(reviewedBy: string): string {
+  if (reviewedBy.startsWith("live:")) return `conversation ${reviewedBy.slice("live:".length)}`;
+  return reviewedBy.replace(/^human:/, "");
+}
+
 function Evidence({ memory }: Readonly<{ memory: MemoryDetail }>) {
-  if (!memory.evidence.length) return <p className="text-xs text-muted">Written by a reviewer (no transcript evidence).</p>;
+  if (!memory.evidence.length) {
+    const why = memory.origin === "manual" ? "Written by a reviewer" : "Not recorded";
+    return <p className="text-xs text-muted">{why} (no transcript evidence).</p>;
+  }
   return (
     <div className="rv-evidence">
       {memory.evidence.map((ev) => (
@@ -60,7 +89,7 @@ function MemoryCard({ memory, people }: Readonly<{ memory: MemoryDetail; people:
   const [text, setText] = useState(memory.text);
   const [personId, setPersonId] = useState(memory.person_id);
   const usable = memory.status === "active" || memory.status === "proposed";
-  const act = (action: "approve" | "correct" | "forget") =>
+  const act = (action: "approve" | "correct" | "forget" | "restore") =>
     review.mutate(
       {
         id: memory.id,
@@ -76,6 +105,7 @@ function MemoryCard({ memory, people }: Readonly<{ memory: MemoryDetail; people:
     <div className="card rv-turn">
       <div className="rv-card-head">
         <MemoryStatusBadge memory={memory} />
+        <MemoryOriginBadge origin={memory.origin} />
         <span className="rv-badge rv-badge-muted">{memory.person_name ?? memory.person_id}</span>
         {memory.category && <span className="rv-badge rv-badge-muted">{memory.category}</span>}
         {memory.confidence !== null && (
@@ -85,7 +115,9 @@ function MemoryCard({ memory, people }: Readonly<{ memory: MemoryDetail; people:
         )}
         <span className="text-xs text-muted">
           {memory.source} · {formatDate(memory.created_at)}
-          {memory.reviewed_by ? ` · reviewed by ${memory.reviewed_by.replace(/^human:/, "")}` : ""}
+          {memory.reviewed_by
+            ? ` · ${memory.status === "forgotten" ? "forgotten" : "reviewed"} by ${reviewerLabel(memory.reviewed_by)}`
+            : ""}
         </span>
       </div>
       {editing ? (
@@ -139,17 +171,69 @@ function MemoryCard({ memory, people }: Readonly<{ memory: MemoryDetail; people:
           {review.error && <span className="text-xs rv-error">{review.error.message}</span>}
         </div>
       )}
+      {memory.status === "forgotten" && (
+        <div className="rv-actions">
+          <button className="btn-secondary" disabled={!annotator || review.isPending} onClick={() => act("restore")}>
+            Restore
+          </button>
+          {!annotator && <span className="text-xs rv-error">set your annotator name first</span>}
+          {review.error && <span className="text-xs rv-error">{review.error.message}</span>}
+        </div>
+      )}
     </div>
+  );
+}
+
+function AddMemoryForm({ personId }: Readonly<{ personId: string }>) {
+  const [annotator] = useAnnotator();
+  const add = useAddMemory();
+  const [text, setText] = useState("");
+  const [category, setCategory] = useState<MemoryCategory>("other");
+  return (
+    <form
+      className="card rv-inline-edit"
+      onSubmit={(e) => {
+        e.preventDefault();
+        add.mutate({ personId, annotator, text: text.trim(), category }, { onSuccess: () => setText("") });
+      }}
+    >
+      <input
+        className="input"
+        value={text}
+        maxLength={500}
+        placeholder="Add a memory, e.g. “Alice is vegetarian.”"
+        aria-label="New memory"
+        onChange={(e) => setText(e.target.value)}
+      />
+      <select
+        className="input rv-select"
+        value={category}
+        aria-label="Category"
+        onChange={(e) => setCategory(e.target.value as MemoryCategory)}
+      >
+        {MEMORY_CATEGORIES.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+      </select>
+      <button className="btn-primary" type="submit" disabled={!annotator || !text.trim() || add.isPending}>
+        Add memory
+      </button>
+      {!annotator && <span className="text-xs rv-error">set your annotator name first</span>}
+      {add.error && <span className="text-xs rv-error">{add.error.message}</span>}
+    </form>
   );
 }
 
 export function MemoriesView({ personId = "" }: Readonly<{ personId?: string }>) {
   const [filter, setFilter] = useState<MemoryFilter>(personId ? "usable" : "open");
   const [person, setPerson] = useState(personId);
+  const [origin, setOrigin] = useState<MemoryOrigin | "">("");
   const [page, setPage] = useState(0);
   const people = usePeople(true);
   const pageSize = 20;
-  const memories = useMemories(filter, person, page, pageSize);
+  const memories = useMemories(filter, person, page, pageSize, origin);
   const pages = Math.max(1, Math.ceil((memories.data?.total ?? 0) / pageSize));
   const peopleList = people.data?.people ?? [];
 
@@ -159,11 +243,12 @@ export function MemoriesView({ personId = "" }: Readonly<{ personId?: string }>)
         <div>
           <h2 className="text-lg font-semibold">Memories</h2>
           <p className="text-sm text-muted">
-            What the agent remembers about people. Confident memories are used live right away and reviewed here
-            afterwards; the others wait for approval.
+            What the agent remembers about people. Confident memories, and those people ask the agent to remember, are
+            used live right away and reviewed here afterwards; the others wait for approval.
           </p>
         </div>
       </div>
+      {personId && <AddMemoryForm personId={personId} />}
       <div className="rv-filters">
         <div className="rv-segmented">
           {FILTERS.map((f) => (
@@ -195,12 +280,29 @@ export function MemoriesView({ personId = "" }: Readonly<{ personId?: string }>)
             </option>
           ))}
         </select>
+        <select
+          className="input rv-select"
+          value={origin}
+          aria-label="Origin"
+          onChange={(e) => {
+            setOrigin(e.target.value as MemoryOrigin | "");
+            setPage(0);
+          }}
+        >
+          <option value="">Any origin</option>
+          {ORIGINS.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label}
+            </option>
+          ))}
+        </select>
       </div>
       <StatusLine loading={memories.isLoading} error={memories.error} />
       {memories.data && memories.data.memories.length === 0 && (
         <p className="text-sm text-muted">
           {filter === "open" ? "Nothing to review." : "No memories."} Memories are extracted by the dream job from
-          sessions attributed to a person (pick one in Who&apos;s talking, or on a session page).
+          sessions attributed to a person (pick one in Who&apos;s talking, or on a session page), saved when a person
+          asks the agent to remember something, or added on a person&apos;s page.
         </p>
       )}
       {memories.data?.memories.map((m) => (

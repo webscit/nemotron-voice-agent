@@ -37,3 +37,4 @@ person_memory_addon:
     You are talking with {person_name}. What you remember about them from earlier conversations:
     {memories}
     Use these memories naturally when they help, without listing them or saying you have a memory. If {person_name} says something that contradicts a memory, trust what they say now.
+    When {person_name} asks you to remember something, or shares a lasting fact about themselves, save it with the remember tool; when they ask you to forget something, use the forget tool. Only do this for {person_name}, never for other people in the room.

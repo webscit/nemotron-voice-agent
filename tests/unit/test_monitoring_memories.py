@@ -395,3 +395,92 @@ def test_person_context_prompt_and_errors(stores, monkeypatch):
     assert asyncio.run(person_memory.load_person_context(alice["id"])) is None
     asyncio.run(person_memory.record_person_session("s9", context))  # swallowed
     assert mid
+
+
+def test_dream_keeps_live_memories_and_skips_forgotten_ones(stores, llm):
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    alice = memories.create_person(store, "Alice")
+    memories.assign_speaker(store, "s1", alice["id"], source="live:picker")
+    live = memories.add_memory(
+        store,
+        {"person_id": alice["id"], "text": "Alice a une fille, Léa.", "status": "active", "source": "live:s1"},
+        [{"session_id": "s1", "turn_idx": 2, "quote": "ma fille s'appelle Léa"}],
+    )
+    gone = memories.add_memory(
+        store,
+        {"person_id": alice["id"], "text": "Alice mange de la viande.", "status": "active", "source": "dream:x"},
+        [],
+    )
+    memories.forget_memory(store, gone, by="live:s0")
+
+    progress = _run_dream(store, artifacts, "s1")
+    assert progress["retracted"] == 0
+    assert memories.get_memory(store, live)["status"] == "active"
+    prompt = llm.requests[-1]["messages"][-1]["content"]
+    assert "Forgotten memories" in prompt and "Alice mange de la viande." in prompt
+
+
+def test_origin_restore_and_matching(stores):
+    store, _ = stores
+    alice = memories.create_person(store, "Alice")
+    dreamt = memories.add_memory(
+        store,
+        {"person_id": alice["id"], "text": "Alice a un chien, Mochi.", "status": "active", "source": "dream:m"},
+        [],
+    )
+    live = memories.add_memory(
+        store,
+        {"person_id": alice["id"], "text": "Alice aime le thé vert.", "status": "active", "source": "live:s1"},
+        [],
+    )
+    manual = memories.add_manual_memory(
+        store, alice["id"], "  Alice  joue du piano. ", reviewer="rev", category="routine"
+    )
+    assert manual["text"] == "Alice joue du piano." and manual["reviewed_by"] == "human:rev"
+    origins = [memories.memory_origin(s) for s in ("dream:m", "live:s", "human:r", "x")]
+    assert origins == ["dreamer", "conversation", "manual", None]
+    by_origin = {o: memories.list_memories(store, status="all", origin=o)["memories"] for o in memories.ORIGIN_PREFIXES}
+    assert [m["id"] for m in by_origin["dreamer"]] == [dreamt]
+    assert [m["id"] for m in by_origin["conversation"]] == [live]
+    assert by_origin["manual"][0]["origin"] == "manual"
+    with pytest.raises(KeyError):
+        memories.add_manual_memory(store, "nope", "x", reviewer="rev")
+    with pytest.raises(ValueError):
+        memories.add_manual_memory(store, alice["id"], "x", reviewer="rev", category="bogus")
+
+    rows = memories.usable_memories(store, [alice["id"]])
+    assert memories.match_memories("CHIEN", rows)[0] == (1.0, memories.get_memory(store, dreamt))
+    assert memories.match_memories("my dog Mochi", rows)[0][1]["id"] == dreamt  # "my" is too short to count
+    assert memories.match_memories("café", rows) == []
+
+    with pytest.raises(ValueError):
+        memories.review_memory(store, dreamt, "restore", reviewer="rev")
+    memories.forget_memory(store, dreamt, by="live:s2")
+    assert memories.get_memory(store, dreamt)["reviewed_by"] == "live:s2"
+    restored = memories.review_memory(store, dreamt, "restore", reviewer="rev")
+    assert restored["status"] == "active" and restored["reviewed_by"] == "human:rev"
+
+
+def test_api_add_and_restore_memory(api):
+    client, store = api
+    person = client.post("/api/review/people", json={"name": "Alice"}).json()
+    url = f"/api/review/people/{person['id']}/memories"
+    added = client.post(url, json={"annotator": "rev", "text": "Alice aime le jazz.", "category": "preference"})
+    assert added.status_code == 200
+    memory = added.json()
+    assert memory["origin"] == "manual" and memory["status"] == "active" and memory["person_name"] == "Alice"
+    assert client.post(url, json={"annotator": "rev", "text": "x", "category": "bogus"}).status_code == 422
+    assert client.post(url, json={"annotator": "rev", "text": "   "}).status_code == 422
+    missing = client.post("/api/review/people/nope/memories", json={"annotator": "rev", "text": "x"})
+    assert missing.status_code == 404
+
+    assert client.get("/api/review/memories?status=all&origin=manual").json()["total"] == 1
+    assert client.get("/api/review/memories?status=all&origin=dreamer").json()["total"] == 0
+    assert client.get("/api/review/memories?origin=bogus").status_code == 422
+
+    review = f"/api/review/memories/{memory['id']}/review"
+    assert client.post(review, json={"annotator": "rev", "action": "restore"}).status_code == 422
+    client.post(review, json={"annotator": "rev", "action": "forget"})
+    restored = client.post(review, json={"annotator": "rev", "action": "restore"}).json()
+    assert restored["status"] == "active"
