@@ -70,6 +70,8 @@ from attachment_store import consume_capture_request, store_attachment
 from examples.shared.pipeline_utils import PIPELINE_AUDIO_IN_SAMPLE_RATE, PIPELINE_AUDIO_OUT_SAMPLE_RATE
 from examples.shared.prewarm import build_session_languages, peek_cached_tts_config, prewarm_tts, warmup_tts_synthesis
 from examples.shared.subagents import load_subagent_registry
+from messaging.config import load_matrix_config
+from messaging.gateway import start_gateway, stop_gateway
 from utils import (
     PROJECT_ROOT,
     build_services_api_response,
@@ -670,7 +672,10 @@ def create_app(host: str = "localhost", prompt_file: str = "") -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Matrix messaging (MATRIX_* set): one sync loop for the whole server, shared by sessions.
+        await start_gateway(load_matrix_config())
         yield
+        await stop_gateway()
         await handler.close()
 
     app = FastAPI(lifespan=lifespan)
