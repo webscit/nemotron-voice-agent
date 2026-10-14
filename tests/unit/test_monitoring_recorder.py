@@ -38,12 +38,8 @@ from pipecat.processors.frame_processor import FrameDirection
 
 from monitoring.config import MonitoringConfig
 from monitoring.media import extract_inline_media
-<<<<<<< HEAD
 from monitoring.recorder import SessionRecorder, flatten_metrics, git_revision
-=======
-from monitoring.recorder import SessionRecorder, flatten_metrics
 from monitoring.report import metrics_json
->>>>>>> b502395 (Store the client's performance metrics with the session)
 from monitoring.store import LocalArtifactStore, SessionStore
 
 
@@ -206,7 +202,6 @@ def test_disabled_recorder_returns_none(tmp_path):
     assert SessionRecorder.create(session_id="x", example="e", config={}, settings=settings) is None
 
 
-<<<<<<< HEAD
 def _message(content: str, interrupted: bool = False):
     return type("M", (), {"content": content, "interrupted": interrupted})()
 
