@@ -666,6 +666,26 @@ class VoiceIdSession:
         """Speaker of the latest committed turn; see ``VoiceIdTracker.current_speaker``."""
         return self.tracker.current_speaker()
 
+    def confirmed_person(self) -> PersonContext | None:
+        """The memory person, when known for sure (memory tools): picked, or the trusted latest speaker."""
+        person = self._memory_person
+        if person is None or not self.tracker.active:
+            return person
+        speaker = self.current_speaker()
+        return person if speaker.person_id == person.person["id"] and speaker.tier in TRUSTED_TIERS else None
+
+    async def refresh_memory_person(self) -> None:
+        """Reload the memory person's memories into the pinned prompt (after a memory tool changed them)."""
+        current = self._memory_person
+        if current is None:
+            return
+        person = await self._person(current.person["id"], refresh=True)
+        if person is None:
+            # A failed reload must not turn a known speaker into a guest.
+            self._people[current.person["id"]] = current
+            return
+        self._set_memory_person(person)
+
     # ------------------------------------------------------------- internals
     def _spawn(self, coro: Awaitable[None]) -> None:
         task = asyncio.ensure_future(coro)

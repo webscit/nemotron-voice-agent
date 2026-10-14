@@ -9,12 +9,17 @@
 - **Memories**: facts about a person extracted offline by the ``dream`` job. A
   memory above the confidence threshold is ``active`` right away (used in live
   prompts) and reviewed afterwards; below it, it stays ``proposed`` until a
-  reviewer approves it. Forgetting, correcting and superseding never delete rows.
+  reviewer approves it. The live ``remember`` / ``forget`` tools and reviewers can
+  also add and forget memories. Forgetting, correcting and superseding never delete rows.
+- **Origin**: derived from ``source``: ``dreamer`` (``dream:<model>``),
+  ``conversation`` (``live:<session_id>``, the live tools) or ``manual``
+  (``human:<reviewer>``).
 """
 
 from __future__ import annotations
 
 import functools
+import re
 import time
 import uuid
 from collections import defaultdict
@@ -27,7 +32,13 @@ from monitoring.store import SessionStore
 
 SESSION_TURN = -1
 USABLE_STATUSES = ("proposed", "active")
-REVIEW_ACTIONS = ("approve", "correct", "forget")
+REVIEW_ACTIONS = ("approve", "correct", "forget", "restore")
+CATEGORIES = ("identity", "preference", "relationship", "routine", "event", "health", "other")
+# ``origin`` -> ``source`` prefix.
+ORIGIN_PREFIXES = {"dreamer": "dream:", "conversation": "live:", "manual": "human:"}
+# Words this short are ignored when matching a ``forget`` query ("my", "a", "le").
+_MIN_MATCH_WORD_LEN = 3
+_WORD_RE = re.compile(r"\w+")
 # ``kv`` key of a merged person, pointing at the person they were merged into.
 PERSON_ALIAS_PREFIX = "person_alias:"
 _MAX_ALIAS_HOPS = 16
@@ -36,6 +47,11 @@ _MAX_ALIAS_HOPS = 16
 def _rows(store: SessionStore, stmt) -> list[dict[str, Any]]:
     with store.engine.connect() as conn:
         return [dict(r) for r in conn.execute(stmt).mappings()]
+
+
+def memory_origin(source: str | None) -> str | None:
+    """``dreamer``, ``conversation`` or ``manual`` for a memory ``source``; None when unknown."""
+    return next((o for o, prefix in ORIGIN_PREFIXES.items() if (source or "").startswith(prefix)), None)
 
 
 # ------------------------------------------------------------------- people
@@ -210,6 +226,46 @@ def usable_memories(store: SessionStore, person_ids: list[str]) -> list[dict[str
     )
 
 
+def add_manual_memory(
+    store: SessionStore, person_id: str, text: str, *, reviewer: str, category: str = "other"
+) -> dict[str, Any]:
+    """A reviewer's own memory about a person: ``active`` and already reviewed.
+
+    Raises ``KeyError`` for an unknown person and ``ValueError`` for an empty text or unknown category.
+    """
+    if get_person(store, person_id) is None:
+        raise KeyError(person_id)
+    text = " ".join(text.split())
+    if not text:
+        raise ValueError("the memory text is empty")
+    if category not in CATEGORIES:
+        raise ValueError(f"unknown category {category!r}")
+    source = f"human:{reviewer}"
+    memory_id = add_memory(
+        store,
+        {
+            "person_id": person_id,
+            "text": text,
+            "category": category,
+            "confidence": 1.0,
+            "status": "active",
+            "source": source,
+            "reviewed_by": source,
+            "reviewed_at": time.time(),
+        },
+        [],
+    )
+    return get_memory(store, memory_id) or {}
+
+
+def forgotten_memories(store: SessionStore, person_ids: list[str]) -> list[dict[str, Any]]:
+    """``forgotten`` memories of these people (the ``dream`` job must not learn them again)."""
+    if not person_ids:
+        return []
+    m = schema.memories
+    return _rows(store, select(m).where(m.c.person_id.in_(person_ids), m.c.status == "forgotten").order_by(m.c.id))
+
+
 def add_memory(store: SessionStore, row: dict[str, Any], evidence: list[dict[str, Any]]) -> int:
     """Insert a memory and its evidence (``session_id``, ``turn_idx``, ``quote``); returns its id."""
     now = time.time()
@@ -240,6 +296,12 @@ def supersede(store: SessionStore, old_id: int, new_id: int) -> None:
         _set_memory(conn, old_id, status="superseded", superseded_by=new_id)
 
 
+def forget_memory(store: SessionStore, memory_id: int, *, by: str) -> None:
+    """Mark a memory ``forgotten`` by ``by`` (``human:<reviewer>``, or ``live:<session_id>``)."""
+    with store.engine.begin() as conn:
+        _set_memory(conn, memory_id, status="forgotten", reviewed_by=by, reviewed_at=time.time())
+
+
 def review_memory(
     store: SessionStore,
     memory_id: int,
@@ -253,7 +315,8 @@ def review_memory(
 
     - ``approve``: the memory becomes ``active`` (and replaces what it supersedes);
     - ``correct``: a ``human:<reviewer>`` copy with the new text / person replaces it;
-    - ``forget``: the memory is never used again.
+    - ``forget``: the memory is never used again;
+    - ``restore``: a forgotten memory becomes ``active`` again.
     """
     memory = get_memory(store, memory_id)
     if memory is None:
@@ -263,8 +326,13 @@ def review_memory(
     now = time.time()
     source = f"human:{reviewer}"
     if action == "forget":
+        forget_memory(store, memory_id, by=source)
+        return get_memory(store, memory_id) or memory
+    if action == "restore":
+        if memory["status"] != "forgotten":
+            raise ValueError("only forgotten memories can be restored")
         with store.engine.begin() as conn:
-            _set_memory(conn, memory_id, status="forgotten", reviewed_by=source, reviewed_at=now)
+            _set_memory(conn, memory_id, status="active", reviewed_by=source, reviewed_at=now)
         return get_memory(store, memory_id) or memory
     if action == "approve":
         with store.engine.begin() as conn:
@@ -302,13 +370,21 @@ def review_memory(
 
 
 def retract_session_memories(store: SessionStore, session_id: str) -> int:
-    """Supersede unreviewed memories whose only evidence is ``session_id`` (before a ``dream`` re-run)."""
+    """Supersede unreviewed ``dream`` memories whose only evidence is ``session_id`` (before a re-run).
+
+    Memories saved live with the ``remember`` tool are kept: the job did not create them.
+    """
     m, e = schema.memories, schema.memory_evidence
     candidates = _rows(
         store,
         select(m.c.id)
         .join(e, e.c.memory_id == m.c.id)
-        .where(e.c.session_id == session_id, m.c.status.in_(USABLE_STATUSES), m.c.reviewed_at.is_(None))
+        .where(
+            e.c.session_id == session_id,
+            m.c.status.in_(USABLE_STATUSES),
+            m.c.reviewed_at.is_(None),
+            m.c.source.like(ORIGIN_PREFIXES["dreamer"] + "%"),
+        )
         .distinct(),
     )
     retracted = 0
@@ -339,18 +415,21 @@ def list_memories(
     *,
     person_id: str | None = None,
     status: str = "open",
+    origin: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
     """Memories with evidence and usage, newest first.
 
     ``status``: ``open`` (usable and not reviewed yet), ``usable`` (proposed + active),
-    one concrete status, or ``all``.
+    one concrete status, or ``all``. ``origin``: one of ``ORIGIN_PREFIXES``, or None for all.
     """
     m = schema.memories
     conditions = []
     if person_id:
         conditions.append(m.c.person_id == person_id)
+    if origin:
+        conditions.append(m.c.source.like(ORIGIN_PREFIXES[origin] + "%"))
     if status == "open":
         conditions += [m.c.status.in_(USABLE_STATUSES), m.c.reviewed_at.is_(None)]
     elif status == "usable":
@@ -419,6 +498,7 @@ def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict
             {
                 **row,
                 "person_name": names.get(row["person_id"]),
+                "origin": memory_origin(row["source"]),
                 "supersedes_text": superseded_text.get(row["supersedes"]),
                 "evidence": [
                     {
@@ -468,6 +548,33 @@ def person_summaries(store: SessionStore, *, include_archived: bool = False) -> 
         }
         for p in people
     ]
+
+
+# -------------------------------------------------------------- live tools
+def _match_words(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text.casefold()) if len(w) >= _MIN_MATCH_WORD_LEN}
+
+
+def match_memories(query: str, rows: list[dict[str, Any]]) -> list[tuple[float, dict[str, Any]]]:
+    """``(score, memory)`` pairs matching ``query``, best first.
+
+    A memory containing the whole query scores 1; otherwise the score is the share
+    of the query's words (of 3+ letters) found in the memory. Ties go to the newest.
+    """
+    wanted = query.strip().casefold()
+    words = _match_words(wanted)
+    scored = []
+    for row in rows:
+        text = row["text"].casefold()
+        if wanted and wanted in text:
+            score = 1.0
+        elif words:
+            score = len(words & _match_words(text)) / len(words)
+        else:
+            score = 0.0
+        if score > 0:
+            scored.append((score, row))
+    return sorted(scored, key=lambda pair: (pair[0], pair[1]["created_at"], pair[1]["id"]), reverse=True)
 
 
 # ------------------------------------------------------------- live prompt

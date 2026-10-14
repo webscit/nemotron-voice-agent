@@ -9,13 +9,15 @@
    text for user turns, plus the assistant replies.
 3. Ask an OpenAI-compatible LLM (by default the session's own LLM) for durable
    facts, given the person's current memories so it can skip duplicates and
-   supersede outdated ones.
+   supersede outdated ones, and their forgotten memories so it does not learn
+   them again.
 4. Store each fact as a memory: ``active`` (used in live prompts right away) at or
    above ``auto_use_threshold``, ``proposed`` below it or when it would replace a
    memory a human already reviewed. Reviewed memories are never changed here.
 
-Re-running the job first supersedes the unreviewed memories whose only evidence
-is this session, then extracts again.
+Re-running the job first supersedes the unreviewed memories it extracted whose
+only evidence is this session, then extracts again. Memories saved live by the
+``remember`` tool are kept.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ DEFAULTS: dict[str, Any] = {
     "request_timeout_secs": 600,
 }
 
-CATEGORIES = ("identity", "preference", "relationship", "routine", "event", "health", "other")
+CATEGORIES = memories.CATEGORIES
 
 SYSTEM_PROMPT = """You maintain the long-term memory of a voice assistant about the people it talks to.
 Read the conversation and extract durable facts about the people speaking to the assistant:
@@ -58,6 +60,9 @@ Rules:
 - One short third-person sentence per fact, written in {language_name}, naming the person (e.g. "Alice is vegetarian.").
 - Do not repeat a fact already in the existing memories. When the conversation contradicts or updates
   an existing memory, output the new fact with "supersedes" set to that memory id.
+- Never output a fact listed under forgotten memories, or one that says the same thing: the person
+  asked the assistant to forget it.
+- When the person asks the assistant to forget something, do not record that request as a fact.
 - confidence: 0.9+ when stated explicitly, 0.5-0.8 when inferred, below 0.5 when unsure.
 - turns: the user turn numbers the fact comes from; quote: the shortest supporting excerpt.
 
@@ -202,13 +207,21 @@ def session_transcript(ctx: JobContext, session_id: str, speakers: dict[str, Any
     return turns
 
 
-def build_prompt(turns: list[dict[str, Any]], people: dict[str, dict[str, Any]], existing: list[dict[str, Any]]) -> str:
-    """User message: people, their current memories and the conversation."""
+def build_prompt(
+    turns: list[dict[str, Any]],
+    people: dict[str, dict[str, Any]],
+    existing: list[dict[str, Any]],
+    forgotten: list[dict[str, Any]] | None = None,
+) -> str:
+    """User message: people, their current and forgotten memories and the conversation."""
     lines = ["People speaking in this conversation:"]
     lines += [f'- person_id "{pid}": {person["name"]}' for pid, person in people.items()]
     lines.append("")
     lines.append("Existing memories:")
     lines += [f'- id {m["id"]} (person_id "{m["person_id"]}"): {m["text"]}' for m in existing] or ["- (none)"]
+    lines.append("")
+    lines.append("Forgotten memories (do not learn them again):")
+    lines += [f'- (person_id "{m["person_id"]}"): {m["text"]}' for m in forgotten or []] or ["- (none)"]
     lines.append("")
     lines.append("Conversation:")
     for turn in turns:
@@ -264,7 +277,8 @@ class DreamJob(Job):
         client.wait_ready(ctx)
         ctx.check_preempted()
         system = SYSTEM_PROMPT.format(language_name=_language_name(language), categories="|".join(CATEGORIES))
-        answer = client.complete(system, build_prompt(turns, people, existing))
+        forgotten = memories.forgotten_memories(ctx.store, list(people))
+        answer = client.complete(system, build_prompt(turns, people, existing, forgotten))
         items = parse_memories(answer)
         ctx.check_preempted()
 

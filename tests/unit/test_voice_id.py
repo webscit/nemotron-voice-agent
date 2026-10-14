@@ -1026,3 +1026,45 @@ def test_session_follows_a_merge_made_while_it_is_running(store):
         assert h.session.current_speaker().trusted_person_id == alice["id"]
 
     asyncio.run(run())
+
+
+def test_memory_tools_follow_the_confirmed_speaker(store):
+    from examples.shared.memory_tools import MemoryTools
+
+    alice = memories.create_person(store, "Alice")
+    _memory(store, alice, "Alice aime le thé.")
+
+    async def run():
+        h = _Harness(store)
+        tools = MemoryTools(
+            current_person=h.session.confirmed_person,
+            refresh=h.session.refresh_memory_person,
+            session_id=lambda: "s1",
+            turn_idx=lambda: h.turn_idx,
+        )
+        await h.turn("Bonjour", person_id=alice["id"], tier="high")
+        assert h.session.confirmed_person().person["id"] == alice["id"]
+        assert (await tools._remember("Alice a un chien.", "j'ai un chien"))["status"] == "saved"
+        assert "Alice a un chien." in h.pinned["content"]
+
+        # Same person, uncertain: memories stay in the prompt but cannot be changed.
+        await h.turn("Oui")
+        assert "Alice a un chien." in h.pinned["content"]
+        assert h.session.confirmed_person() is None
+        assert "error" in await tools._forget("chien")
+
+        await h.turn("Oublie mon chien", person_id=alice["id"], tier="verified")
+        assert (await tools._forget("chien"))["status"] == "forgotten"
+        assert "chien" not in h.pinned["content"]
+
+    asyncio.run(run())
+
+
+def test_confirmed_person_is_the_picked_person_without_voice_id(store):
+    from examples.shared.person_memory import load_person_context
+
+    alice = memories.create_person(store, "Alice")
+    picked = asyncio.run(load_person_context(alice["id"]))
+    h = _Harness(store, initial_person=picked)
+    assert h.session.confirmed_person() is picked
+    assert _Harness(store).session.confirmed_person() is None
