@@ -50,6 +50,7 @@ from examples.multilingual.tool_handlers import ClientToolResultBridge, build_cl
 from examples.multilingual.tools import build_client_tools, perceivable_client_tools
 from examples.shared.audio_recorder import create_audio_recorder
 from examples.shared.intent_engine import IntentEngineConfig, build_intent_engine
+from examples.shared.intent_engine.learned import load_learned_intents_async
 from examples.shared.memory_tools import (
     FORGET_TOOL_NAME,
     MEMORY_TOOL_NAMES,
@@ -544,6 +545,8 @@ async def bot(runner_args: RunnerArguments) -> None:
         client_tool_names=client_tool_names,
         client_tool_timeout_secs=CLIENT_FUNCTION_TIMEOUT_SECS,
         recorder=recorder,
+        # Sentences and intents learned by the dream job and approved in review.
+        learned=await load_learned_intents_async(fixed_session_language) if intent_engine_config.enabled else (),
     )
 
     pipeline = Pipeline(

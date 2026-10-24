@@ -7,12 +7,15 @@ Two sentence sets are tried in order: the custom files under
 ``<sentences_dir>/<language>/*.yaml`` and then the stock Home Assistant
 sentences from the ``home-assistant-intents`` package, pruned to the allow-list.
 A language with no data in either set never matches.
+
+Approved sentences and intents learned by the ``dream`` job (``learned.py``)
+are merged into the set that defines their intent.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -24,6 +27,8 @@ from hassil import Intents, recognize_best
 from hassil.intents import SlotList, TextSlotList
 from hassil.util import merge_dict, remove_punctuation
 from loguru import logger
+
+from examples.shared.intent_engine.learned import LEARNED_ID_KEY, LearnedIntent, merge_learned
 
 # Leading words dropped before matching, in addition to the configured wake words.
 # The stock sentences match polite forms but not a greeting or a name in front.
@@ -43,6 +48,8 @@ class IntentMatch:
     slots: dict[str, Any]
     response_key: str = "default"
     custom: bool = False
+    # The learned suggestion whose sentence matched, if any.
+    learned_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -143,13 +150,33 @@ def _stock_data(language: str) -> dict[str, Any] | None:
     return None
 
 
-@lru_cache(maxsize=8)
-def _load_stock(language: str, allowed_intents: tuple[str, ...]) -> _SentenceSet | None:
+def _load_stock(
+    language: str, allowed_intents: tuple[str, ...], learned: Sequence[LearnedIntent] = ()
+) -> _SentenceSet | None:
     """Parse the stock sentences for a language, keeping only allow-listed intents.
 
     Pruning before parsing (instead of filtering matches) keeps an excluded
     wildcard intent from winning over the sentence the user actually said.
+    Learned sentences of the kept intents are merged in.
     """
+    if not learned:
+        return _load_stock_cached(language, allowed_intents)
+    data = _stock_data(language)
+    if not data:
+        return None
+    intents = {name: body for name, body in data.get("intents", {}).items() if name in allowed_intents}
+    merged, _ = merge_learned({**data, "intents": intents}, learned, add_intents=False)
+    responses = data.get("responses", {})
+    try:
+        parsed = Intents.from_dict(merged)
+    except Exception as exc:  # a bad learned sentence must not disable the stock intents
+        logger.warning(f"Intent engine: learned sentences for {language} failed to parse ({exc}); ignoring them")
+        return _load_stock_cached(language, allowed_intents)
+    return _SentenceSet(intents=parsed, responses=responses.get("intents", {}), errors=responses.get("errors", {}))
+
+
+@lru_cache(maxsize=8)
+def _load_stock_cached(language: str, allowed_intents: tuple[str, ...]) -> _SentenceSet | None:
     data = _stock_data(language)
     if not data:
         return None
@@ -162,8 +189,8 @@ def _load_stock(language: str, allowed_intents: tuple[str, ...]) -> _SentenceSet
     )
 
 
-def _load_custom(sentences_dir: Path, language: str, keep: Callable[[str], bool]) -> _SentenceSet | None:
-    """Parse the custom sentence files for a language, keeping intents accepted by ``keep``."""
+def custom_sentence_data(sentences_dir: Path, language: str) -> dict[str, Any] | None:
+    """Merged content of the custom sentence files for a language, or None without files."""
     for key in _language_candidates(language):
         files = sorted((sentences_dir / key).glob("*.yaml")) if (sentences_dir / key).is_dir() else []
         if files:
@@ -180,7 +207,13 @@ def _load_custom(sentences_dir: Path, language: str, keep: Callable[[str], bool]
             continue
         if isinstance(content, dict):
             merge_dict(merged, content)
+    return merged
 
+
+def custom_parse_data(
+    merged: dict[str, Any], language: str, keep: Callable[[str], bool] = lambda name: True
+) -> dict[str, Any] | None:
+    """The hassil data of the custom set: intents accepted by ``keep``, plus the stock skip words."""
     intents = {}
     for name, body in (merged.get("intents") or {}).items():
         if keep(name):
@@ -189,10 +222,8 @@ def _load_custom(sentences_dir: Path, language: str, keep: Callable[[str], bool]
             logger.debug(f"Intent engine: custom intent {name} is inactive for this session")
     if not intents:
         return None
-
     stock = _stock_data(language) or {}
-    responses = merged.get("responses") or {}
-    data = {
+    return {
         "language": merged.get("language") or base_language(language),
         "intents": intents,
         "lists": merged.get("lists") or {},
@@ -200,6 +231,23 @@ def _load_custom(sentences_dir: Path, language: str, keep: Callable[[str], bool]
         # Reuse the stock polite-form skip words ("s'il te plaît", "peux-tu", ...).
         "skip_words": [*(stock.get("skip_words") or []), *(merged.get("skip_words") or [])],
     }
+
+
+def _load_custom(
+    sentences_dir: Path,
+    language: str,
+    keep: Callable[[str], bool],
+    learned: Sequence[LearnedIntent] = (),
+) -> _SentenceSet | None:
+    """Parse the custom sentence files (plus learned intents) for a language, keeping intents accepted by ``keep``."""
+    merged = custom_sentence_data(sentences_dir, language)
+    if merged is None and not any(item.kind == "intent" for item in learned):
+        return None
+    merged, _ = merge_learned(merged or {}, learned, add_intents=True)
+    data = custom_parse_data(merged, language, keep)
+    if data is None:
+        return None
+    responses = merged.get("responses") or {}
     try:
         parsed = Intents.from_dict(data)
     except Exception as exc:  # hassil raises several parse error types
@@ -221,21 +269,27 @@ class IntentMatcher:
         area: str = "",
         keep_custom_intent: Callable[[str], bool] = lambda name: True,
         load_stock: bool = True,
+        learned: Sequence[LearnedIntent] = (),
     ):
         """Load the sentence sets for ``language`` (for example ``fr-FR``).
 
         ``load_stock=False`` skips the stock Home Assistant sentences, for a
-        session that only has client tools.
+        session that only has client tools. ``learned`` are the approved
+        suggestions of the ``dream`` job for this language.
         """
         self._language = language
         self._wake_words = tuple(wake_words)
         # Same shape Home Assistant passes for a satellite's area. Sentences that
         # declare ``requires_context: {area: {slot: true}}`` copy it into the slots.
         self._context = {"area": {"value": area, "text": area}} if area else None
-        self._stock = _load_stock(language, tuple(allowed_intents)) if load_stock else None
+        # A learned sentence goes to the set that defines its intent: custom files first.
+        custom_names = set((custom_sentence_data(sentences_dir, language) or {}).get("intents") or {})
+        custom_names |= {item.intent for item in learned if item.kind == "intent"}
+        stock_learned = [item for item in learned if item.kind == "sentence" and item.intent not in custom_names]
+        self._stock = _load_stock(language, tuple(allowed_intents), stock_learned) if load_stock else None
         # Localized error sentences come from the language package even without its intents.
         self._packaged_errors = ((_stock_data(language) or {}).get("responses") or {}).get("errors") or {}
-        self._custom = _load_custom(sentences_dir, language, keep_custom_intent)
+        self._custom = _load_custom(sentences_dir, language, keep_custom_intent, learned)
 
     @property
     def has_data(self) -> bool:
@@ -295,10 +349,12 @@ class IntentMatcher:
                 logger.warning(f"Intent engine: matching failed ({type(exc).__name__}: {exc})")
                 continue
             if result is not None:
+                learned_id = (result.intent_metadata or {}).get(LEARNED_ID_KEY)
                 return IntentMatch(
                     name=result.intent.name,
                     slots={entity.name: entity.value for entity in result.entities_list},
                     response_key=result.response or "default",
                     custom=custom,
+                    learned_id=learned_id if isinstance(learned_id, int) else None,
                 )
         return None

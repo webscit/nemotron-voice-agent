@@ -7,6 +7,7 @@ import { queryClient } from "../api";
 import { useActivities } from "./api";
 import { AsrReview } from "./AsrReview";
 import { DreamerStatusView } from "./Dreamer";
+import { IntentsView } from "./Intents";
 import { MemoriesView } from "./Memories";
 import { MetricsView } from "./Metrics";
 import { PeopleView } from "./People";
@@ -72,6 +73,8 @@ function Content({ view, arg }: Readonly<{ view: string; arg: string }>) {
       return <AsrReview />;
     case "memories":
       return <MemoriesView />;
+    case "intents":
+      return <IntentsView />;
     case "people":
       return <PeopleView key={arg} personId={arg} />;
     case "dreamer":

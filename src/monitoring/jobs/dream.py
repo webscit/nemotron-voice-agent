@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``dream``: extract long-term memories about people from a recorded session.
+"""``dream``: learn from a recorded session: memories about people, and intent sentences.
+
+Memories:
 
 1. Resolve who spoke in each user turn (turn override, else the session person);
    sessions without an attributed person are skipped.
@@ -18,6 +20,11 @@
 Re-running the job first supersedes the unreviewed memories it extracted whose
 only evidence is this session, then extracts again. Memories saved live by the
 ``remember`` tool are kept.
+
+Intents (``dream_intents``, when the session ran the intent engine): new
+sentences for existing intents and new client-tool intents, learned from the
+turns the engine missed, checked with hassil and stored for review. This part
+runs even when no person is attributed to the session.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from loguru import logger
 
 from monitoring import memories
 from monitoring.jobs.base import Job, JobContext, register
+from monitoring.jobs.dream_intents import learn_intents
 from monitoring.jobs.reasr import reasr_endpoints
 
 DEFAULTS: dict[str, Any] = {
@@ -245,17 +253,33 @@ class DreamJob(Job):
         return [service] if service else []
 
     def run(self, ctx: JobContext) -> None:
-        """Extract memories for the people attributed to the session."""
+        """Extract memories for the people attributed to the session, then learn intent sentences."""
         session_id = ctx.job["target"]
-        if ctx.progress.get("written"):
-            return
         cfg = dream_config(ctx.config)
         session = ctx.store.get_session(session_id) or {}
         session_config = session.get("config") or {}
-        language = session_config.get("language") or "en-US"
-
         speakers = memories.speakers_for(ctx.store, session_id)
         turns = [t for t in session_transcript(ctx, session_id, speakers) if t["idx"] >= 0]
+        clients: list[LlmClient] = []
+
+        def get_client() -> LlmClient:
+            # Created on first use: a session with nothing to learn needs no LLM.
+            if not clients:
+                clients.append(make_client(session_config, cfg))
+            return clients[0]
+
+        if not (ctx.progress.get("written") or ctx.progress.get("skipped")):
+            self._memories(ctx, session_id, session_config, speakers, turns, cfg, get_client)
+        if not (ctx.progress.get("intents_written") or ctx.progress.get("intents_skipped")):
+            ctx.check_preempted()
+            progress = learn_intents(ctx, session_id, session_config, turns, get_client, cfg)
+            if "intents" in progress:
+                progress["intents_written"] = True
+            ctx.save_progress(**progress)
+            logger.info(f"dream {session_id}: intents {progress}")
+
+    def _memories(self, ctx, session_id, session_config, speakers, turns, cfg, get_client) -> None:
+        language = session_config.get("language") or "en-US"
         spoken = [t for t in turns if t["user_text"] and t["person_id"]]
         if not spoken:
             reason = "no speaker" if not (speakers["session"] or speakers["turns"]) else "no attributed user turn"
@@ -273,7 +297,7 @@ class DreamJob(Job):
         by_id = {m["id"]: m for m in existing}
 
         ctx.check_preempted()
-        client = make_client(session_config, cfg)
+        client = get_client()
         client.wait_ready(ctx)
         ctx.check_preempted()
         system = SYSTEM_PROMPT.format(language_name=_language_name(language), categories="|".join(CATEGORIES))

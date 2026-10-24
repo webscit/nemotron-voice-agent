@@ -61,3 +61,16 @@ dream:
   #     model: nvidia/nemotron-3.5-lightning-30b-a3b
   # A compose service started only while idle (profile `dreamer-models`):
   #   service: dreamer-llm
+  # Learn intent-engine sentences from the turns the engine missed (sessions that
+  # ran the intent engine): new sentences for existing intents, and new intents
+  # for recurring requests the LLM answered with one client tool call. Every
+  # proposal is checked with hassil against what the person said, then waits in
+  # the review UI (Intents); approved ones are loaded by new sessions.
+  intents:
+    enabled: true
+    # Use validated sentences for existing intents live before review when their
+    # confidence reaches this value. null: every suggestion waits for approval.
+    # New intents always wait for approval.
+    auto_use_threshold: null
+    # Sentence templates shown per intent in the prompt.
+    max_examples: 4

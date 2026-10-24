@@ -178,11 +178,75 @@ Note the following behavior:
 
 When [conversation recording](enable-conversation-recording.md) is enabled, the engine stores the following data for each user turn:
 
-- An `intent_engine` event with `handled_by` set to `intent` or `llm`, the intent name, the target, and the reason for a fall-through, such as `no_match`, `blocked_domain`, or `target_unavailable`.
+- An `intent_engine` event with `handled_by` set to `intent` or `llm`, the intent name, the target, and the reason for a fall-through, such as `no_match`, `blocked_domain`, or `target_unavailable`. When a learned sentence matched, the event also carries `learned` with the suggestion ID.
 - The `intent_match_secs` metric with the matching time.
 - The `intent_target_secs` metric with the round-trip time of the target.
 
 The session configuration snapshot records the engine settings without the Home Assistant URL and token.
+
+## Learn Sentences From Conversations
+
+The `dream` job of the [offline post-processing runner](enable-conversation-recording.md#offline-post-processing-dreamer) learns from the turns that the engine missed. After you approve its suggestions, the engine understands the way your users actually phrase requests, and recurring requests skip the LLM. The job proposes the following two kinds of suggestions:
+
+- **New sentences** for an intent that the engine already has, for example another phrasing of `HassTurnOn` or `ReachyMoveHead`.
+- **New intents** for a recurring request that the LLM answered with one client tool call whose arguments are the same every time. A new intent maps its sentences to that client tool and adds a short spoken response.
+
+### Requirements
+
+The job learns from a session only when the following conditions are met:
+
+- Recording is enabled with `MONITORING_ENABLED=true`, and the dreamer runs. Refer to [Record Conversations and Post-Process Them Offline](enable-conversation-recording.md).
+- The session ran with `INTENT_ENGINE_ENABLED=true` and had sentences for its language.
+- At least one user turn was a miss, that is, the engine found no match and the LLM answered. A turn that matched but went to the LLM on purpose, for example in dry-run mode or for a blocked domain, is not a miss.
+
+The intent part of the job does not need a person attributed to the session. It calls the same LLM as the memory extraction of the `dream` job.
+
+### How Suggestions Are Checked
+
+The job rebuilds the catalog that the session used: the custom sentence files, the stock Home Assistant sentences when the session used Home Assistant, and the learned suggestions that were active. The catalog contains only the intents that the session could run, that is, the declared client tools and the allow-list. The job shows the LLM this catalog, the conversation with the missed turns marked, and the tool calls that the LLM made.
+
+The job then checks every proposal with hassil, the way the live engine matches:
+
+- Each sentence must parse with the lists and expansion rules of the catalog. Unknown lists and rules, and wildcard lists, are refused.
+- The words of the person in an evidence turn must match the proposal and must not already match the catalog.
+- For a client tool, the matched slots must produce the same tool call that the LLM made.
+- A new intent must use a tool that the client declared, a CamelCase name that no intent uses yet, and a response template that only uses slots.
+
+The job drops a proposal that no evidence turn matches. A proposed new intent whose literal tool call equals the call of an existing intent becomes a sentence suggestion for that intent.
+
+The job can only check a sentence that needs Home Assistant names, such as `{name}`, `{area}`, or `{floor}`, when the dreamer can sync Home Assistant. The dreamer reads `HOME_ASSISTANT_URL` and `HOME_ASSISTANT_TOKEN` from the same `.env` as the application. Without them, the job keeps the suggestion and marks it unchecked.
+
+The job merges a proposal into an equivalent suggestion from an earlier session, so the evidence accumulates and recurring requests rise to the top of the review list. It does not propose a suggestion again after a reviewer rejected it. When you re-run the job on a session, it replaces that session's evidence on unreviewed suggestions.
+
+### Configure Learning
+
+The `dream.intents` section of [`src/monitoring/jobs/dreamer.yaml`](../../src/monitoring/jobs/dreamer.yaml) contains the following settings.
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `enabled` | `true` | Learns intent sentences in the `dream` job. |
+| `auto_use_threshold` | `null` | With `null`, every suggestion waits for approval. When set, a checked sentence suggestion for an existing intent with a confidence at or above this value is active right away. New intents always wait for approval. |
+| `max_examples` | `4` | Number of sentence templates per intent that the prompt shows. |
+
+### Review and Apply Suggestions
+
+Open **Review** > **Intents** in the web client. The page lists the suggestions with the most occurrences first. Filter by **To review**, **In use**, **Rejected**, or **All**, and by kind. Each card shows the sentences, a **checked** or **unchecked** badge, the number of occurrences and live uses, and the evidence turns with their audio, text, and LLM tool calls.
+
+You can take the following actions on a suggestion:
+
+- **Approve** a proposed suggestion, or **Keep** one that is already active, to mark it reviewed and active.
+- **Correct** its sentences, one per line. For a new intent, you can also correct the name and the response. The corrected copy is active and supersedes the original. A correction whose sentences do not parse is refused.
+- **Reject** it, so that it is not used and not proposed again.
+- **Restore** a rejected suggestion, so that it becomes active.
+
+Active suggestions apply to new sessions, not to sessions that are already running. At session start, the pipeline loads the active suggestions for the session language from the monitoring database and merges them into the sentence set that defines their intent, custom sentences first. A learned new intent is active only when the client declares its tool. The engine ignores an invalid learned sentence and logs a warning. The startup log line `Intent engine enabled` reports the number of loaded suggestions as `learned=<count>`.
+
+To keep approved suggestions in the repository, click **Export** for a language, for example **Export fr**. The download, also available at `GET /api/review/intents/export?language=fr`, contains two YAML documents:
+
+- The first document is a sentence file. Add it under `src/examples/shared/intent_engine/sentences/<language>/`.
+- The second document lists the learned client-tool intents. Merge it into `client_tools.yaml`.
+
+After you deploy an exported new intent, the engine ignores its learned copy with a warning, because a sentence file now defines the intent.
 
 ## Troubleshooting
 
@@ -197,3 +261,6 @@ The following table lists common symptoms and resolutions.
 | "Allume les lumières" does not match | Set `INTENT_ENGINE_AREA` to the exact Home Assistant area name. |
 | The agent says the packaged error sentence | Home Assistant found no matching entity. Verify that the entity is exposed to Assist and, for area commands, assigned to the area. |
 | A Reachy Mini sentence does not match | Verify that the client declared the tool. An intent whose tool is not declared is inactive. |
+| An approved learned sentence does not match | Start a new session. Running sessions keep the sentences they loaded at start. Verify that the log shows no `learned suggestion #<id> ignored` warning. |
+| The **Intents** page stays empty | Verify that the session ran with `INTENT_ENGINE_ENABLED=true` and that the dreamer ran its `dream` job. The job only learns from turns that the engine missed. |
+| A suggestion is marked unchecked | Read the notes on the card. A suggestion is unchecked when it needs Home Assistant names that the dreamer cannot sync, when only some evidence turns match it, or when a reviewer corrected it. For Home Assistant names, set `HOME_ASSISTANT_URL` and `HOME_ASSISTANT_TOKEN` in `.env`, and re-run the `dream` job for the session. |

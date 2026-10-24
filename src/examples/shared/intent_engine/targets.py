@@ -312,9 +312,17 @@ class ClientToolMap:
             return cls()
         return cls(content.get("intents") if isinstance(content, dict) else None)
 
+    def with_entries(self, entries: dict[str, dict[str, Any]]) -> ClientToolMap:
+        """Return a map with ``entries`` added; an intent already in this map keeps its entry."""
+        return ClientToolMap({**entries, **self._entries})
+
     def __contains__(self, intent_name: str) -> bool:
         """Return whether an intent is routed to a client tool."""
         return intent_name in self._entries
+
+    def entry(self, intent_name: str) -> dict[str, Any]:
+        """Return the raw mapping entry of an intent."""
+        return self._entries[intent_name]
 
     def tool(self, intent_name: str) -> str:
         """Return the client tool name for an intent."""
