@@ -320,6 +320,10 @@ class ClientToolMap:
         """Return whether an intent is routed to a client tool."""
         return intent_name in self._entries
 
+    def names(self) -> list[str]:
+        """Return the mapped intent names."""
+        return list(self._entries)
+
     def entry(self, intent_name: str) -> dict[str, Any]:
         """Return the raw mapping entry of an intent."""
         return self._entries[intent_name]

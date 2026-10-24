@@ -67,6 +67,15 @@ def same_definition(row: dict[str, Any], candidate: dict[str, Any]) -> bool:
     return any(sentence_key(s) in keys for s in candidate.get("sentences") or [])
 
 
+def is_open(row: dict[str, Any]) -> bool:
+    """Whether a suggestion is proposed and not reviewed: its sentences may still change.
+
+    An active suggestion is in use (approved, or auto-used above the threshold), so
+    new sentences become a suggestion of their own instead.
+    """
+    return row["status"] == "proposed" and row["reviewed_at"] is None
+
+
 # ------------------------------------------------------------------ reads
 def get_suggestion(store: SessionStore, suggestion_id: int) -> dict[str, Any] | None:
     """One suggestion row, or None."""
@@ -117,13 +126,14 @@ def add_evidence(
 ) -> int:
     """Attach more evidence (turns already attached are skipped); returns how many were added.
 
-    ``sentences`` are merged into an unreviewed suggestion; a reviewed one keeps its sentences.
+    ``sentences`` are merged into a suggestion still waiting for review (``is_open``);
+    any other one keeps its sentences.
     """
     existing = evidence_turns(store, [suggestion_id]).get(suggestion_id, set())
     new = [e for e in evidence if (e["session_id"], e["turn_idx"]) not in existing]
     row = get_suggestion(store, suggestion_id) or {}
     values: dict[str, Any] = {}
-    if sentences and row and row["reviewed_at"] is None:
+    if sentences and row and is_open(row):
         current = list(row["sentences"] or [])
         keys = {sentence_key(s) for s in current}
         extra = [s for s in sentences if sentence_key(s) not in keys]
@@ -279,11 +289,20 @@ def list_suggestions(
         conditions.append(s.c.status.in_(USABLE_STATUSES))
     elif status != "all":
         conditions.append(s.c.status == status)
-    rows = _rows(store, select(s).where(*conditions))
-    turns = evidence_turns(store, [r["id"] for r in rows])
-    rows.sort(key=lambda r: (len(turns.get(r["id"], ())), r["created_at"], r["id"]), reverse=True)
-    page = rows[offset : offset + limit]
-    return {"total": len(rows), "suggestions": attach_details(store, page)}
+    e = schema.intent_evidence
+    # Evidence rows are unique per (suggestion, session, turn): their count is the occurrence count.
+    occurrences = select(e.c.suggestion_id, func.count().label("n")).group_by(e.c.suggestion_id).subquery()
+    stmt = (
+        select(s)
+        .outerjoin(occurrences, occurrences.c.suggestion_id == s.c.id)
+        .where(*conditions)
+        .order_by(func.coalesce(occurrences.c.n, 0).desc(), s.c.created_at.desc(), s.c.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    with store.engine.connect() as conn:
+        total = conn.execute(select(func.count()).select_from(s).where(*conditions)).scalar_one()
+    return {"total": total, "suggestions": attach_details(store, _rows(store, stmt))}
 
 
 def open_suggestion_count(store: SessionStore) -> int:
@@ -302,11 +321,15 @@ def live_uses(store: SessionStore, suggestion_ids: list[int]) -> Counter:
     if not wanted:
         return uses
     ev = schema.events
-    stmt = select(ev.c.data).where(ev.c.kind == INTENT_EVENT)
+    learned = ev.c.data["learned"].as_integer()
+    stmt = (
+        select(learned, func.count())
+        .where(ev.c.kind == INTENT_EVENT, ev.c.data["handled_by"].as_string() == "intent", learned.in_(wanted))
+        .group_by(learned)
+    )
     with store.engine.connect() as conn:
-        for (data,) in conn.execute(stmt):
-            if isinstance(data, dict) and data.get("handled_by") == "intent" and data.get("learned") in wanted:
-                uses[data["learned"]] += 1
+        for learned_id, count in conn.execute(stmt):
+            uses[int(learned_id)] = int(count)
     return uses
 
 
@@ -341,19 +364,29 @@ def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict
     return out
 
 
-def export_sentences(store: SessionStore, language: str) -> dict[str, Any]:
-    """Active suggestions as sentence-file and ``client_tools.yaml`` content, to commit them to the repository."""
+def export_sentences(store: SessionStore, language: str, custom_intents: set[str]) -> dict[str, Any]:
+    """Active suggestions as sentence-file and ``client_tools.yaml`` content, to commit them to the repository.
+
+    Only sentences of ``custom_intents`` (defined by the custom sentence files) and
+    learned intents go to the sentence file. Sentences of stock Home Assistant
+    intents are returned under ``home_assistant``: a custom file defining a stock
+    intent would take it over without the stock lists, rules and context.
+    """
     sentences: dict[str, Any] = {"language": base_language(language), "intents": {}}
     responses: dict[str, Any] = {}
     client_tools: dict[str, Any] = {}
-    for row in active_suggestions(store, language):
+    home_assistant: dict[str, Any] = {}
+    rows = active_suggestions(store, language)
+    custom = set(custom_intents) | {row["intent"] for row in rows if row["kind"] == "intent"}
+    for row in rows:
         block: dict[str, Any] = {"sentences": list(row["sentences"] or [])}
         if row["slots"]:
             block["slots"] = row["slots"]
-        sentences["intents"].setdefault(row["intent"], {"data": []})["data"].append(block)
+        target = sentences["intents"] if row["intent"] in custom else home_assistant
+        target.setdefault(row["intent"], {"data": []})["data"].append(block)
         if row["kind"] == "intent":
             responses[row["intent"]] = {"default": row["response"] or ""}
             client_tools[row["intent"]] = row["tool"] or {}
     if responses:
         sentences["responses"] = {"intents": responses}
-    return {"sentences": sentences, "client_tools": {"intents": client_tools}}
+    return {"sentences": sentences, "client_tools": {"intents": client_tools}, "home_assistant": home_assistant}

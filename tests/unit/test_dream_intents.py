@@ -3,14 +3,18 @@
 
 # ruff: noqa: D100, D101, D102, D103, D107
 
+import copy
+
+import home_assistant_intents
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from hassil import Intents, recognize_best
 from test_monitoring_memories import FakeLlm
 
 from examples.shared.intent_engine.config import PACKAGED_SENTENCES_DIR
-from examples.shared.intent_engine.learned import LearnedIntent, merge_learned, sentence_problems
-from examples.shared.intent_engine.matcher import IntentMatcher
+from examples.shared.intent_engine.learned import LearnedIntent, merge_learned, sentence_problems, stock_blocks
+from examples.shared.intent_engine.matcher import IntentMatcher, build_slot_lists, custom_sentence_data
 from examples.shared.intent_engine.processor import build_intent_engine
 from monitoring import intents
 from monitoring.api import create_review_router
@@ -96,16 +100,16 @@ def _session(store, sid, base_url, *, engine=True, started=1000.0):
     store.write_batch(rows)
 
 
-def _run(store, artifacts, sid):
+def _run(store, artifacts, sid, *, config=None, progress=None):
     store.reset_job("dream", sid)
     job = next(j for j in store.jobs() if j["kind"] == "dream" and j["target"] == sid)
     ctx = JobContext(
         job=job,
         store=store,
         artifacts=artifacts,
-        config=dict(_DEFAULTS),
+        config=config or dict(_DEFAULTS),
         is_preempted=lambda: False,
-        progress={},
+        progress=progress or {},
     )
     DreamJob().run(ctx)
     return ctx.progress
@@ -370,3 +374,150 @@ def test_api_review_intents(api):
     assert exported.status_code == 200
     assert "ReachyFollowMe" in exported.text and "head_tracking" in exported.text
     assert client.get("/api/review/activities").json()["activities"][-1]["open"] == 0
+
+
+def test_in_use_suggestion_keeps_its_sentences(stores, llm):
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    # Auto-used above the threshold: active, not reviewed.
+    active_id = intents.add_suggestion(store, _row("ReachyMoveHead", "pivote vers [la ]{direction}", "dream:llm"), [])
+
+    # The session proposes the in-use sentence plus a new one.
+    answer = copy.deepcopy(ANSWER)
+    answer["sentences"][0]["sentences"].insert(0, "pivote vers [la ]{direction}")
+    llm.answer = answer
+    progress = _run(store, artifacts, "s1", config={**_DEFAULTS, "dream": {"intents": {"auto_use_threshold": 0.9}}})
+    assert progress["intents"]["merged"] == 1
+    assert intents.get_suggestion(store, active_id)["sentences"] == ["pivote vers [la ]{direction}"]
+    extra = next(r for r in intents.list_suggestions(store)["suggestions"] if r["kind"] == "sentence")
+    assert extra["sentences"] == ["tourne-toi vers [la ]{direction}"]
+    assert extra["status"] == "proposed" and extra["validated"] is False
+    assert [r["id"] for r in intents.active_suggestions(store, "fr")] == [active_id]
+
+
+def _row(intent, sentence, source="human:ann"):
+    return {
+        "kind": "sentence",
+        "language": "fr",
+        "intent": intent,
+        "sentences": [sentence],
+        "status": "active",
+        "source": source,
+    }
+
+
+def test_rerun_keeps_suggestions_when_the_llm_answer_is_unusable(stores, llm):
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    llm.answer = ANSWER
+    _run(store, artifacts, "s1")
+    before = intents.list_suggestions(store)["total"]
+
+    llm.answer = "sorry, I cannot help"
+    with pytest.raises(ValueError):
+        _run(store, artifacts, "s1", progress={"written": True})
+    assert intents.list_suggestions(store)["total"] == before == 2
+
+    # A re-run that finds nothing to learn retracts the earlier proposals.
+    store.write_batch(
+        [
+            (
+                "events",
+                {"session_id": "s1", "turn_idx": idx, "ts": 1100.0 + idx, "kind": "intent_engine", "data": data},
+            )
+            for idx, data in ((1, {"handled_by": "intent", "intent": "ReachyMoveHead"}),)
+            + tuple((i, {"handled_by": "llm", "reason": "blocked"}) for i in (2, 3))
+        ]
+    )
+    progress = _run(store, artifacts, "s1", progress={"written": True})
+    assert progress["intents_skipped"] == "no missed turn"
+    assert intents.list_suggestions(store)["total"] == 0
+
+
+def test_new_intent_name_must_not_clash_with_an_inactive_one(stores, llm):
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    answer = copy.deepcopy(ANSWER)
+    # ReachyGoToSleep is a packaged intent whose tool this session does not declare.
+    answer["intents"][0]["name"] = "ReachyGoToSleep"
+    llm.answer = answer
+    progress = _run(store, artifacts, "s1")
+    assert progress["intents"]["created"] == 1
+    assert [r["kind"] for r in intents.list_suggestions(store)["suggestions"]] == ["sentence"]
+
+
+def test_live_uses_and_order(stores, llm):
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    llm.answer = ANSWER
+    _run(store, artifacts, "s1")
+    ids = [r["id"] for r in intents.list_suggestions(store)["suggestions"]]
+    store.write_batch(
+        [
+            (
+                "events",
+                {
+                    "session_id": "s1",
+                    "turn_idx": 9,
+                    "ts": 1200.0 + n,
+                    "kind": "intent_engine",
+                    "data": {"handled_by": handled, "intent": "X", "learned": ids[1]},
+                },
+            )
+            for n, handled in enumerate(("intent", "intent", "llm"))
+        ]
+    )
+    assert intents.live_uses(store, ids) == {ids[1]: 2}
+    page = intents.list_suggestions(store, limit=1, offset=1)
+    assert page["total"] == 2 and [r["id"] for r in page["suggestions"]] == [ids[1]]
+
+
+def test_stock_sentences_keep_the_shape_of_the_stock_blocks():
+    data = home_assistant_intents.get_intents("fr")
+    body = data["intents"]["HassTurnOn"]
+    by_name = LearnedIntent(id=5, kind="sentence", intent="HassTurnOn", sentences=("mets en marche [<le>]{name}",))
+    blocks, misfits = stock_blocks(by_name, body, data)
+    assert not misfits and blocks
+    assert all(b.get("requires_context", {}).get("domain") for b in blocks)
+    assert all(b["metadata"]["learned_id"] == 5 for b in blocks)
+
+    # No domain: "turn on the living room" would turn on everything in it.
+    by_area = LearnedIntent(id=6, kind="sentence", intent="HassTurnOn", sentences=("mets en marche {area}",))
+    assert stock_blocks(by_area, body, data)[1] == ["mets en marche {area}"]
+    lights = LearnedIntent(
+        id=7, kind="sentence", intent="HassTurnOn", sentences=("mets en marche {area}",), slots={"domain": "light"}
+    )
+    assert len(stock_blocks(lights, body, data)[0]) == 1
+
+    merged, used = merge_learned(
+        {**data, "intents": {"HassTurnOn": body}}, [by_name, by_area], add_intents=False, home_assistant=True
+    )
+    assert used == [5]
+    lists = build_slot_lists(
+        [{"name": "lampe", "domain": "light"}, {"name": "thermomètre", "domain": "sensor"}], ["salon"], []
+    )
+    parsed = Intents.from_dict(merged)
+    match = recognize_best("mets en marche la lampe", parsed, slot_lists=lists, language="fr", best_slot_name="name")
+    assert match.intent.name == "HassTurnOn" and match.intent_metadata["learned_id"] == 5
+    assert recognize_best("mets en marche le thermomètre", parsed, slot_lists=lists, language="fr") is None
+
+
+def test_export_keeps_stock_intent_sentences_out_of_the_sentence_file(stores):
+    import yaml
+
+    store, _ = stores
+    for intent, sentence in (("ReachyMoveHead", "tourne-toi vers [la ]{direction}"), ("HassTurnOn", "<allume> {name}")):
+        intents.add_suggestion(store, _row(intent, sentence), [])
+    files = custom_sentence_data(PACKAGED_SENTENCES_DIR, "fr")
+    exported = intents.export_sentences(store, "fr", set(files["intents"]))
+    assert set(exported["sentences"]["intents"]) == {"ReachyMoveHead"}
+    assert set(exported["home_assistant"]) == {"HassTurnOn"}
+
+    # The exported file parses next to the packaged ones.
+    combined = copy.deepcopy(files)
+    from hassil.util import merge_dict
+
+    merge_dict(combined, yaml.safe_load(yaml.safe_dump(exported["sentences"])))
+    parsed = Intents.from_dict(combined)
+    match = recognize_best("tourne-toi vers la droite", parsed, slot_lists=build_slot_lists([], [], []), language="fr")
+    assert match.intent.name == "ReachyMoveHead"

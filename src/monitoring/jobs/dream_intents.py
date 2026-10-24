@@ -26,6 +26,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 from loguru import logger
@@ -144,12 +145,8 @@ class IntentCatalog:
     def __init__(self, store, session_config: dict[str, Any], cfg: dict[str, Any]):
         """Rebuild the catalog for ``session_config`` (see ``available``)."""
         from examples.shared.intent_engine.config import IntentEngineConfig
-        from examples.shared.intent_engine.learned import LearnedIntent, merge_learned, tool_entries
-        from examples.shared.intent_engine.matcher import (
-            _stock_data,
-            custom_parse_data,
-            custom_sentence_data,
-        )
+        from examples.shared.intent_engine.learned import LearnedIntent, tool_entries
+        from examples.shared.intent_engine.matcher import _stock_data, custom_sentence_data
         from examples.shared.intent_engine.targets import ClientToolMap
 
         self.cfg = cfg
@@ -167,35 +164,71 @@ class IntentCatalog:
         self.client_tools = tuple(session_config.get("client_tools") or ())
 
         self.learned = [LearnedIntent.from_row(r) for r in intents.active_suggestions(store, self.language)]
-        self.tool_map = ClientToolMap.load(self.env.sentences_dir).with_entries(tool_entries(self.learned))
+        file_tools = ClientToolMap.load(self.env.sentences_dir)
+        self.tool_map = file_tools.with_entries(tool_entries(self.learned))
 
-        def keep(name: str) -> bool:
-            if name in self.tool_map:
-                return self.tool_map.tool(name) in self.client_tools
-            return self.use_home_assistant and name in self.allowed
+        self.files = custom_sentence_data(self.env.sentences_dir, self.language)
+        # Intent names defined in the repository, also the ones inactive for this session.
+        self.taken_names = (
+            set((self.files or {}).get("intents") or {})
+            | set((_stock_data(self.language) or {}).get("intents") or {})
+            | set(file_tools.names())
+        )
+        # Tool calls of the learned intents, by name: proposing one again with the same call merges into it.
+        self.learned_tools: dict[str, list[dict[str, Any]]] = {}
+        for row in intents.suggestions_for(store, self.language, intents.USABLE_STATUSES):
+            if row["kind"] == "intent":
+                self.learned_tools.setdefault(row["intent"], []).append(row["tool"] or {})
+        self.custom, self.stock = self.sentence_data(self.learned)
+        self._parsed: dict[int, tuple[dict[str, Any], Any]] = {}
+        self._before: dict[str, Any] = {}
 
-        files = custom_sentence_data(self.env.sentences_dir, self.language) or {}
-        custom_names = set(files.get("intents") or {}) | {i.intent for i in self.learned if i.kind == "intent"}
-        merged, _ = merge_learned(files, self.learned, add_intents=True)
-        self.custom_responses = (merged.get("responses") or {}).get("intents") or {}
-        self.custom = custom_parse_data(merged, self.language, keep)
-        self.stock = None
-        if self.use_home_assistant and (stock := _stock_data(self.language)):
-            pruned = {n: b for n, b in (stock.get("intents") or {}).items() if n in self.allowed}
-            stock_learned = [i for i in self.learned if i.kind == "sentence" and i.intent not in custom_names]
-            self.stock, _ = merge_learned({**stock, "intents": pruned}, stock_learned, add_intents=False)
-        self.slot_lists = self._sync_home_assistant() if self.stock is not None else None
+    def keep(self, name: str) -> bool:
+        """Whether the session's engine kept a custom intent (like the live ``keep_custom_intent``)."""
+        if name in self.tool_map:
+            return self.tool_map.tool(name) in self.client_tools
+        return self.use_home_assistant and name in self.allowed
+
+    def sentence_data(self, learned, extra_custom: str | None = None) -> tuple[dict | None, dict | None]:
+        """``(custom, stock)`` hassil data with ``learned`` merged in, as the live matcher builds it.
+
+        ``extra_custom`` keeps one more custom intent (a new intent under test).
+        """
+        from examples.shared.intent_engine.learned import merge_learned, stock_learned
+        from examples.shared.intent_engine.matcher import _stock_data, custom_parse_data, stock_parse_data
+
+        merged, _ = merge_learned(self.files or {}, learned, add_intents=True)
+        custom = custom_parse_data(merged, self.language, lambda name: self.keep(name) or name == extra_custom)
+        stock = None
+        if self.use_home_assistant and (data := _stock_data(self.language)):
+            stock, _ = merge_learned(
+                stock_parse_data(data, self.allowed),
+                stock_learned(self.files, learned),
+                add_intents=False,
+                home_assistant=True,
+            )
+        return custom, stock
 
     @property
     def available(self) -> bool:
         """Whether the session ran the engine with sentences for its language."""
         return self.enabled and bool(self.custom or self.stock)
 
+    @property
+    def extra_lists(self) -> frozenset[str]:
+        """Lists the sentences may use without declaring them (the Home Assistant names)."""
+        from examples.shared.intent_engine.learned import HOME_ASSISTANT_LISTS
+
+        return HOME_ASSISTANT_LISTS if self.stock is not None else frozenset()
+
     # -------------------------------------------------------------- catalog
-    def _sync_home_assistant(self):
-        """Home Assistant entity, area and floor names (None when the dreamer cannot reach it)."""
+    @cached_property
+    def slot_lists(self):
+        """Home Assistant entity, area and floor names, synced on first use (None when unavailable)."""
         from examples.shared.intent_engine.targets import HomeAssistantTarget, TargetUnavailable
 
+        if self.stock is None:
+            return None
         if not self.env.home_assistant_configured:
             self.notes.append("Home Assistant is not configured for the dreamer; its names are not checked")
             return None
@@ -325,9 +358,18 @@ class IntentCatalog:
 
         return normalize_text(text, self.language, self.wake_words)
 
+    def _intents(self, data: dict[str, Any]):
+        """``data`` parsed by hassil, once per data object."""
+        from hassil import Intents
+
+        cached = self._parsed.get(id(data))
+        if cached is None or cached[0] is not data:
+            cached = self._parsed[id(data)] = (data, Intents.from_dict(data))
+        return cached[1]
+
     def recognize(self, text: str, *, custom: dict | None = None, stock: dict | None = None):
         """``(intent name, slots, learned id)`` for ``text`` through custom then stock data, or None."""
-        from hassil import Intents, recognize_best
+        from hassil import recognize_best
 
         from examples.shared.intent_engine.learned import LEARNED_ID_KEY
         from examples.shared.intent_engine.matcher import _EMPTY_SLOT_LISTS
@@ -339,7 +381,7 @@ class IntentCatalog:
             try:
                 result = recognize_best(
                     text,
-                    Intents.from_dict(data),
+                    self._intents(data),
                     slot_lists=self.slot_lists or _EMPTY_SLOT_LISTS,
                     intent_context=context,
                     language=self.base,
@@ -355,23 +397,15 @@ class IntentCatalog:
 
     def check(self, candidate, turns: list[dict[str, Any]]) -> Check:
         """Match a ``LearnedIntent`` candidate against the person's words in its evidence turns."""
-        from examples.shared.intent_engine.learned import (
-            HOME_ASSISTANT_LISTS,
-            merge_learned,
-            sentence_references,
-        )
+        from examples.shared.intent_engine.learned import HOME_ASSISTANT_LISTS, sentence_references
         from examples.shared.intent_engine.targets import ClientToolMap
 
         result = Check()
+        extra = candidate.intent if candidate.kind == "intent" else None
+        custom, stock = self.sentence_data([*self.learned, candidate], extra_custom=extra)
         if candidate.kind == "intent":
-            empty = {"language": self.base, "intents": {}, "lists": {}, "expansion_rules": {}}
-            custom, _ = merge_learned(self.custom or empty, [candidate], add_intents=True)
-            stock = self.stock
             tool_map = self.tool_map.with_entries({candidate.intent: candidate.tool or {}})
         else:
-            owner = self.owner(candidate.intent)
-            merged, _ = merge_learned(owner or {}, [candidate], add_intents=False)
-            custom, stock = (merged, self.stock) if owner is self.custom else (self.custom, merged)
             tool_map = self.tool_map
         needs_names = any(sentence_references(s)[0] & HOME_ASSISTANT_LISTS for s in candidate.sentences if _parses(s))
         if needs_names and not self.slot_lists:
@@ -382,7 +416,9 @@ class IntentCatalog:
         follow_up = candidate.intent in tool_map and tool_map.has_follow_up(candidate.intent)
         for turn in turns:
             text = self.normalize(turn["user_text"])
-            before = self.recognize(text)
+            if text not in self._before:
+                self._before[text] = self.recognize(text)
+            before = self._before[text]
             if before is not None:
                 result.notes.append(f"turn {turn['idx']} already matches {before[0]}")
                 continue
@@ -404,6 +440,27 @@ class IntentCatalog:
                     continue
             result.matched.append(turn["idx"])
         return result
+
+
+def sentence_set_problems(
+    candidate, data: dict[str, Any], *, home_assistant: bool, extra_lists=frozenset()
+) -> list[str]:
+    """Why a learned ``candidate`` cannot be merged into sentence ``data`` (empty when it can).
+
+    ``home_assistant``: ``data`` is the stock set, each sentence must fit the shape
+    of one of the intent's stock blocks (``learned.stock_blocks``).
+    """
+    from examples.shared.intent_engine.learned import sentence_problems, stock_blocks
+
+    problems = [f"{s!r}: {p}" for s in candidate.sentences for p in sentence_problems(s, data, extra_lists=extra_lists)]
+    body = (data.get("intents") or {}).get(candidate.intent)
+    if home_assistant and not problems and isinstance(body, dict):
+        _, misfits = stock_blocks(candidate, body, data)
+        problems += [
+            f"{s!r} fits no {candidate.intent} sentence shape (target {{name}}/{{area}}/{{floor}} and fixed slots)"
+            for s in misfits
+        ]
+    return problems
 
 
 def _parses(template: str) -> bool:
@@ -506,18 +563,20 @@ def candidates(
     catalog: IntentCatalog, sentence_items: list[dict[str, Any]], intent_items: list[dict[str, Any]], missed
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Turn the LLM proposals into checked suggestion rows (without ``source``/``status``), plus drop notes."""
-    from examples.shared.intent_engine.learned import LearnedIntent, sentence_problems, sentence_references
+    from examples.shared.intent_engine.learned import LearnedIntent, sentence_references
     from examples.shared.intent_engine.responses import is_local_template, render_local
 
     dropped: list[str] = []
     out: list[dict[str, Any]] = []
-    known_names = set(catalog.names()) | set((catalog.custom or {}).get("intents") or {})
 
-    def problems_for(sentences: list[str], data: dict[str, Any] | None) -> list[str]:
-        from examples.shared.intent_engine.learned import HOME_ASSISTANT_LISTS
-
-        extra = HOME_ASSISTANT_LISTS if catalog.stock is not None else ()
-        return [p for s in sentences for p in sentence_problems(s, data or {}, extra_lists=extra)]
+    def problems_for(sentences: list[str], data: dict[str, Any] | None, intent: str, slots=None) -> list[str]:
+        home_assistant = catalog.stock is not None and data is catalog.stock
+        candidate = LearnedIntent(
+            id=_CANDIDATE_ID, kind="sentence", intent=intent, sentences=tuple(sentences), slots=slots or {}
+        )
+        return sentence_set_problems(
+            candidate, data or {}, home_assistant=home_assistant, extra_lists=catalog.extra_lists
+        )
 
     def finish(item, kind, intent, sentences, slots, tool, response, turn_ids):
         candidate = LearnedIntent(
@@ -562,11 +621,12 @@ def candidates(
         if not catalog.learnable(intent) or not sentences or not turn_ids:
             dropped.append(f"{intent or '?'}: unknown intent, no sentence or no missed turn")
             continue
-        problems = problems_for(sentences, catalog.owner(intent))
+        slots = _scalar_dict(item.get("slots"))
+        problems = problems_for(sentences, catalog.owner(intent), intent, slots)
         if problems:
             dropped.append(f"{intent}: {'; '.join(problems)}")
             continue
-        finish(item, "sentence", intent, sentences, _scalar_dict(item.get("slots")), None, None, turn_ids)
+        finish(item, "sentence", intent, sentences, slots, None, None, turn_ids)
 
     for item in intent_items:
         name, tool = str(item.get("name") or ""), str(item.get("tool") or "")
@@ -580,10 +640,10 @@ def candidates(
         if existing:
             finish(item, "sentence", existing, sentences, {}, None, None, turn_ids)
             continue
-        if not _NAME_RE.match(name) or name in known_names:
+        if not _NAME_RE.match(name) or name in catalog.taken_names:
             dropped.append(f"{name or '?'}: invalid or already used intent name")
             continue
-        problems = problems_for(sentences, catalog.custom)
+        problems = problems_for(sentences, catalog.custom, name)
         slot_names = set()
         for sentence in sentences:
             if _parses(sentence):
@@ -604,10 +664,13 @@ def candidates(
                 render_local(response, {})
             except Exception as exc:
                 problems.append(f"response does not render: {exc}")
+        tool_call = {"tool": tool, "arguments": clean_args}
+        if any(other != tool_call for other in catalog.learned_tools.get(name, [])):
+            problems.append("a learned intent already uses this name for another tool call")
         if problems:
             dropped.append(f"{name}: {'; '.join(problems)}")
             continue
-        finish(item, "intent", name, sentences, {}, {"tool": tool, "arguments": clean_args}, response, turn_ids)
+        finish(item, "intent", name, sentences, {}, tool_call, response, turn_ids)
     return out, dropped
 
 
@@ -616,17 +679,8 @@ def store_candidates(
 ) -> dict[str, int]:
     """Insert new suggestions or merge into equivalent ones; returns counts."""
     counts = {"created": 0, "merged": 0, "rejected_before": 0, "active": 0}
-    for row in rows:
-        evidence = [{**e, "session_id": session_id} for e in row.pop("evidence")]
-        existing = intents.suggestions_for(store, row["language"], (*intents.USABLE_STATUSES, "rejected"))
-        same = next((r for r in existing if intents.same_definition(r, row)), None)
-        if same is not None and same["status"] == "rejected":
-            counts["rejected_before"] += 1
-            continue
-        if same is not None:
-            intents.add_evidence(store, same["id"], evidence, sentences=row["sentences"])
-            counts["merged"] += 1
-            continue
+
+    def create(row: dict[str, Any], evidence: list[dict[str, Any]]) -> None:
         auto = (
             auto_use_threshold is not None
             and row["kind"] == "sentence"
@@ -637,6 +691,47 @@ def store_candidates(
         intents.add_suggestion(store, {**row, "status": status, "source": source, "source_version": model}, evidence)
         counts["created"] += 1
         counts["active"] += int(auto)
+
+    for row in rows:
+        evidence = [{**e, "session_id": session_id} for e in row.pop("evidence")]
+        existing = intents.suggestions_for(store, row["language"], (*intents.USABLE_STATUSES, "rejected"))
+        same = next((r for r in existing if intents.same_definition(r, row)), None)
+        if same is None:
+            create(row, evidence)
+            continue
+        if same["status"] == "rejected":
+            counts["rejected_before"] += 1
+            continue
+        counts["merged"] += 1
+        if intents.is_open(same):
+            intents.add_evidence(store, same["id"], evidence, sentences=row["sentences"])
+            continue
+        # In use: its sentences stay as they were reviewed (or auto-used). New ones are
+        # proposed on their own, unchecked because the evidence may match the old ones.
+        intents.add_evidence(store, same["id"], evidence)
+        known = {
+            intents.sentence_key(s) for r in existing if r["intent"] == same["intent"] for s in r["sentences"] or []
+        }
+        extra = [s for s in row["sentences"] if intents.sentence_key(s) not in known]
+        if extra:
+            notes = [f"new sentences for #{same['id']}, which is in use; the evidence may match its sentences"]
+            create(
+                {
+                    **row,
+                    "kind": "sentence",
+                    "intent": same["intent"],
+                    "sentences": extra,
+                    "slots": row["slots"] if row["kind"] == "sentence" else None,
+                    "tool": None,
+                    "response": None,
+                    "validated": False,
+                    "validation": {
+                        **(row["validation"] or {}),
+                        "notes": [*(row["validation"] or {}).get("notes", []), *notes],
+                    },
+                },
+                evidence,
+            )
     return counts
 
 
@@ -650,15 +745,18 @@ def learn_intents(ctx, session_id: str, session_config: dict[str, Any], turns, g
     cfg = intents_config(dream_cfg)
     if not cfg["enabled"]:
         return {"intents_skipped": "disabled"}
-    catalog = IntentCatalog(ctx.store, session_config, cfg)
-    if not catalog.available:
-        return {"intents_skipped": "intent engine off or no sentences for the session language"}
+    # A re-run replaces what an earlier run proposed for this session, but only once
+    # the new proposals are in hand: an LLM failure keeps the earlier ones.
     annotated = missed_turns(ctx, session_id, turns)
     missed = {t["idx"]: t for t in annotated if t["missed"]}
     if not missed:
+        intents.retract_session_suggestions(ctx.store, session_id)
         return {"intents_skipped": "no missed turn"}
+    catalog = IntentCatalog(ctx.store, session_config, cfg)
+    if not catalog.available:
+        intents.retract_session_suggestions(ctx.store, session_id)
+        return {"intents_skipped": "intent engine off or no sentences for the session language"}
 
-    retracted = intents.retract_session_suggestions(ctx.store, session_id)
     client = get_client()
     client.wait_ready(ctx)
     ctx.check_preempted()
@@ -669,6 +767,7 @@ def learn_intents(ctx, session_id: str, session_config: dict[str, Any], turns, g
     rows, dropped = candidates(catalog, sentence_items, intent_items, missed)
     for note in dropped:
         logger.info(f"dream {session_id}: intent proposal dropped: {note}")
+    retracted = intents.retract_session_suggestions(ctx.store, session_id)
     counts = store_candidates(
         ctx.store,
         session_id,
@@ -690,19 +789,14 @@ def correction_problems(
     be a slots-only template.
     """
     from examples.shared.intent_engine.config import IntentEngineConfig
-    from examples.shared.intent_engine.learned import (
-        HOME_ASSISTANT_LISTS,
-        LearnedIntent,
-        merge_learned,
-        sentence_problems,
-    )
+    from examples.shared.intent_engine.learned import HOME_ASSISTANT_LISTS, LearnedIntent, merge_learned, stock_learned
     from examples.shared.intent_engine.matcher import _stock_data, custom_sentence_data
     from examples.shared.intent_engine.responses import is_local_template
 
     language = row["language"]
     learned = [LearnedIntent.from_row(r) for r in intents.active_suggestions(store, language) if r["id"] != row["id"]]
-    files = custom_sentence_data(IntentEngineConfig.from_env().sentences_dir, language) or {}
-    custom, _ = merge_learned(files, learned, add_intents=True)
+    files = custom_sentence_data(IntentEngineConfig.from_env().sentences_dir, language)
+    custom, _ = merge_learned(files or {}, learned, add_intents=True)
     stock = _stock_data(language) or {}
     problems: list[str] = []
     if row["kind"] == "intent":
@@ -713,10 +807,11 @@ def correction_problems(
                 problems.append(f"intent name {name!r} is not CamelCase or is already used")
         if response is not None and (not response.strip() or not is_local_template(response)):
             problems.append("response is empty or not a slots-only template")
-    elif row["intent"] in (custom.get("intents") or {}):
-        data = custom
-    else:
+    candidate = LearnedIntent.from_row({**row, "sentences": sentences if sentences is not None else row["sentences"]})
+    home_assistant = row["kind"] == "sentence" and bool(stock_learned(files, [candidate]))
+    if home_assistant:
         data = stock
-    for sentence in sentences or []:
-        problems += [f"{sentence!r}: {p}" for p in sentence_problems(sentence, data, extra_lists=HOME_ASSISTANT_LISTS)]
+    elif row["kind"] == "sentence":
+        data = custom
+    problems += sentence_set_problems(candidate, data, home_assistant=home_assistant, extra_lists=HOME_ASSISTANT_LISTS)
     return problems

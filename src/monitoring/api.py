@@ -715,15 +715,27 @@ class ReviewService:
         """Active suggestions as YAML for the sentence files and ``client_tools.yaml``."""
         import yaml
 
-        exported = intents.export_sentences(self.store, language)
+        from examples.shared.intent_engine.config import IntentEngineConfig
+        from examples.shared.intent_engine.matcher import custom_sentence_data
+
+        files = custom_sentence_data(IntentEngineConfig.from_env().sentences_dir, language) or {}
+        exported = intents.export_sentences(self.store, language, set(files.get("intents") or {}))
         dump = {"allow_unicode": True, "sort_keys": False}
-        return (
-            f"# Learned sentences for {intents.base_language(language)}: "
-            f"add to src/examples/shared/intent_engine/sentences/{intents.base_language(language)}/\n"
+        base = intents.base_language(language)
+        text = (
+            f"# Learned sentences for {base}: add to src/examples/shared/intent_engine/sentences/{base}/\n"
             + yaml.safe_dump(exported["sentences"], **dump)
             + "---\n# Learned client-tool intents: add to sentences/client_tools.yaml\n"
             + yaml.safe_dump(exported["client_tools"], **dump)
         )
+        if exported["home_assistant"]:
+            text += (
+                "---\n# Learned sentences for Home Assistant intents. Do not add them to a custom sentence file:\n"
+                "# a custom file defining a Home Assistant intent replaces its stock sentences. They stay in use\n"
+                "# from the monitoring database; contribute them to the home-assistant-intents project to keep them.\n"
+                + yaml.safe_dump({"language": base, "intents": exported["home_assistant"]}, **dump)
+            )
+        return text
 
 
 def create_review_router(

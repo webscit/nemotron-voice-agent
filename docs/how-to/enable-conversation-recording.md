@@ -336,7 +336,8 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   `POST /api/review/intents/<id>/review` accepts
   `{"annotator", "action", "sentences", "intent", "response"}`, where `action`
   is `approve`, `correct`, `reject`, or `restore`. A correction with invalid
-  sentences returns HTTP `422`. `GET /api/review/intents/export?language=fr`
+  sentences, for example a Home Assistant sentence that fits no stock sentence
+  shape, returns HTTP `422`. `GET /api/review/intents/export?language=fr`
   returns the YAML export.
 - **ASR reference.** Every recorded user turn, with the ones where the live
   ASR and the reference model (Voxtral) disagree first.

@@ -28,7 +28,7 @@ from hassil.intents import SlotList, TextSlotList
 from hassil.util import merge_dict, remove_punctuation
 from loguru import logger
 
-from examples.shared.intent_engine.learned import LEARNED_ID_KEY, LearnedIntent, merge_learned
+from examples.shared.intent_engine.learned import LEARNED_ID_KEY, LearnedIntent, merge_learned, stock_learned
 
 # Leading words dropped before matching, in addition to the configured wake words.
 # The stock sentences match polite forms but not a greeting or a name in front.
@@ -164,8 +164,7 @@ def _load_stock(
     data = _stock_data(language)
     if not data:
         return None
-    intents = {name: body for name, body in data.get("intents", {}).items() if name in allowed_intents}
-    merged, _ = merge_learned({**data, "intents": intents}, learned, add_intents=False)
+    merged, _ = merge_learned(stock_parse_data(data, allowed_intents), learned, add_intents=False, home_assistant=True)
     responses = data.get("responses", {})
     try:
         parsed = Intents.from_dict(merged)
@@ -180,13 +179,18 @@ def _load_stock_cached(language: str, allowed_intents: tuple[str, ...]) -> _Sent
     data = _stock_data(language)
     if not data:
         return None
-    intents = {name: body for name, body in data.get("intents", {}).items() if name in allowed_intents}
     responses = data.get("responses", {})
     return _SentenceSet(
-        intents=Intents.from_dict({**data, "intents": intents}),
+        intents=Intents.from_dict(stock_parse_data(data, allowed_intents)),
         responses=responses.get("intents", {}),
         errors=responses.get("errors", {}),
     )
+
+
+def stock_parse_data(data: dict[str, Any], allowed_intents: Iterable[str]) -> dict[str, Any]:
+    """The stock sentence ``data`` pruned to the allow-listed intents."""
+    allowed = set(allowed_intents)
+    return {**data, "intents": {name: body for name, body in (data.get("intents") or {}).items() if name in allowed}}
 
 
 def custom_sentence_data(sentences_dir: Path, language: str) -> dict[str, Any] | None:
@@ -234,13 +238,13 @@ def custom_parse_data(
 
 
 def _load_custom(
-    sentences_dir: Path,
+    files: dict[str, Any] | None,
     language: str,
     keep: Callable[[str], bool],
     learned: Sequence[LearnedIntent] = (),
 ) -> _SentenceSet | None:
-    """Parse the custom sentence files (plus learned intents) for a language, keeping intents accepted by ``keep``."""
-    merged = custom_sentence_data(sentences_dir, language)
+    """Parse the custom sentence ``files`` plus learned intents, keeping the intents accepted by ``keep``."""
+    merged = files
     if merged is None and not any(item.kind == "intent" for item in learned):
         return None
     merged, _ = merge_learned(merged or {}, learned, add_intents=True)
@@ -283,13 +287,12 @@ class IntentMatcher:
         # declare ``requires_context: {area: {slot: true}}`` copy it into the slots.
         self._context = {"area": {"value": area, "text": area}} if area else None
         # A learned sentence goes to the set that defines its intent: custom files first.
-        custom_names = set((custom_sentence_data(sentences_dir, language) or {}).get("intents") or {})
-        custom_names |= {item.intent for item in learned if item.kind == "intent"}
-        stock_learned = [item for item in learned if item.kind == "sentence" and item.intent not in custom_names]
-        self._stock = _load_stock(language, tuple(allowed_intents), stock_learned) if load_stock else None
+        files = custom_sentence_data(sentences_dir, language)
+        stock = stock_learned(files, learned)
+        self._stock = _load_stock(language, tuple(allowed_intents), stock) if load_stock else None
         # Localized error sentences come from the language package even without its intents.
         self._packaged_errors = ((_stock_data(language) or {}).get("responses") or {}).get("errors") or {}
-        self._custom = _load_custom(sentences_dir, language, keep_custom_intent, learned)
+        self._custom = _load_custom(files, language, keep_custom_intent, learned)
 
     @property
     def has_data(self) -> bool:
