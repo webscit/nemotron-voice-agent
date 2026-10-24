@@ -28,3 +28,21 @@ OPENAI_REALTIME_WS_BASE=ws://127.0.0.1:7860/v1 RUN_REALTIME_COMPAT=1 \
 RUN_REALTIME_COMPAT=1 OPENAI_REALTIME_WS_BASE=wss://127.0.0.1:7860/v1 \
   uv run pytest tests/integration/test_realtime_openai_sdk_compat.py -v -s
 ```
+
+## Intent Engine with Home Assistant
+
+The intent-engine integration test runs the Home Assistant target against a
+throwaway Home Assistant container that only has demo entities. The test turns
+demo lights on and off, so it only accepts a Home Assistant on the loopback
+interface. Never point it at a real installation.
+
+```bash
+docker compose -f docker/docker-compose.ha-dev.yaml up -d
+RUN_HA_INTENT_INTEGRATION=1 uv run pytest tests/integration/test_intent_engine_home_assistant.py -v
+docker compose -f docker/docker-compose.ha-dev.yaml down -v
+```
+
+The container listens on `http://127.0.0.1:8124`. Set `HA_DEV_PORT` to change
+the port and `HA_INTENT_TEST_URL` to match. On the first run, the test creates
+the `dev` user through the onboarding API. Without
+`RUN_HA_INTENT_INTEGRATION=1`, the test is skipped.

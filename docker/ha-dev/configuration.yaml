@@ -1,0 +1,23 @@
+# Throwaway Home Assistant for intent-engine integration tests (demo entities only).
+default_config:
+demo:
+
+# A lock with a unique ID, so tests can assign it to an area (the demo locks have
+# none) and check that area-wide commands never reach a blocked domain.
+input_boolean:
+  intent_dev_lock_state:
+    name: Intent dev lock state
+    initial: true
+template:
+  - lock:
+      - name: Area Test Lock
+        unique_id: intent_dev_area_lock
+        state: "{{ is_state('input_boolean.intent_dev_lock_state', 'on') }}"
+        lock:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.intent_dev_lock_state
+        unlock:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.intent_dev_lock_state

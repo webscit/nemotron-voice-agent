@@ -1,0 +1,16 @@
+# Development only: a throwaway Home Assistant with the demo integration, used by
+# tests/integration/test_intent_engine_home_assistant.py. It is not included by
+# docker-compose.yml and is not part of any deployment profile.
+#
+#   docker compose -f docker/docker-compose.ha-dev.yaml up -d
+#   docker compose -f docker/docker-compose.ha-dev.yaml down -v
+name: ha-intent-dev
+services:
+  home-assistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: ha-intent-dev
+    ports:
+      - "127.0.0.1:${HA_DEV_PORT:-8124}:8123"
+    volumes:
+      - ./ha-dev/configuration.yaml:/config/configuration.yaml:ro
+    restart: "no"
