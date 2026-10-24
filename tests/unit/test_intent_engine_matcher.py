@@ -65,6 +65,21 @@ class NormalizeTextTests(unittest.TestCase):
         self.assertEqual(normalize_text("[session_start]", "fr-FR", WAKE_WORDS), "[session_start]")
         self.assertEqual(normalize_text("", "fr-FR", WAKE_WORDS), "")
 
+    def test_strips_leading_speaker_and_presence_tags(self) -> None:
+        cases = {
+            "[speaker: unknown guest; also in view: unknown guest] Par le plus fort.": "Par le plus fort.",
+            "[speaker: Alice (uncertain)] Bonjour Reachy, allume la lampe": "allume la lampe",
+            "[speaker: Alice] [presence: Bob came into view]  allume la lampe": "allume la lampe",
+            "[speaker: Alice]Va dormir": "Va dormir",
+            # Only leading tags are removed.
+            "allume [la] lampe": "allume [la] lampe",
+            # A tag alone is kept, like a lone wake word.
+            "[speaker: Alice]": "[speaker: Alice]",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(normalize_text(text, "fr-FR", WAKE_WORDS), expected)
+
     def test_wake_words_apply_to_languages_without_greeting_list(self) -> None:
         self.assertEqual(normalize_text("Reachy, schalte das Licht ein", "de-DE", WAKE_WORDS), "schalte das Licht ein")
 
@@ -119,6 +134,10 @@ class StockMatchingTests(unittest.TestCase):
 
     def test_wake_word_prefix_is_stripped_before_matching(self) -> None:
         self.assertEqual(self.match("Bonjour Recchi, allume la lampe du salon").name, "HassTurnOn")
+
+    def test_speaker_tag_is_stripped_before_matching(self) -> None:
+        text = "[speaker: unknown guest; also in view: unknown guest] Allume la lampe du salon."
+        self.assertEqual(self.match(text).slots, {"name": "Lampe du salon"})
 
     def test_area_context_fills_area_slot(self) -> None:
         match = self.match("Allume les lumières")
@@ -252,6 +271,10 @@ class CustomSentenceTests(unittest.TestCase):
             block["slots"]["direction"] for block in content["intents"]["ReachyMoveHead"]["data"] if "slots" in block
         }
         self.assertLessEqual(fixed, directions)
+
+    def test_speaker_tag_is_stripped_before_matching(self) -> None:
+        text = "[speaker: Alice; also in view: unknown guest] Merci Richie, tu peux aller dormir."
+        self.assertEqual(self.call(text), ("go_to_sleep", {}))
 
     def test_custom_sentences_work_without_home_assistant_names(self) -> None:
         self.assertEqual(self.call("Va dormir.", None), ("go_to_sleep", {}))

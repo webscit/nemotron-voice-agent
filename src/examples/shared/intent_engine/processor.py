@@ -184,6 +184,7 @@ class IntentEngineProcessor(FrameProcessor):
         """Match the finished turn. Return True when the engine takes it over."""
         text = self._user_text()
         if not text:
+            logger.debug("Intent engine: No user text to process.")
             return False
         self._start_sync()
 
@@ -192,17 +193,20 @@ class IntentEngineProcessor(FrameProcessor):
         match = self._matcher.match(text, slot_lists)
         self._metric(METRIC_MATCH_SECS, time.perf_counter() - started)
         if match is None:
+            logger.info(f"Intent engine: No match for '{text}'.")
             self._record("llm", reason="no_match")
             return False
 
         target, reason = self._route(match)
         if target is None:
+            logger.info(f"Intent engine: match skipped for '{text}'; {reason}.")
             self._record("llm", intent=match.name, reason=reason)
             return False
 
         request = IntentRequest(
             name=match.name, data=match.slots, language=self._language, response_key=match.response_key
         )
+        logger.info(f"Intent engine: Requesting '{match.name}' ({match.slots}) for text '{text}'")
         if self._config.dry_run:
             would_send = target.build_body(request) if target is self._home_assistant else target.build_call(request)
             logger.info(f"Intent engine dry run: {match.name} -> {target.name} would send {would_send}")

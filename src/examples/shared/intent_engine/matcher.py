@@ -31,6 +31,8 @@ _LEADING_WORDS: dict[str, tuple[str, ...]] = {
     "en": ("hi", "hello", "hey", "ok", "okay", "thanks", "thank you"),
     "fr": ("bonjour", "salut", "coucou", "hey", "ok", "merci", "dis-moi", "dis moi", "dis"),
 }
+# Leading speaker / presence tags added by voice identification ("[speaker: Alice] ...").
+_TAG_RE = re.compile(r"^(?:\[[^\]]*\]\s*)+")
 
 
 @dataclass(frozen=True)
@@ -62,12 +64,14 @@ def _language_candidates(code: str) -> list[str]:
 
 
 def normalize_text(text: str, language: str, wake_words: Iterable[str] = ()) -> str:
-    """Collapse whitespace and strip a leading greeting and/or wake word.
+    """Collapse whitespace and strip leading tags, greeting, and/or wake word.
 
-    ``"Bonjour Reachy, allume la lampe"`` becomes ``"allume la lampe"``. The
-    prefix is only removed when something remains to match.
+    ``"[speaker: Alice] Bonjour Reachy, allume la lampe"`` becomes
+    ``"allume la lampe"``. Each prefix is only removed when something remains
+    to match.
     """
     text = " ".join((text or "").split())
+    text = _TAG_RE.sub("", text) or text
     greetings = _LEADING_WORDS.get(base_language(language), ())
     names = [word.strip() for word in wake_words if word.strip()]
     prefix = ""
@@ -258,15 +262,20 @@ class IntentMatcher:
             return self._custom.errors[key]
         return self._packaged_errors.get(key)
 
+    def normalize(self, text: str) -> str:
+        """Return ``text`` as it is matched, without leading tags, greeting, or wake word."""
+        return normalize_text(text, self._language, self._wake_words)
+
     def match(self, text: str, slot_lists: dict[str, SlotList] | None = None) -> IntentMatch | None:
         """Return the best match for ``text``, or None.
 
         Stock Home Assistant sentences are only tried when ``slot_lists`` (the
         synced entity, area, and floor names) is provided.
         """
-        text = normalize_text(text, self._language, self._wake_words)
+        text = self.normalize(text)
         if not text:
             return None
+        logger.info(f"Intent engine: normalized text '{text}'")
         candidates = [(self._custom, slot_lists or _EMPTY_SLOT_LISTS, True)]
         if slot_lists is not None:
             candidates.append((self._stock, slot_lists, False))
