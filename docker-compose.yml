@@ -44,6 +44,7 @@ name: nemotron-voice-agent
 #   docker compose --profile <recipe> --profile tracing up   # Phoenix OTel
 #   docker compose --profile <recipe> --profile turn up      # coturn TURN
 #   docker compose --profile <recipe> --profile dreamer up   # offline post-processing
+#   docker compose --profile <recipe> --profile wyoming up   # Home Assistant STT/TTS
 
 include:
   - path: docker/docker-compose.nemotron35-lightning-nim.yaml
@@ -60,6 +61,7 @@ include:
   - path: docker/docker-compose.coturn.yaml
   - path: docker/docker-compose.phoenix.yaml
   - path: docker/docker-compose.dreamer.yaml
+  - path: docker/docker-compose.wyoming.yaml
   - path: src/examples/frontend_backend_agent/airline/database/docker-compose.yml
 
 x-app: &app-base
