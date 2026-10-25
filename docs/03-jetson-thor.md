@@ -38,7 +38,8 @@ the supported configuration on Thor.
 
 3. Download the NeMo-Speech.cpp model weights. **One-time per machine.** The script
    fetches the ASR, Magpie TTS, and NanoCodec GGUFs plus Magpie TTS
-   text-normalization grammars (`tn_configs`, English and French only) into `models/nemo-speech`:
+   text-normalization grammars (`tn_configs`) into `models/nemo-speech`. For the languages
+   that the grammars cover, refer to [Configure TTS](how-to/configure-tts.md#text-normalization):
 
     ```bash
     bash scripts/download-nemo-speech-models.sh
