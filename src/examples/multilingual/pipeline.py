@@ -59,6 +59,7 @@ from examples.shared.memory_tools import (
     MemoryTools,
     with_memory_tools,
 )
+from examples.shared.messaging_intents import MessagingIntents
 from examples.shared.messaging_tools import (
     CHECK_TOOL_NAME,
     CONFIRM_TOOL_NAME,
@@ -588,6 +589,8 @@ async def bot(runner_args: RunnerArguments) -> None:
         client_tool_timeout_secs=CLIENT_FUNCTION_TIMEOUT_SECS,
         recorder=recorder,
         learned=learned_intents,
+        # The messaging dialog runs in the engine (deterministic); the LLM tools stay for other phrasings.
+        server=MessagingIntents(messaging_tools, matrix_gateway.contacts.all) if messaging_enabled else None,
     )
 
     pipeline = Pipeline(

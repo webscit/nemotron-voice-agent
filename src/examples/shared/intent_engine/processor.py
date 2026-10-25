@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
@@ -41,14 +42,24 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from examples.shared.intent_engine.config import ALLOWED_STATE_RESPONSE_KEYS, IntentEngineConfig
 from examples.shared.intent_engine.learned import LearnedIntent, tool_entries
-from examples.shared.intent_engine.matcher import IntentMatch, IntentMatcher, base_language, preload_stock
+from examples.shared.intent_engine.matcher import (
+    IntentMatch,
+    IntentMatcher,
+    base_language,
+    preload_stock,
+    strip_tags,
+)
 from examples.shared.intent_engine.targets import (
     ClientToolMap,
     ClientToolTarget,
+    FollowUp,
     HomeAssistantTarget,
     IntentRequest,
+    ServerTarget,
     TargetUnavailable,
 )
+
+Target = HomeAssistantTarget | ClientToolTarget | ServerTarget
 
 if TYPE_CHECKING:
     from pipecat.processors.aggregators.llm_context import LLMContext
@@ -84,6 +95,7 @@ class IntentEngineProcessor(FrameProcessor):
         home_assistant: HomeAssistantTarget | None = None,
         client_tools: ClientToolTarget | None = None,
         tool_map: ClientToolMap | None = None,
+        server: ServerTarget | None = None,
         recorder: TurnTelemetry | None = None,
     ):
         """Build the processor.
@@ -100,7 +112,10 @@ class IntentEngineProcessor(FrameProcessor):
         self._home_assistant = home_assistant
         self._client_tools = client_tools
         self._tool_map = tool_map or ClientToolMap()
+        self._server = server
         self._recorder = recorder
+        # The question the last reply asked, answered by the next user turn.
+        self._dialog: FollowUp | None = None
         self._turn_task: asyncio.Task | None = None
         self._sync_task: asyncio.Task | None = None
         self._last_sync_attempt = 0.0
@@ -164,8 +179,10 @@ class IntentEngineProcessor(FrameProcessor):
             return " ".join(part for part in parts if part)
         return ""
 
-    def _route(self, match: IntentMatch) -> tuple[HomeAssistantTarget | ClientToolTarget | None, str]:
+    def _route(self, match: IntentMatch) -> tuple[Target | None, str]:
         """Pick the target for a match, or the reason the LLM must handle it."""
+        if self._server is not None and match.name in self._server.intent_names:
+            return self._server, ""
         if match.name in self._tool_map:
             if self._tool_map.defers_to_llm(match.name):
                 return None, "deferred_to_llm"
@@ -190,10 +207,20 @@ class IntentEngineProcessor(FrameProcessor):
             return False
         self._start_sync()
 
+        if self._dialog is not None and not strip_tags(text):
+            # A system note ("[presence: Alice came into view]"), not the answer: the question stays open.
+            return False
+        # A pending question only lasts one turn, unless it is asked again below.
+        dialog, self._dialog = self._dialog, None
         started = time.perf_counter()
-        slot_lists = self._home_assistant.slot_lists if self._home_assistant else None
-        match = self._matcher.match(text, slot_lists)
+        match = self._match(text, dialog)
         self._metric(METRIC_MATCH_SECS, time.perf_counter() - started)
+        if match is None and dialog is not None and dialog.reprompt:
+            logger.info(f"Intent engine: No answer to the pending question in '{text}'; asking again.")
+            self._record("intent", reason="reprompt")
+            self._dialog = replace(dialog, reprompt=None)
+            self._turn_task = self.create_task(self._speak(dialog.reprompt))
+            return True
         if match is None:
             logger.info(f"Intent engine: No match for '{text}'.")
             self._record("llm", reason="no_match")
@@ -211,6 +238,7 @@ class IntentEngineProcessor(FrameProcessor):
         logger.info(f"Intent engine: Requesting '{match.name}' ({match.slots}) for text '{text}'")
         if self._config.dry_run:
             would_send = target.build_body(request) if target is self._home_assistant else target.build_call(request)
+            # Dry run only logs: a question it would have asked is not pending.
             logger.info(f"Intent engine dry run: {match.name} -> {target.name} would send {would_send}")
             self._record("llm", intent=match.name, target=target.name, reason="dry_run", **self._learned(match))
             return False
@@ -218,11 +246,35 @@ class IntentEngineProcessor(FrameProcessor):
         self._turn_task = self.create_task(self._run_turn(frame, match, target, request))
         return True
 
+    def _match(self, text: str, dialog: FollowUp | None) -> IntentMatch | None:
+        """Match ``text``, answering ``dialog`` when a question is pending."""
+        slot_lists = self._home_assistant.slot_lists if self._home_assistant else None
+        extra = self._server.slot_lists() if self._server else None
+        match = self._matcher.match(text, slot_lists, extra_slot_lists=extra, dialog=dialog.context if dialog else None)
+        if dialog is None:
+            return match
+        if match is not None and match.name in dialog.accept:
+            return replace(match, slots={**dialog.slots, **match.slots})
+        if dialog.capture and dialog.capture_intent:
+            # Dictation: the user's own words, whatever other intent they resemble.
+            words = strip_tags(text)
+            if words:
+                return IntentMatch(
+                    name=dialog.capture_intent, slots={**dialog.slots, dialog.capture: words}, custom=True
+                )
+        return match
+
+    async def _speak(self, speech: str) -> None:
+        """Speak ``speech`` the way an LLM reply would be spoken."""
+        await self.push_frame(LLMFullResponseStartFrame())
+        await self.push_frame(LLMTextFrame(speech))
+        await self.push_frame(LLMFullResponseEndFrame())
+
     async def _run_turn(
         self,
         frame: LLMContextFrame,
         match: IntentMatch,
-        target: HomeAssistantTarget | ClientToolTarget,
+        target: Target,
         request: IntentRequest,
     ) -> None:
         """Execute a matched intent, then speak its reply or release the turn to the LLM."""
@@ -253,11 +305,10 @@ class IntentEngineProcessor(FrameProcessor):
             response_type=response.response_type,
             **self._learned(match),
         )
+        self._dialog = response.follow_up
         if not response.speech:
             return
-        await self.push_frame(LLMFullResponseStartFrame())
-        await self.push_frame(LLMTextFrame(response.speech))
-        await self.push_frame(LLMFullResponseEndFrame())
+        await self._speak(response.speech)
 
     async def _cancel_turn(self) -> None:
         """Drop the in-flight intent (interruption or shutdown)."""
@@ -298,10 +349,12 @@ def build_intent_engine(
     client_tool_timeout_secs: float = 5.0,
     recorder: TurnTelemetry | None = None,
     learned: tuple[LearnedIntent, ...] | list[LearnedIntent] = (),
+    server: ServerTarget | None = None,
 ) -> IntentEngineProcessor | None:
     """Return the engine for a session, or None when it is off or has no sentences.
 
     ``learned`` are the approved suggestions of the ``dream`` job for the session language.
+    ``server`` executes the intents of features running in this process, such as messaging.
     """
     if not config.enabled:
         return None
@@ -312,7 +365,11 @@ def build_intent_engine(
     tool_map = ClientToolMap.load(config.sentences_dir).with_entries(tool_entries(learned))
     declared = set(client_tool_names)
 
+    server_intents = server.intent_names if server else frozenset()
+
     def keep_custom_intent(name: str) -> bool:
+        if name in server_intents:
+            return True
         # A client-tool intent is active only when the client declared its tool.
         if name in tool_map:
             return tool_map.tool(name) in declared
@@ -331,6 +388,8 @@ def build_intent_engine(
     if not matcher.has_data:
         logger.info(f"Intent engine: no active sentences for {language}; every turn goes to the LLM")
         return None
+    if server is not None:
+        server.bind_templates(matcher)
 
     home_assistant = None
     if use_home_assistant:
@@ -354,6 +413,7 @@ def build_intent_engine(
         f"Intent engine enabled: language={language}, home_assistant={use_home_assistant}, "
         f"area={config.area or '(none)'}, dry_run={config.dry_run}, "
         f"timeout={config.timeout_secs:.1f}s, custom_intents={matcher.custom_intent_names or '(none)'}, "
+        f"server={server.name if server else '(none)'}, "
         f"learned={len(learned)}"
     )
     return IntentEngineProcessor(
@@ -364,5 +424,6 @@ def build_intent_engine(
         home_assistant=home_assistant,
         client_tools=client_tools,
         tool_map=tool_map,
+        server=server,
         recorder=recorder,
     )

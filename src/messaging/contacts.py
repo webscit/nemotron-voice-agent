@@ -53,11 +53,11 @@ class Contact:
             return True
         if person is None:
             return False
-        owner = _fold(self.owner)
-        return owner in (_fold(str(person.get("id") or "")), _fold(str(person.get("name") or "")))
+        owner = fold_name(self.owner)
+        return owner in (fold_name(str(person.get("id") or "")), fold_name(str(person.get("name") or "")))
 
 
-def _fold(text: str) -> str:
+def fold_name(text: str) -> str:
     """Case- and accent-insensitive form of a name ("Élodie" == "elodie")."""
     decomposed = unicodedata.normalize("NFKD", " ".join(text.split()).casefold())
     return "".join(c for c in decomposed if not unicodedata.combining(c))
@@ -99,20 +99,20 @@ def parse_contacts(data: dict[str, Any]) -> list[Contact]:
 
 def match_contacts(query: str, contacts: list[Contact]) -> list[Contact]:
     """Contacts named ``query``: exact (name, alias or Matrix id) matches, else close spellings."""
-    wanted = _fold(query)
+    wanted = fold_name(query)
     if not wanted:
         return []
-    exact = [c for c in contacts if wanted == _fold(c.matrix_id) or any(wanted == _fold(n) for n in c.names())]
+    exact = [c for c in contacts if wanted == fold_name(c.matrix_id) or any(wanted == fold_name(n) for n in c.names())]
     if exact:
         return exact
     # "Bob Smith" for "Bob", or "Bob" for "Bob Smith".
     words = set(wanted.split())
-    partial = [c for c in contacts if any(words & set(_fold(n).split()) for n in c.names())]
+    partial = [c for c in contacts if any(words & set(fold_name(n).split()) for n in c.names())]
     if partial:
         return partial
     scored = []
     for contact in contacts:
-        ratio = max(difflib.SequenceMatcher(None, wanted, _fold(n)).ratio() for n in contact.names())
+        ratio = max(difflib.SequenceMatcher(None, wanted, fold_name(n)).ratio() for n in contact.names())
         if ratio >= FUZZY_MATCH_RATIO:
             scored.append((ratio, contact))
     return [c for _, c in sorted(scored, key=lambda item: -item[0])]

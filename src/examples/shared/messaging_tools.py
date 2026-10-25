@@ -131,7 +131,9 @@ def describe_message(message: InboxMessage, contact_name: str) -> dict[str, Any]
 
 
 @dataclass(frozen=True)
-class _Draft:
+class Draft:
+    """A message waiting for confirmation."""
+
     contact: Contact
     text: str
     sender_name: str | None
@@ -160,7 +162,7 @@ class MessagingTools:
         self._gateway = gateway
         self._current_person = current_person
         self._user_turn = user_turn
-        self._draft: _Draft | None = None
+        self._draft: Draft | None = None
 
     # ------------------------------------------------------------ handlers
     async def check_messages(self, params: FunctionCallParams) -> None:
@@ -181,70 +183,171 @@ class MessagingTools:
 
     async def confirm_send_message(self, params: FunctionCallParams) -> None:
         """Server-side ``confirm_send_message()`` tool handler."""
-        await params.result_callback(await self._confirm())
+        await params.result_callback(await self.send_draft())
 
-    # ------------------------------------------------------------ internals
+    # ------------------------------------------------------- shared steps
+    # Used by the LLM tools above and by the intent engine (``messaging_intents``).
+    # Errors carry a ``code`` the intent engine turns into a spoken sentence.
+    @property
+    def draft(self) -> Draft | None:
+        """The message waiting for confirmation, if any (expired drafts are dropped)."""
+        if self._draft is not None and time.monotonic() - self._draft.created_at > DRAFT_TTL_SECS:
+            self._draft = None
+        return self._draft
+
     def _person_row(self) -> dict[str, Any] | None:
         person = self._current_person()
         return person.person if person else None
 
-    def _allowed_contacts(self) -> list[Contact]:
+    def allowed_contacts(self) -> list[Contact]:
+        """The contacts the person talking may use."""
         person = self._person_row()
         return [c for c in self._gateway.contacts.all() if c.allowed_for(person)]
 
-    def _resolve(self, query: str) -> Contact | dict[str, Any]:
-        allowed = self._allowed_contacts()
+    def resolve(self, query: str) -> Contact | dict[str, Any]:
+        """The one contact named ``query`` (a name, alias or Matrix id), or an error."""
+        allowed = self.allowed_contacts()
         names = [c.name for c in allowed]
         if not allowed:
-            return {"error": "There are no contacts you can use with this person. Contacts are set up by an admin."}
+            return {
+                "error": "There are no contacts you can use with this person. Contacts are set up by an admin.",
+                "code": "no_contacts",
+            }
         matches = match_contacts(query, allowed)
         if len(matches) == 1:
             return matches[0]
         if matches:
-            return {"error": "Several contacts match; ask which one.", "candidates": [c.name for c in matches]}
+            return {
+                "error": "Several contacts match; ask which one.",
+                "code": "ambiguous",
+                "candidates": [c.name for c in matches],
+            }
         hidden = match_contacts(query, self._gateway.contacts.all())
         if hidden and self._person_row() is None:
             return {
                 "error": "That contact belongs to a specific person and you do not know for sure who is talking. "
-                "Ask them to confirm who they are."
+                "Ask them to confirm who they are.",
+                "code": "unknown_person",
             }
-        return {"error": f"No contact named {query!r}.", "contacts": names}
+        return {"error": f"No contact named {query!r}.", "code": "no_contact", "contacts": names}
 
-    async def _check(self) -> dict[str, Any]:
-        allowed = self._allowed_contacts()
+    async def unread(self) -> list[tuple[Contact, int]]:
+        """Unread message count per allowed contact (contacts without any are left out)."""
+        allowed = self.allowed_contacts()
+        counts = await asyncio.to_thread(self._gateway.inbox.unread_counts, [c.matrix_id for c in allowed])
+        return [(c, counts[c.matrix_id]) for c in allowed if counts.get(c.matrix_id)]
+
+    async def fetch(
+        self, contacts: list[Contact], *, include_read: bool = False
+    ) -> tuple[list[tuple[InboxMessage, Contact]], bool]:
+        """Up to ``MAX_READ_MESSAGES`` messages from ``contacts``, marked read, and whether more are waiting."""
+        by_id = {c.matrix_id: c for c in contacts}
+        messages = await asyncio.to_thread(
+            self._gateway.inbox.messages, list(by_id), unread_only=not include_read, limit=MAX_READ_MESSAGES + 1
+        )
+        more = len(messages) > MAX_READ_MESSAGES
+        messages = messages[:MAX_READ_MESSAGES]
+        await self._gateway.mark_read([m for m in messages if m.read_at is None])
+        return [(m, by_id[m.sender]) for m in messages], more
+
+    def prepare(self, contact: Contact, text: str) -> dict[str, Any]:
+        """Make ``text`` the draft for ``contact``, replacing any earlier draft."""
+        text = " ".join(text.split())
+        if not text:
+            return {"error": "Ask what the message should say.", "code": "no_text"}
+        if len(text) > MAX_MESSAGE_LEN:
+            return {
+                "error": f"The message is too long; keep it under {MAX_MESSAGE_LEN} characters.",
+                "code": "too_long",
+            }
+        person = self._person_row()
+        self._draft = Draft(
+            contact=contact,
+            text=text,
+            sender_name=person["name"] if person else None,
+            person_id=person["id"] if person else None,
+            user_turn=self._user_turn(),
+            created_at=time.monotonic(),
+        )
+        return {
+            "status": "draft, not sent",
+            "to": contact.name,
+            "text": text,
+            "next": "Read the recipient and the message back and ask the user to confirm before sending.",
+        }
+
+    def cancel_draft(self) -> None:
+        """Drop the draft."""
+        self._draft = None
+
+    async def send_draft(self, *, require_new_turn: bool = True) -> dict[str, Any]:
+        """Send the draft, once confirmed by the person who asked for it.
+
+        ``require_new_turn`` refuses a confirmation in the turn the draft was made
+        in (the LLM confirming its own draft). The intent engine passes False: its
+        confirmation is the answer to the question it asked, so always a later turn.
+        """
+        draft = self.draft
+        if draft is None:
+            return {
+                "error": "There is no message waiting to be sent. Prepare it with send_message first.",
+                "code": "no_draft",
+            }
+        if require_new_turn and self._user_turn() <= draft.user_turn:
+            return {
+                "error": "Not sent: read the draft back and wait for the user to confirm it first.",
+                "code": "not_confirmed",
+            }
+        person = self._person_row()
+        if not draft.contact.allowed_for(person) or (draft.person_id and (person or {}).get("id") != draft.person_id):
+            return {
+                "error": "Not sent: only the person who asked for this message can confirm it.",
+                "code": "not_allowed",
+            }
+        # Shielded: an interruption must not leave a message sent but still drafted (sent twice later).
+        return await asyncio.shield(self._send(draft))
+
+    async def _send(self, draft: Draft) -> dict[str, Any]:
+        body = f"{draft.sender_name}: {draft.text}" if draft.sender_name else draft.text
         try:
-            counts = await asyncio.to_thread(self._gateway.inbox.unread_counts, [c.matrix_id for c in allowed])
+            await self._gateway.send_text(draft.contact, body)
+        except MatrixError as exc:
+            logger.warning(f"Matrix: sending to {draft.contact.name} failed: {exc}")
+            return {
+                "error": "The message could not be sent; the draft is kept, so you can try again later.",
+                "code": "send_failed",
+            }
+        if self._draft is draft:
+            self._draft = None
+        logger.info(f"Matrix: sent a message to {draft.contact.name} for {draft.sender_name or 'a guest'}")
+        return {"status": "sent", "to": draft.contact.name}
+
+    # ------------------------------------------------------------ LLM tools
+    async def _check(self) -> dict[str, Any]:
+        try:
+            counts = await self.unread()
         except Exception as exc:
             logger.opt(exception=exc).warning("Matrix: could not count unread messages")
             return {"error": "The messages could not be checked."}
-        unread = [{"from": c.name, "unread": counts[c.matrix_id]} for c in allowed if counts.get(c.matrix_id)]
+        unread = [{"from": c.name, "unread": n} for c, n in counts]
         return {"unread": unread} if unread else {"status": "no new messages"}
 
     async def _read(self, query: str, include_read: bool) -> dict[str, Any]:
         if query:
-            resolved = self._resolve(query)
+            resolved = self.resolve(query)
             if isinstance(resolved, dict):
                 return resolved
             contacts = [resolved]
         else:
-            contacts = self._allowed_contacts()
-        by_id = {c.matrix_id: c for c in contacts}
+            contacts = self.allowed_contacts()
         try:
-            messages = await asyncio.to_thread(
-                self._gateway.inbox.messages,
-                list(by_id),
-                unread_only=not include_read,
-                limit=MAX_READ_MESSAGES + 1,
-            )
-            more = len(messages) > MAX_READ_MESSAGES
-            messages = messages[:MAX_READ_MESSAGES]
-            await self._gateway.mark_read([m for m in messages if m.read_at is None])
+            messages, more = await self.fetch(contacts, include_read=include_read)
         except Exception as exc:
             logger.opt(exception=exc).warning("Matrix: could not read messages")
             return {"error": "The messages could not be read."}
         if not messages:
             return {"status": "no new messages" if not include_read else "no messages"}
-        result: dict[str, Any] = {"messages": [describe_message(m, by_id[m.sender].name) for m in messages]}
+        result: dict[str, Any] = {"messages": [describe_message(m, c.name) for m, c in messages]}
         if more:
             result["more"] = "There are more messages; offer to read the next ones."
         return result
@@ -254,43 +357,7 @@ class MessagingTools:
             return {"error": "Ask who the message is for."}
         if not text:
             return {"error": "Ask what the message should say."}
-        if len(text) > MAX_MESSAGE_LEN:
-            return {"error": f"The message is too long; keep it under {MAX_MESSAGE_LEN} characters."}
-        resolved = self._resolve(query)
+        resolved = self.resolve(query)
         if isinstance(resolved, dict):
             return resolved
-        person = self._person_row()
-        self._draft = _Draft(
-            contact=resolved,
-            text=text,
-            sender_name=person["name"] if person else None,
-            person_id=person["id"] if person else None,
-            user_turn=self._user_turn(),
-            created_at=time.monotonic(),
-        )
-        return {
-            "status": "draft, not sent",
-            "to": resolved.name,
-            "text": text,
-            "next": "Read the recipient and the message back and ask the user to confirm before sending.",
-        }
-
-    async def _confirm(self) -> dict[str, Any]:
-        draft = self._draft
-        if draft is None or time.monotonic() - draft.created_at > DRAFT_TTL_SECS:
-            self._draft = None
-            return {"error": "There is no message waiting to be sent. Prepare it with send_message first."}
-        if self._user_turn() <= draft.user_turn:
-            return {"error": "Not sent: read the draft back and wait for the user to confirm it first."}
-        person = self._person_row()
-        if not draft.contact.allowed_for(person) or (draft.person_id and (person or {}).get("id") != draft.person_id):
-            return {"error": "Not sent: only the person who asked for this message can confirm it."}
-        body = f"{draft.sender_name}: {draft.text}" if draft.sender_name else draft.text
-        try:
-            await self._gateway.send_text(draft.contact, body)
-        except MatrixError as exc:
-            logger.warning(f"Matrix: sending to {draft.contact.name} failed: {exc}")
-            return {"error": "The message could not be sent; the draft is kept, so you can try again later."}
-        self._draft = None
-        logger.info(f"Matrix: sent a message to {draft.contact.name} for {draft.sender_name or 'a guest'}")
-        return {"status": "sent", "to": draft.contact.name}
+        return self.prepare(resolved, text)

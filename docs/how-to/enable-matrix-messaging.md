@@ -163,6 +163,114 @@ without a name.
 For example, you can say "Do I have new messages?", "Read me Bob's message,"
 or "Tell Grandma that I will call her tonight."
 
+## Use the Voice Dialog
+
+When the [intent engine](configure-intent-engine.md) is on, the engine runs
+messaging as a fixed dialog without the LLM. It matches the usual phrasings,
+asks one short question at a time, and answers from templated replies. These
+turns are faster and more predictable than LLM turns, and a dictated message is
+sent exactly as you said it.
+
+### Turn On the Dialog
+
+Set `INTENT_ENGINE_ENABLED=true` in `.env`, in addition to the `MATRIX_*`
+variables, and restart the server. The dialog does not need Home Assistant or
+client tools. The startup log line `Intent engine enabled` then shows
+`server=messaging`.
+
+The dialog ships with French and English sentences. Sessions in other
+languages use the LLM tools only.
+
+The LLM tools stay registered. The LLM still answers phrasings that the engine
+does not match, and every messaging request when the engine is off. The engine
+and the LLM tools share one draft, so you can start a message one way and
+confirm it the other way.
+
+### Example Exchanges
+
+The following French exchange checks, reads, and answers messages:
+
+```text
+Vous : Est-ce que j'ai des messages ?
+Agent : Tu as 2 nouveaux messages de Bob. Je te les lis ?
+Vous : Oui.
+Agent : À 18:05, Bob a écrit : Tu passes ce soir ? À 18:07, Bob a écrit : Il reste de la tarte. Tu veux répondre à Bob ?
+Vous : Oui.
+Agent : Qu'est-ce que je dis à Bob ?
+Vous : J'arrive vers huit heures, garde-moi une part.
+Agent : Je dis à Bob : J'arrive vers huit heures, garde-moi une part. Je l'envoie ?
+Vous : Oui.
+Agent : C'est envoyé à Bob.
+```
+
+The following English exchange sends a message in one sentence and changes it
+before it is sent:
+
+```text
+You: Tell Grandma that I will call her tonight.
+Agent: I'll tell Grandma: I will call her tonight. Shall I send it?
+You: No, say that I will call her tomorrow instead.
+Agent: I'll tell Grandma: I will call her tomorrow. Shall I send it?
+You: Yes.
+Agent: Sent to Grandma.
+```
+
+The dialog works as follows:
+
+- **Check.** "Est-ce que j'ai des messages ?" or "Do I have new messages?"
+  counts the unread messages per sender and offers to read them.
+- **Read.** The agent reads up to five messages, oldest first, then asks
+  "Je continue ?" ("Shall I go on?") when more are waiting. When all messages
+  came from one sender, it offers to reply. Voice messages are announced, not
+  played.
+- **Dictate.** After "Qu'est-ce que je dis à Bob ?" ("What should I tell
+  Bob?"), the agent takes your next turn as the message, word for word, even
+  when it sounds like a command. Say "annule" ("cancel") to stop instead.
+- **Confirm.** The agent reads the message back and asks "Je l'envoie ?"
+  ("Shall I send it?"). Answer "oui" ("yes") to send it, "non" ("no") to
+  drop it, "change le message" ("change it") to dictate it again, or
+  "non, plutôt que ..." ("say that ... instead") to replace the text.
+- **One-shot sending.** "Dis à Bob que ...", "Envoie un message à Bob pour lui
+  dire que ...", or "Tell Bob that ..." go straight to the confirmation. After
+  the agent reads messages from one sender, "Réponds-lui que ..." ("Reply
+  saying that ...") answers that sender.
+
+A question lasts one turn. When your answer matches nothing, the agent asks
+once more, for example "Je l'envoie à Bob ? Réponds par oui ou par non." If
+the next answer does not match either, the question is dropped and the LLM
+handles the turn. The recorder stores the repeated question as an
+`intent_engine` event with the reason `reprompt`.
+
+The contact names in the sentences come from the contacts file: every `name`
+and alias, also without accents, so "Helene" matches "Hélène". The dialog
+follows the same rules as the LLM tools. A contact with an `owner` needs the
+person known for sure, only the person who dictated a message can confirm it,
+and a guest's message is sent without a name. A message that is being sent
+when you interrupt the agent is still sent.
+
+### Customize the Sentences
+
+The sentences and the spoken replies are in
+`src/examples/shared/intent_engine/sentences/fr/messaging.yaml` and
+`src/examples/shared/intent_engine/sentences/en/messaging.yaml`. Each file
+defines the following intents:
+
+- `MessagingCheck`, `MessagingRead`, `MessagingSend`, and `MessagingReply`
+  start a request. `{contact}` is the contact list, and `{message}` is a
+  wildcard that captures the message text with its punctuation.
+- `MessagingYes`, `MessagingNo`, and `MessagingChange` declare
+  `requires_context: {dialog: messaging}`, so they match only right after the
+  agent asked a messaging question.
+
+The `responses.intents.Messaging` section holds the replies as Jinja templates.
+Keep every response key when you edit a file. A missing reply makes the turn
+fall through to the LLM. Restart the server after you change a file.
+
+If you set `INTENT_ENGINE_SENTENCES_DIR` to another directory, copy the
+`messaging.yaml` files to `<sentences-dir>/<language>/` there. Without them,
+the engine has no messaging sentences. Refer to
+[Add Custom Sentences](configure-intent-engine.md#add-custom-sentences).
+
 ## Privacy and Safety
 
 The following safeguards apply:
@@ -191,6 +299,12 @@ This first version has the following limitations:
 - **Multilingual assistant only.** Other examples do not register the messaging
   tools.
 - **Direct rooms only.** The agent ignores rooms with more than two members.
+- **One turn per dictation.** When turn detection splits a long dictated
+  message into two user turns, the voice dialog keeps only the first part. The
+  agent answers the second part with the yes-or-no question again. Dictate the
+  message in one breath, or say "Dis à Bob que ..." with the whole text.
+- **No learned messaging sentences.** The `dream` job does not learn new
+  messaging sentences yet. Add phrasings to the `messaging.yaml` files.
 
 ## Troubleshooting
 
@@ -204,3 +318,5 @@ The following table lists common symptoms and checks:
 | The agent does not join a contact's invitation | The inviter is not in the contacts file. Add them, then invite the agent again. |
 | The agent says a contact belongs to someone else | The contact has an `owner`, and the agent does not know for sure who is talking. Pick the person in **Who's talking** or let the voice ID recognize them. |
 | The agent never sends the message | You must confirm the draft in a later turn, within 5 minutes, as the same person who asked for it. |
+| The LLM answers messaging requests instead of the voice dialog | Confirm that `INTENT_ENGINE_ENABLED=true` is set, that the session language is French or English, and that the `Intent engine enabled` log line shows `server=messaging`. With a custom `INTENT_ENGINE_SENTENCES_DIR`, copy the `messaging.yaml` files there. |
+| A dictated message is cut off | Turn detection split the message into two turns. Refer to [Limitations](#limitations). |

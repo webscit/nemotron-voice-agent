@@ -70,6 +70,11 @@ def _language_candidates(code: str) -> list[str]:
     return list(dict.fromkeys(key for key in (code, base_language(code)) if key))
 
 
+def strip_tags(text: str) -> str:
+    """``text`` without its leading speaker / presence tags, whitespace collapsed (dictated words)."""
+    return _TAG_RE.sub("", " ".join((text or "").split())).strip()
+
+
 def normalize_text(text: str, language: str, wake_words: Iterable[str] = ()) -> str:
     """Collapse whitespace and strip leading tags, greeting, and/or wake word.
 
@@ -90,6 +95,22 @@ def normalize_text(text: str, language: str, wake_words: Iterable[str] = ()) -> 
         return text
     stripped = re.sub(rf"^{prefix}", "", text, count=1, flags=re.IGNORECASE).strip()
     return stripped or text
+
+
+def original_span(text: str, captured: Any) -> Any:
+    """The words of ``text`` that a wildcard captured, with their punctuation.
+
+    hassil matches without punctuation, so a dictated message "le dîner est prêt,
+    tu viens ?" comes back as "le dîner est prêt tu viens". The words are found
+    again in ``text`` and returned as the user said them.
+    """
+    words = str(captured or "").split()
+    if not words:
+        return captured
+    pattern = r"[\W_]+".join(re.escape(word) for word in words)
+    # Trailing punctuation too, French style included ("tu viens ?").
+    found = re.search(rf"{pattern}(?:\s*[^\w\s]+)*", text, flags=re.IGNORECASE)
+    return found.group(0).strip() if found else captured
 
 
 def build_slot_lists(
@@ -356,20 +377,32 @@ class IntentMatcher:
         """Return ``text`` as it is matched, without leading tags, greeting, or wake word."""
         return normalize_text(text, self._language, self._wake_words)
 
-    def match(self, text: str, slot_lists: dict[str, SlotList] | None = None) -> IntentMatch | None:
+    def match(
+        self,
+        text: str,
+        slot_lists: dict[str, SlotList] | None = None,
+        *,
+        extra_slot_lists: dict[str, SlotList] | None = None,
+        dialog: str | None = None,
+    ) -> IntentMatch | None:
         """Return the best match for ``text``, or None.
 
         Stock Home Assistant sentences are only tried when ``slot_lists`` (the
-        synced entity, area, and floor names) is provided.
+        synced entity, area, and floor names) is provided. ``extra_slot_lists``
+        (server target lists, such as contacts) and ``dialog`` (the context of a
+        pending follow-up question) only apply to the custom sentences.
         """
         text = self.normalize(text)
         if not text:
             return None
         logger.info(f"Intent engine: normalized text '{text}'")
-        candidates = [(self._custom, slot_lists or _EMPTY_SLOT_LISTS, True)]
+        custom_context = {**(self._context or {}), "dialog": dialog} if dialog else self._context
+        candidates = [
+            (self._custom, {**(slot_lists or _EMPTY_SLOT_LISTS), **(extra_slot_lists or {})}, True, custom_context)
+        ]
         if slot_lists is not None:
-            candidates.append((self._stock, slot_lists, False))
-        for sentence_set, lists, custom in candidates:
+            candidates.append((self._stock, slot_lists, False, self._context))
+        for sentence_set, lists, custom, intent_context in candidates:
             if sentence_set is None:
                 continue
             try:
@@ -377,7 +410,7 @@ class IntentMatcher:
                     text,
                     sentence_set.intents,
                     slot_lists=lists,
-                    intent_context=self._context,
+                    intent_context=intent_context,
                     language=base_language(self._language),
                     best_slot_name="name",
                 )
@@ -388,7 +421,10 @@ class IntentMatcher:
                 learned_id = (result.intent_metadata or {}).get(LEARNED_ID_KEY)
                 return IntentMatch(
                     name=result.intent.name,
-                    slots={entity.name: entity.value for entity in result.entities_list},
+                    slots={
+                        entity.name: original_span(text, entity.value) if entity.is_wildcard else entity.value
+                        for entity in result.entities_list
+                    },
                     response_key=result.response or "default",
                     custom=custom,
                     learned_id=learned_id if isinstance(learned_id, int) else None,

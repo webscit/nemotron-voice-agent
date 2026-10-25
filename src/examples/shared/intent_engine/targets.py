@@ -89,6 +89,27 @@ class IntentRequest:
     response_key: str = "default"
 
 
+@dataclass(frozen=True)
+class FollowUp:
+    """A question the reply asked, which the next user turn answers.
+
+    While a follow-up is pending, the next turn is matched with the hassil
+    intent context ``{"dialog": context}``, so sentences declaring
+    ``requires_context: {dialog: <context>}`` (such as "yes" or "cancel") match.
+    """
+
+    context: str
+    # Slot that receives the next turn's own words when none of the ``accept``
+    # intents matches: dictation, routed as ``capture_intent``.
+    capture: str | None = None
+    capture_intent: str | None = None
+    accept: frozenset[str] = frozenset()
+    # Slots added to the next match of an ``accept`` intent or the capture.
+    slots: dict[str, Any] = field(default_factory=dict)
+    # Spoken once when the next turn matches nothing; the question then stays open for one more turn.
+    reprompt: str | None = None
+
+
 @dataclass
 class IntentResponse:
     """Home Assistant intent-response shape with ``speech`` rendered by the target."""
@@ -97,11 +118,39 @@ class IntentResponse:
     response_type: str = RESPONSE_ACTION_DONE
     speech_slots: dict[str, Any] = field(default_factory=dict)
     data: dict[str, Any] = field(default_factory=dict)
+    follow_up: FollowUp | None = None
 
     @property
     def is_error(self) -> bool:
         """Return whether the target reported an error."""
         return self.response_type == RESPONSE_ERROR
+
+
+class ServerTarget(Protocol):
+    """Intents executed in this server process (for example Matrix messaging).
+
+    Unlike the other targets, a server target can hold a multi-turn dialog: its
+    reply carries a ``FollowUp`` for the question it asked.
+    """
+
+    name: str
+    timeout_secs: float
+
+    @property
+    def intent_names(self) -> frozenset[str]:
+        """Return the intents this target executes."""
+
+    def bind_templates(self, templates: SpeechTemplates) -> None:
+        """Render replies with the session's response templates."""
+
+    def slot_lists(self) -> dict[str, SlotList]:
+        """Return the hassil lists its sentences use (refreshed every turn)."""
+
+    def build_call(self, request: IntentRequest) -> Any:
+        """Return what ``handle`` would do, for the dry-run log."""
+
+    async def handle(self, request: IntentRequest) -> IntentResponse:
+        """Execute the intent and render the reply."""
 
 
 class SpeechTemplates(Protocol):
