@@ -1,0 +1,38 @@
+# Wyoming bridge for Home Assistant — see docs/how-to/connect-home-assistant-wyoming.md
+#
+#   docker compose --profile <recipe> --profile wyoming up -d
+#
+# Translates Home Assistant's Wyoming speech-to-text and text-to-speech requests into
+# Riva gRPC calls on the NeMo-Speech.cpp sidecar, which answers on the `nemo-speech`
+# alias in every `*/single-gpu` recipe.
+services:
+  wyoming-bridge:
+    profiles: ["wyoming"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: nemotron-voice-agent:latest
+    command: ["uv", "run", "python", "-m", "wyoming_bridge"]
+    environment:
+      PYTHONPATH: /app/src
+      WYOMING_BRIDGE_RIVA_SERVER: ${WYOMING_BRIDGE_RIVA_SERVER:-nemo-speech:50051}
+      WYOMING_BRIDGE_LANGUAGE: ${WYOMING_BRIDGE_LANGUAGE:-en-US}
+      WYOMING_BRIDGE_TTS_VOICE: ${WYOMING_BRIDGE_TTS_VOICE:-}
+      WYOMING_BRIDGE_ASR_STOP_HISTORY_MS: ${WYOMING_BRIDGE_ASR_STOP_HISTORY_MS:-2000}
+    ports:
+      - "${WYOMING_BRIDGE_PORT:-10700}:10700"
+    volumes:
+      - ../src:/app/src:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 10700), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # Startup waits for the Riva server to load its models.
+      start_period: 300s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
