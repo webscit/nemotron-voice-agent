@@ -110,11 +110,11 @@ def sentence_problems(template: str, data: dict[str, Any], *, extra_lists: Itera
     """Why a template cannot be used with sentence ``data`` (empty when it can).
 
     Every list and expansion rule must be defined in ``data`` (or be one of
-    ``extra_lists``), and no list may be a wildcard: a wildcard matches almost
-    any sentence.
+    ``extra_lists``), also the ones used inside the rules it references, and no
+    list may be a wildcard: a wildcard matches almost any sentence.
     """
     try:
-        lists, rules, _ = sentence_references(template)
+        lists, rules, _ = sentence_references(template, data.get("expansion_rules") or {})
     except ValueError as exc:
         return [str(exc)]
     declared = data.get("lists") or {}

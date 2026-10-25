@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
@@ -40,7 +41,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from examples.shared.intent_engine.config import ALLOWED_STATE_RESPONSE_KEYS, IntentEngineConfig
 from examples.shared.intent_engine.learned import LearnedIntent, tool_entries
-from examples.shared.intent_engine.matcher import IntentMatch, IntentMatcher, base_language
+from examples.shared.intent_engine.matcher import IntentMatch, IntentMatcher, base_language, preload_stock
 from examples.shared.intent_engine.targets import (
     ClientToolMap,
     ClientToolTarget,
@@ -279,6 +280,12 @@ class IntentEngineProcessor(FrameProcessor):
     def _metric(self, name: str, value: float) -> None:
         if self._recorder:
             self._recorder.metric(name, value, processor=_PROCESSOR_NAME)
+
+
+async def preload_intent_engine(config: IntentEngineConfig, language: str, learned: Sequence[LearnedIntent]) -> None:
+    """Parse the stock sentences off the event loop, so ``build_intent_engine`` does not block it."""
+    if config.enabled and config.home_assistant_configured:
+        await asyncio.to_thread(preload_stock, language, config.allowed_intents, config.sentences_dir, learned)
 
 
 def build_intent_engine(

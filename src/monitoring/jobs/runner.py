@@ -31,6 +31,7 @@ from typing import Any
 import yaml
 from loguru import logger
 
+from monitoring import intents
 from monitoring.jobs.base import JOB_REGISTRY, JobContext, Preempted
 from monitoring.jobs.reasr import reasr_endpoints
 from monitoring.jobs.services import DockerServiceManager
@@ -169,6 +170,8 @@ class Dreamer:
         """Run at most one job; return whether one was attempted."""
         self.store.close_orphaned_sessions(now=self._clock(), stale_after_secs=self.config["orphan_after_secs"])
         self.enqueue_ended_sessions()
+        # Counts the live uses of learned intent sentences, so the review list stays read-only.
+        intents.refresh_live_uses(self.store)
         if self.is_paused():
             self.services.stop_started()
             self.report(force=True, state="paused")

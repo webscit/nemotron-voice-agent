@@ -38,11 +38,6 @@ HUMAN_PREFIX = "human:"
 INTENT_EVENT = "intent_engine"
 
 
-def _rows(store: SessionStore, stmt) -> list[dict[str, Any]]:
-    with store.engine.connect() as conn:
-        return [dict(r) for r in conn.execute(stmt).mappings()]
-
-
 def base_language(code: str | None) -> str:
     """``fr-FR`` -> ``fr``.
 
@@ -84,7 +79,7 @@ def is_open(row: dict[str, Any]) -> bool:
 # ------------------------------------------------------------------ reads
 def get_suggestion(store: SessionStore, suggestion_id: int) -> dict[str, Any] | None:
     """One suggestion row, or None."""
-    rows = _rows(store, select(schema.intent_suggestions).where(schema.intent_suggestions.c.id == suggestion_id))
+    rows = store.query(select(schema.intent_suggestions).where(schema.intent_suggestions.c.id == suggestion_id))
     return rows[0] if rows else None
 
 
@@ -92,7 +87,7 @@ def suggestions_for(store: SessionStore, language: str, statuses: tuple[str, ...
     """Suggestions of a base language with one of ``statuses``, oldest first."""
     s = schema.intent_suggestions
     stmt = select(s).where(s.c.language == base_language(language), s.c.status.in_(statuses)).order_by(s.c.id)
-    return _rows(store, stmt)
+    return store.query(stmt)
 
 
 def active_suggestions(store: SessionStore, language: str) -> list[dict[str, Any]]:
@@ -116,13 +111,17 @@ def evidence_turns(store: SessionStore, suggestion_ids: list[int]) -> dict[int, 
 # ----------------------------------------------------------------- writes
 def add_suggestion(store: SessionStore, row: dict[str, Any], evidence: list[dict[str, Any]]) -> int:
     """Insert a suggestion and its evidence (``session_id``, ``turn_idx``, ``text``, ``tool_calls``)."""
-    now = time.time()
     with store.engine.begin() as conn:
-        suggestion_id = conn.execute(
-            insert(schema.intent_suggestions).values(**{"created_at": now, "updated_at": now, **row})
-        ).inserted_primary_key[0]
-        if evidence:
-            conn.execute(insert(schema.intent_evidence), [{**e, "suggestion_id": suggestion_id} for e in evidence])
+        return _insert(conn, row, evidence)
+
+
+def _insert(conn, row: dict[str, Any], evidence: list[dict[str, Any]]) -> int:
+    now = time.time()
+    suggestion_id = conn.execute(
+        insert(schema.intent_suggestions).values(**{"created_at": now, "updated_at": now, **row})
+    ).inserted_primary_key[0]
+    if evidence:
+        conn.execute(insert(schema.intent_evidence), [{**e, "suggestion_id": suggestion_id} for e in evidence])
     return int(suggestion_id)
 
 
@@ -152,19 +151,24 @@ def add_evidence(
     return len(new)
 
 
-def _set(conn, suggestion_id: int, **values: Any) -> None:
-    conn.execute(
-        update(schema.intent_suggestions)
-        .where(schema.intent_suggestions.c.id == suggestion_id)
-        .values(updated_at=time.time(), **values)
-    )
+def _set(conn, suggestion_id: int, *, expect: tuple[str, ...] | None = None, **values: Any) -> None:
+    """Update a suggestion; with ``expect``, only while its status is one of them.
+
+    A review reads the status and then writes: ``expect`` makes a concurrent
+    review of the same suggestion fail instead of both succeeding.
+    """
+    s = schema.intent_suggestions
+    stmt = update(s).where(s.c.id == suggestion_id)
+    if expect is not None:
+        stmt = stmt.where(s.c.status.in_(expect))
+    if not conn.execute(stmt.values(updated_at=time.time(), **values)).rowcount and expect is not None:
+        raise ValueError("the suggestion was reviewed meanwhile; reload it")
 
 
 def session_dream_suggestion_ids(store: SessionStore, session_id: str) -> list[int]:
     """Unreviewed dream suggestions with evidence from ``session_id``: what a re-run replaces."""
     s, e = schema.intent_suggestions, schema.intent_evidence
-    rows = _rows(
-        store,
+    rows = store.query(
         select(s.c.id)
         .join(e, e.c.suggestion_id == s.c.id)
         .where(
@@ -226,13 +230,13 @@ def review_suggestion(
             raise ValueError(f"a {row['status']} suggestion cannot be reviewed")
         status = "active" if action == "approve" else "rejected"
         with store.engine.begin() as conn:
-            _set(conn, suggestion_id, status=status, reviewed_by=source, reviewed_at=now)
+            _set(conn, suggestion_id, expect=USABLE_STATUSES, status=status, reviewed_by=source, reviewed_at=now)
         return get_suggestion(store, suggestion_id) or row
     if action == "restore":
         if row["status"] != "rejected":
             raise ValueError("only rejected suggestions can be restored")
         with store.engine.begin() as conn:
-            _set(conn, suggestion_id, status="active", reviewed_by=source, reviewed_at=now)
+            _set(conn, suggestion_id, expect=("rejected",), status="active", reviewed_by=source, reviewed_at=now)
         return get_suggestion(store, suggestion_id) or row
     if row["status"] not in USABLE_STATUSES:
         raise ValueError(f"a {row['status']} suggestion cannot be corrected")
@@ -240,36 +244,53 @@ def review_suggestion(
     cleaned = [s for s in cleaned if s]
     if not cleaned:
         raise ValueError("at least one sentence is required")
-    evidence = _rows(
-        store,
-        select(schema.intent_evidence.c.session_id, schema.intent_evidence.c.turn_idx)
-        .add_columns(schema.intent_evidence.c.text, schema.intent_evidence.c.tool_calls)
-        .where(schema.intent_evidence.c.suggestion_id == suggestion_id)
-        .order_by(schema.intent_evidence.c.id),
+    e = schema.intent_evidence
+    evidence = store.query(
+        select(e.c.session_id, e.c.turn_idx, e.c.text, e.c.tool_calls)
+        .where(e.c.suggestion_id == suggestion_id)
+        .order_by(e.c.id)
     )
-    new_id = add_suggestion(
-        store,
-        {
-            "kind": row["kind"],
-            "language": row["language"],
-            "intent": (intent or row["intent"]).strip() if row["kind"] == "intent" else row["intent"],
-            "sentences": cleaned,
-            "slots": row["slots"],
-            "tool": row["tool"],
-            "response": (response if response is not None else row["response"]) if row["kind"] == "intent" else None,
-            "confidence": 1.0,
-            # The reviewer's sentences are not re-checked against the evidence.
-            "validated": False,
-            "validation": {"notes": [f"corrected by {reviewer}"]},
-            "status": "active",
-            "source": source,
-            "reviewed_by": source,
-            "reviewed_at": now,
-        },
-        evidence,
-    )
+    name = (intent or row["intent"]).strip() if row["kind"] == "intent" else row["intent"]
     with store.engine.begin() as conn:
-        _set(conn, suggestion_id, status="superseded", superseded_by=new_id, reviewed_by=source, reviewed_at=now)
+        # Superseded first: a concurrent review of the same row fails here, before any insert.
+        _set(conn, suggestion_id, expect=USABLE_STATUSES, status="superseded", reviewed_by=source, reviewed_at=now)
+        new_id = _insert(
+            conn,
+            {
+                "kind": row["kind"],
+                "language": row["language"],
+                "intent": name,
+                "sentences": cleaned,
+                "slots": row["slots"],
+                "tool": row["tool"],
+                "response": (response if response is not None else row["response"])
+                if row["kind"] == "intent"
+                else None,
+                "confidence": 1.0,
+                # The reviewer's sentences are not re-checked against the evidence.
+                "validated": False,
+                "validation": {"notes": [f"corrected by {reviewer}"]},
+                "status": "active",
+                "source": source,
+                "reviewed_by": source,
+                "reviewed_at": now,
+            },
+            evidence,
+        )
+        _set(conn, suggestion_id, superseded_by=new_id)
+        if name != row["intent"]:
+            # Sentences learned for the renamed intent follow it.
+            s = schema.intent_suggestions
+            conn.execute(
+                update(s)
+                .where(
+                    s.c.kind == "sentence",
+                    s.c.language == row["language"],
+                    s.c.intent == row["intent"],
+                    s.c.status.in_((*USABLE_STATUSES, "rejected")),
+                )
+                .values(intent=name, updated_at=now)
+            )
     return get_suggestion(store, new_id) or {}
 
 
@@ -313,7 +334,20 @@ def list_suggestions(
     )
     with store.engine.connect() as conn:
         total = conn.execute(select(func.count()).select_from(s).where(*conditions)).scalar_one()
-    return {"total": total, "suggestions": attach_details(store, _rows(store, stmt))}
+    return {
+        "total": total,
+        "suggestions": attach_details(store, store.query(stmt)),
+        "languages": exportable_languages(store),
+    }
+
+
+def exportable_languages(store: SessionStore) -> list[str]:
+    """Languages with active suggestions (what ``export_sentences`` can export)."""
+    s = schema.intent_suggestions
+    with store.engine.connect() as conn:
+        return list(
+            conn.execute(select(s.c.language).where(s.c.status == "active").distinct().order_by(s.c.language)).scalars()
+        )
 
 
 def open_suggestion_count(store: SessionStore) -> int:
@@ -325,12 +359,34 @@ def open_suggestion_count(store: SessionStore) -> int:
         ).scalar_one()
 
 
+def _use_counts(conn, after: int, upto: int | None = None) -> Counter:
+    """Live uses per suggestion in the ``intent_engine`` events with ``after < id <= upto``."""
+    ev = schema.events
+    learned = ev.c.data["learned"].as_integer()
+    conditions = [
+        ev.c.id > after,
+        ev.c.kind == INTENT_EVENT,
+        ev.c.data["handled_by"].as_string() == "intent",
+        learned.is_not(None),
+    ]
+    if upto is not None:
+        conditions.append(ev.c.id <= upto)
+    stmt = select(learned, func.count()).where(*conditions).group_by(learned)
+    return Counter({int(learned_id): int(count) for learned_id, count in conn.execute(stmt).all()})
+
+
+def _watermark(conn) -> int:
+    scan = schema.intent_use_scan
+    return conn.execute(select(scan.c.last_event_id).where(scan.c.id == 1)).scalar() or 0
+
+
 def refresh_live_uses(store: SessionStore) -> None:
     """Count the ``intent_engine`` events recorded since the last refresh into ``live_uses``.
 
-    Only events after the ``intent_use_scan`` watermark are read (a primary-key
-    range). Concurrent refreshes cannot count an event twice: the watermark only
-    moves from the value this refresh read.
+    Run by the dreamer loop, so reading the review list never writes. Only events
+    after the ``intent_use_scan`` watermark are read (a primary-key range), and
+    the watermark only moves from the value this refresh read: concurrent
+    refreshes cannot count an event twice.
     """
     ev, scan, s = schema.events, schema.intent_use_scan, schema.intent_suggestions
     try:
@@ -340,7 +396,7 @@ def refresh_live_uses(store: SessionStore) -> None:
     except IntegrityError:  # another refresh created it
         pass
     with store.engine.begin() as conn:
-        last = conn.execute(select(scan.c.last_event_id).where(scan.c.id == 1)).scalar_one()
+        last = _watermark(conn)
         newest = conn.execute(select(func.max(ev.c.id)).where(ev.c.id > last)).scalar()
         if newest is None:
             return
@@ -349,37 +405,29 @@ def refresh_live_uses(store: SessionStore) -> None:
         ).rowcount
         if not moved:
             return
-        learned = ev.c.data["learned"].as_integer()
-        stmt = (
-            select(learned, func.count())
-            .where(
-                ev.c.id > last,
-                ev.c.id <= newest,
-                ev.c.kind == INTENT_EVENT,
-                ev.c.data["handled_by"].as_string() == "intent",
-                learned.is_not(None),
-            )
-            .group_by(learned)
-        )
-        for learned_id, count in conn.execute(stmt).all():
+        for learned_id, count in _use_counts(conn, last, newest).items():
             conn.execute(
-                update(s)
-                .where(s.c.id == int(learned_id))
-                .values(live_uses=func.coalesce(s.c.live_uses, 0) + int(count))
+                update(s).where(s.c.id == learned_id).values(live_uses=func.coalesce(s.c.live_uses, 0) + count)
             )
 
 
 def live_uses(store: SessionStore, suggestion_ids: list[int]) -> Counter:
-    """How many live turns each suggestion answered (intent engine events tagged ``learned``)."""
+    """How many live turns each suggestion answered (intent engine events tagged ``learned``).
+
+    Read-only: the counted total plus the events recorded since the last refresh.
+    """
     uses: Counter = Counter()
     if not suggestion_ids:
         return uses
-    refresh_live_uses(store)
     s = schema.intent_suggestions
     with store.engine.connect() as conn:
         for suggestion_id, count in conn.execute(select(s.c.id, s.c.live_uses).where(s.c.id.in_(suggestion_ids))):
             if count:
                 uses[suggestion_id] = count
+        wanted = set(suggestion_ids)
+        for suggestion_id, count in _use_counts(conn, _watermark(conn)).items():
+            if suggestion_id in wanted:
+                uses[suggestion_id] += count
     return uses
 
 
@@ -390,14 +438,9 @@ def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict
     ids = [r["id"] for r in rows]
     e = schema.intent_evidence
     evidence: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for row in _rows(store, select(e).where(e.c.suggestion_id.in_(ids)).order_by(e.c.id)):
+    for row in store.query(select(e).where(e.c.suggestion_id.in_(ids)).order_by(e.c.id)):
         evidence[row["suggestion_id"]].append(row)
-    audio: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    for sid in {ev["session_id"] for evs in evidence.values() for ev in evs}:
-        for media in store.rows("media", sid, modality="audio_user"):
-            audio[(sid, media["turn_idx"])].append(
-                {"key": media["artifact_key"], "duration_secs": media["duration_secs"]}
-            )
+    audio = store.user_audio_by_turn({ev["session_id"] for evs in evidence.values() for ev in evs})
     uses = live_uses(store, ids)
     out = []
     for row in rows:

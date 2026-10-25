@@ -207,7 +207,7 @@ The job rebuilds the catalog that the session used: the custom sentence files, t
 
 The job then checks every proposal with hassil, the way the live engine matches:
 
-- Each sentence must parse with the lists and expansion rules of the catalog. Unknown lists and rules, and wildcard lists, are refused.
+- Each sentence must parse with the lists and expansion rules of the catalog. Unknown lists and rules, including the ones that a referenced expansion rule uses, and wildcard lists, are refused.
 - The words of the person in an evidence turn must match the proposal and must not already match the catalog.
 - A sentence for a stock Home Assistant intent must have the shape of that intent's stock sentence blocks: the same target slots (`{name}`, `{area}`, or `{floor}`) and the slots that the block fixes, for example `domain: light` for an area command. When a sentence has optional target slots, such as `{name} [dans {area}]`, each variant must match a block.
 - For a client tool, the matched slots must produce the same tool call that the LLM made.
@@ -240,16 +240,18 @@ Open **Review** > **Intents** in the web client. The page lists the suggestions 
 You can take the following actions on a suggestion:
 
 - **Approve** a proposed suggestion, or **Keep** one that is already active, to mark it reviewed and active.
-- **Correct** its sentences, one per line. For a new intent, you can also correct the name and the response. The corrected copy is active and supersedes the original. A correction whose sentences do not parse, or do not fit a stock sentence shape of a Home Assistant intent, is refused.
+- **Correct** its sentences, one per line. For a new intent, you can also correct the name and the response. When you rename a new intent, the sentence suggestions learned for it follow the new name. The corrected copy is active and supersedes the original. A correction whose sentences do not parse, or do not fit a stock sentence shape of a Home Assistant intent, is refused.
 - **Reject** it, so that it is not used and not proposed again.
 - **Restore** a rejected suggestion, so that it becomes active.
 
+When two reviewers act on the same suggestion at the same time, the second action fails with an error that asks you to reload the suggestion.
+
 Active suggestions apply to new sessions, not to sessions that are already running. At session start, the pipeline loads the active suggestions for the session language from the monitoring database and merges them into the sentence set that defines their intent, custom sentences first. A learned new intent is active only when the client declares its tool. The engine ignores an invalid learned sentence, including a Home Assistant sentence that fits no stock sentence shape, and logs a warning. The startup log line `Intent engine enabled` reports the number of loaded suggestions as `learned=<count>`.
 
-To keep approved suggestions in the repository, click **Export** for a language, for example **Export fr**. The download, also available at `GET /api/review/intents/export?language=fr`, contains up to three YAML documents:
+To keep approved suggestions in the repository, click **Export** for a language, for example **Export fr**. The page shows one **Export** button for each language with active suggestions, whatever the filter and page. The download, also available at `GET /api/review/intents/export?language=fr`, contains up to three YAML documents:
 
-- The first document is a sentence file with the learned sentences for intents that the custom sentence files define, and the learned new intents. Add it under `src/examples/shared/intent_engine/sentences/<language>/`.
-- The second document lists the learned client-tool intents. Merge it into `client_tools.yaml`.
+- The first document is a sentence file with the learned sentences for intents that the custom sentence files define, and the learned new intents. Add it under `<language>/` in the sentence directory that `INTENT_ENGINE_SENTENCES_DIR` configures, by default `src/examples/shared/intent_engine/sentences/<language>/`. The comments of the export name this directory, relative to the repository root when it is inside the repository.
+- The second document lists the learned client-tool intents. Merge it into `client_tools.yaml` in the same directory.
 - A third document, present only when needed, lists the learned sentences for stock Home Assistant intents. Do not add them to a custom sentence file, because a custom file that defines a Home Assistant intent replaces its stock sentences. These sentences stay in use from the monitoring database. To keep them permanently, contribute them to the [Home Assistant intents project](https://github.com/home-assistant/intents).
 
 After you deploy an exported new intent, the engine ignores its learned copy with a warning, because a sentence file now defines the intent.

@@ -332,12 +332,14 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
 
   In the API, `GET /api/review/intents` accepts
   `status=open|usable|all|proposed|active|rejected|superseded`,
-  `kind=sentence|intent`, `language`, `limit`, and `offset`.
+  `kind=sentence|intent`, `language`, `limit`, and `offset`. Its response
+  also lists in `languages` the languages that have active suggestions.
   `POST /api/review/intents/<id>/review` accepts
   `{"annotator", "action", "sentences", "intent", "response"}`, where `action`
   is `approve`, `correct`, `reject`, or `restore`. A correction with invalid
   sentences, for example a Home Assistant sentence that fits no stock sentence
-  shape, returns HTTP `422`. `GET /api/review/intents/export?language=fr`
+  shape, returns HTTP `422`. A review of a suggestion that another reviewer
+  changed meanwhile also returns HTTP `422` and asks you to reload. `GET /api/review/intents/export?language=fr`
   returns the YAML export.
 - **ASR reference.** Every recorded user turn, with the ones where the live
   ASR and the reference model (Voxtral) disagree first.

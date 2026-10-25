@@ -219,7 +219,8 @@ export function IntentsView() {
   const pageSize = 20;
   const suggestions = useIntentSuggestions(filter, kind, page, pageSize);
   const pages = Math.max(1, Math.ceil((suggestions.data?.total ?? 0) / pageSize));
-  const languages = [...new Set((suggestions.data?.suggestions ?? []).map((s) => s.language))].sort();
+  // Languages with active suggestions, whatever the filter and page: what the export contains.
+  const languages = suggestions.data?.languages ?? [];
 
   return (
     <section className="rv-page">

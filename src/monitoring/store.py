@@ -16,6 +16,7 @@ Both are synchronous and meant to be called from worker threads
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -248,6 +249,21 @@ class SessionStore:
             stmt = stmt.order_by(*(table.c[c] for c in order))
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings()]
+
+    def query(self, stmt) -> list[dict[str, Any]]:
+        """Return the rows of a select statement as dicts."""
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
+    def user_audio_by_turn(self, session_ids) -> dict[tuple[str, int], list[dict[str, Any]]]:
+        """``{(session_id, turn_idx): [{"key", "duration_secs"}]}`` of the recorded user audio clips."""
+        audio: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+        for session_id in session_ids:
+            for media in self.rows("media", session_id, modality="audio_user"):
+                audio[(session_id, media["turn_idx"])].append(
+                    {"key": media["artifact_key"], "duration_secs": media["duration_secs"]}
+                )
+        return audio
 
     def ended_session_ids(self) -> list[str]:
         """Return ids of ended sessions, oldest first."""

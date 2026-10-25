@@ -632,3 +632,78 @@ def test_live_uses_only_read_new_events(stores, llm):
     assert intents.live_uses(store, [sid]) == {sid: 1}  # counted once
     use(1301.0)
     assert intents.list_suggestions(store)["suggestions"][0]["live_uses"] == 2
+
+
+def test_correcting_a_custom_sentence_next_to_a_learned_home_assistant_one(stores):
+    from monitoring.jobs.dream_intents import correction_problems
+
+    store, _ = stores
+    intents.add_suggestion(store, _row("HassTurnOn", "mets en marche [<le>]{name}"), [])
+    sentence_id = intents.add_suggestion(
+        store, {**_row("ReachyMoveHead", "pivote vers [la ]{direction}"), "status": "proposed"}, []
+    )
+    row = intents.get_suggestion(store, sentence_id)
+    assert correction_problems(store, row, ["tourne-toi vers [la ]{direction}"], None, None) == []
+
+
+def test_renaming_a_learned_intent_keeps_its_sentences(stores):
+    store, _ = stores
+    intent_id = intents.add_suggestion(
+        store,
+        {**_row("LookAround", "regarde autour"), "kind": "intent", "tool": {"tool": "head_tracking", "arguments": {}}},
+        [],
+    )
+    sentence_id = intents.add_suggestion(store, _row("LookAround", "jette un œil"), [])
+    renamed = intents.review_suggestion(store, intent_id, "correct", reviewer="ann", intent="LookEverywhere")
+    assert renamed["intent"] == "LookEverywhere"
+    assert intents.get_suggestion(store, sentence_id)["intent"] == "LookEverywhere"
+
+
+def test_one_bad_learned_suggestion_does_not_drop_the_others():
+    # hassil only reports a missing rule when matching reaches it, and the live
+    # engine then skips the whole sentence set: the rules a sentence uses are checked too.
+    data = {"language": "fr", "intents": {"A": {"data": [{"sentences": ["a"]}]}}, "expansion_rules": {"r": "x <nope>"}}
+    good = LearnedIntent(id=1, kind="sentence", intent="A", sentences=("b",))
+    bad = LearnedIntent(id=2, kind="sentence", intent="A", sentences=("c <r>",))
+    merged, used = merge_learned(data, [good, bad], add_intents=False)
+    assert used == [1]
+    assert "unknown rule <nope>" in sentence_problems("c <r>", data)
+
+
+def test_concurrent_reviews_of_one_suggestion(stores, monkeypatch):
+    store, _ = stores
+    suggestion_id = intents.add_suggestion(store, {**_row("ReachyDance", "bouge"), "status": "proposed"}, [])
+    stale = intents.get_suggestion(store, suggestion_id)
+    intents.review_suggestion(store, suggestion_id, "correct", reviewer="ann", sentences=["bouge un peu"])
+    # The second reviewer read the row before the first one saved.
+    monkeypatch.setattr(intents, "get_suggestion", lambda *_: dict(stale))
+    with pytest.raises(ValueError, match="meanwhile"):
+        intents.review_suggestion(store, suggestion_id, "correct", reviewer="bob", sentences=["bouge encore"])
+    monkeypatch.undo()
+    assert [r["sentences"] for r in intents.active_suggestions(store, "fr")] == [["bouge un peu"]]
+
+
+def test_listing_suggestions_does_not_write(stores, llm):
+    from monitoring import schema
+
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    llm.answer = ANSWER
+    _run(store, artifacts, "s1")
+    listed = intents.list_suggestions(store)
+    with store.engine.connect() as conn:
+        assert conn.execute(schema.intent_use_scan.select()).first() is None
+    assert listed["languages"] == []  # nothing active yet
+    intents.review_suggestion(store, listed["suggestions"][0]["id"], "approve", reviewer="ann")
+    assert intents.list_suggestions(store)["languages"] == ["fr"]
+
+
+def test_export_header_names_the_configured_directory(api, tmp_path, monkeypatch):
+    import shutil
+
+    client, store = api
+    custom = tmp_path / "my-sentences"
+    shutil.copytree(PACKAGED_SENTENCES_DIR, custom)
+    monkeypatch.setenv("INTENT_ENGINE_SENTENCES_DIR", str(custom))
+    text = client.get("/api/review/intents/export", params={"language": "fr"}).text
+    assert f"add to {custom / 'fr'}/" in text and f"add to {custom / 'client_tools.yaml'}" in text

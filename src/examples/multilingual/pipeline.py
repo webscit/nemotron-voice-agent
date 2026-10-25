@@ -51,6 +51,7 @@ from examples.multilingual.tools import build_client_tools, perceivable_client_t
 from examples.shared.audio_recorder import create_audio_recorder
 from examples.shared.intent_engine import IntentEngineConfig, build_intent_engine
 from examples.shared.intent_engine.learned import load_learned_intents_async
+from examples.shared.intent_engine.processor import preload_intent_engine
 from examples.shared.memory_tools import (
     FORGET_TOOL_NAME,
     MEMORY_TOOL_NAMES,
@@ -537,6 +538,9 @@ async def bot(runner_args: RunnerArguments) -> None:
 
     # Optional: answer matched device commands (Home Assistant, client tools) without
     # the LLM. Sits right before the LLM so a miss continues unchanged.
+    # Sentences and intents learned by the dream job and approved in review.
+    learned_intents = await load_learned_intents_async(fixed_session_language) if intent_engine_config.enabled else []
+    await preload_intent_engine(intent_engine_config, fixed_session_language, learned_intents)
     intent_engine = build_intent_engine(
         intent_engine_config,
         language=fixed_session_language,
@@ -545,8 +549,7 @@ async def bot(runner_args: RunnerArguments) -> None:
         client_tool_names=client_tool_names,
         client_tool_timeout_secs=CLIENT_FUNCTION_TIMEOUT_SECS,
         recorder=recorder,
-        # Sentences and intents learned by the dream job and approved in review.
-        learned=await load_learned_intents_async(fixed_session_language) if intent_engine_config.enabled else (),
+        learned=learned_intents,
     )
 
     pipeline = Pipeline(

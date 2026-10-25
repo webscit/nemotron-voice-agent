@@ -376,6 +376,28 @@ class IntentCatalog:
 
         return normalize_text(text, self.language, self.wake_words)
 
+    def candidate_data(self, candidate) -> dict[str, Any] | None:
+        """Sentence data of the candidate's intent alone, with the candidate merged in as the live engine would."""
+        from examples.shared.intent_engine.learned import merge_learned
+
+        to_stock = (
+            candidate.kind == "sentence" and self.stock is not None and self.owner(candidate.intent) is self.stock
+        )
+        base = self.stock if to_stock else self.custom or self.empty_custom
+        body = (base.get("intents") or {}).get(candidate.intent)
+        subset = {**base, "intents": {candidate.intent: body} if body is not None else {}}
+        merged, used = merge_learned(
+            subset, [candidate], add_intents=candidate.kind == "intent", home_assistant=to_stock
+        )
+        return merged if used else None
+
+    @cached_property
+    def empty_custom(self) -> dict[str, Any]:
+        """Custom data without intents (lists, rules and the stock skip words), for a new intent."""
+        from examples.shared.intent_engine.matcher import custom_parse_data
+
+        return custom_parse_data({**(self.files or {}), "intents": {}}, self.language, allow_empty=True)
+
     @staticmethod
     def parse(data: dict[str, Any] | None):
         """Parsed hassil ``Intents`` of sentence data (None for no data or data that does not parse)."""
@@ -428,13 +450,9 @@ class IntentCatalog:
         from examples.shared.intent_engine.targets import ClientToolMap
 
         result = Check()
-        # Only the set that takes the candidate is rebuilt and parsed again.
-        learned = [*self.learned, candidate]
-        if candidate.kind == "sentence" and self.stock is not None and self.owner(candidate.intent) is self.stock:
-            sets = (self.parsed[0], self.parse(self.stock_data(learned)))
-        else:
-            extra = candidate.intent if candidate.kind == "intent" else None
-            sets = (self.parse(self.custom_data(learned, extra_custom=extra)), self.parsed[1])
+        # Only the candidate's intent is parsed: a turn that matched nothing before
+        # can only match the candidate's intent once the candidate is added.
+        sets = (self.parse(self.candidate_data(candidate)),)
         if candidate.kind == "intent":
             tool_map = self.tool_map.with_entries({candidate.intent: candidate.tool or {}})
         else:
@@ -840,7 +858,9 @@ def correction_problems(
         if response is not None and (not response.strip() or not is_local_template(response)):
             problems.append("response is empty or not a slots-only template")
     candidate = LearnedIntent.from_row({**row, "sentences": sentences if sentences is not None else row["sentences"]})
-    home_assistant = row["kind"] == "sentence" and bool(stock_learned(files, [*learned, candidate]))
+    home_assistant = row["kind"] == "sentence" and any(
+        i is candidate for i in stock_learned(files, [*learned, candidate])
+    )
     if home_assistant:
         data = stock
     elif row["kind"] == "sentence":

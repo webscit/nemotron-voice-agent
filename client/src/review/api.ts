@@ -620,7 +620,7 @@ export function useIntentSuggestions(
   if (kind) params.set("kind", kind);
   return useQuery({
     queryKey: ["review", "intents", status, kind, page, pageSize],
-    queryFn: () => request<{ total: number; suggestions: IntentSuggestion[] }>(`/intents?${params}`),
+    queryFn: () => request<{ total: number; suggestions: IntentSuggestion[]; languages: string[] }>(`/intents?${params}`),
     ...live,
     placeholderData: (previous) => previous,
   });

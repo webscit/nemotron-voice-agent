@@ -14,6 +14,7 @@ import asyncio
 import re
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -718,14 +719,20 @@ class ReviewService:
         from examples.shared.intent_engine.config import IntentEngineConfig
         from examples.shared.intent_engine.matcher import custom_sentence_data
 
-        files = custom_sentence_data(IntentEngineConfig.from_env().sentences_dir, language) or {}
+        sentences_dir = IntentEngineConfig.from_env().sentences_dir
+        files = custom_sentence_data(sentences_dir, language) or {}
         exported = intents.export_sentences(self.store, language, set(files.get("intents") or {}))
         dump = {"allow_unicode": True, "sort_keys": False}
         base = intents.base_language(language)
+        # The directory the engine loads, relative to the working directory (the repository root) when inside it.
+        try:
+            shown = sentences_dir.resolve().relative_to(Path.cwd().resolve())
+        except ValueError:
+            shown = sentences_dir
         text = (
-            f"# Learned sentences for {base}: add to src/examples/shared/intent_engine/sentences/{base}/\n"
+            f"# Learned sentences for {base}: add to {shown / base}/\n"
             + yaml.safe_dump(exported["sentences"], **dump)
-            + "---\n# Learned client-tool intents: add to sentences/client_tools.yaml\n"
+            + f"---\n# Learned client-tool intents: add to {shown / 'client_tools.yaml'}\n"
             + yaml.safe_dump(exported["client_tools"], **dump)
         )
         if exported["home_assistant"]:

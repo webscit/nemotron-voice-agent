@@ -173,7 +173,7 @@ def _load_stock(
 
 
 _STOCK_LEARNED_CACHE: dict[tuple, _SentenceSet | None] = {}
-_STOCK_LEARNED_CACHE_SIZE = 4
+_STOCK_LEARNED_CACHE_SIZE = 8
 
 
 def _parse_stock(language: str, allowed_intents: tuple[str, ...], learned: Sequence[LearnedIntent]):
@@ -201,6 +201,17 @@ def _load_stock_cached(language: str, allowed_intents: tuple[str, ...]) -> _Sent
         responses=responses.get("intents", {}),
         errors=responses.get("errors", {}),
     )
+
+
+def preload_stock(
+    language: str, allowed_intents: Iterable[str], sentences_dir: Path, learned: Sequence[LearnedIntent]
+) -> None:
+    """Parse and cache the stock set that ``IntentMatcher`` will load for a session.
+
+    Parsing the stock sentences takes seconds on small devices: call this off the
+    event loop (``asyncio.to_thread``) so building the matcher only hits the cache.
+    """
+    _load_stock(language, tuple(allowed_intents), stock_learned(custom_sentence_data(sentences_dir, language), learned))
 
 
 def stock_parse_data(data: dict[str, Any], allowed_intents: Iterable[str]) -> dict[str, Any]:
@@ -231,16 +242,19 @@ def custom_sentence_data(sentences_dir: Path, language: str) -> dict[str, Any] |
 
 
 def custom_parse_data(
-    merged: dict[str, Any], language: str, keep: Callable[[str], bool] = lambda name: True
+    merged: dict[str, Any], language: str, keep: Callable[[str], bool] = lambda name: True, *, allow_empty: bool = False
 ) -> dict[str, Any] | None:
-    """The hassil data of the custom set: intents accepted by ``keep``, plus the stock skip words."""
+    """The hassil data of the custom set: intents accepted by ``keep``, plus the stock skip words.
+
+    None when no intent is kept, unless ``allow_empty``.
+    """
     intents = {}
     for name, body in (merged.get("intents") or {}).items():
         if keep(name):
             intents[name] = body
         else:
             logger.debug(f"Intent engine: custom intent {name} is inactive for this session")
-    if not intents:
+    if not intents and not allow_empty:
         return None
     stock = _stock_data(language) or {}
     return {

@@ -44,11 +44,6 @@ PERSON_ALIAS_PREFIX = "person_alias:"
 _MAX_ALIAS_HOPS = 16
 
 
-def _rows(store: SessionStore, stmt) -> list[dict[str, Any]]:
-    with store.engine.connect() as conn:
-        return [dict(r) for r in conn.execute(stmt).mappings()]
-
-
 def memory_origin(source: str | None) -> str | None:
     """``dreamer``, ``conversation`` or ``manual`` for a memory ``source``; None when unknown."""
     return next((o for o, prefix in ORIGIN_PREFIXES.items() if (source or "").startswith(prefix)), None)
@@ -61,12 +56,12 @@ def list_people(store: SessionStore, *, include_archived: bool = False) -> list[
     stmt = select(p).order_by(func.lower(p.c.name))
     if not include_archived:
         stmt = stmt.where(p.c.archived.is_(False))
-    return _rows(store, stmt)
+    return store.query(stmt)
 
 
 def get_person(store: SessionStore, person_id: str) -> dict[str, Any] | None:
     """One person, or None."""
-    rows = _rows(store, select(schema.people).where(schema.people.c.id == person_id))
+    rows = store.query(select(schema.people).where(schema.people.c.id == person_id))
     return rows[0] if rows else None
 
 
@@ -190,7 +185,7 @@ def speakers_for(store: SessionStore, session_id: str) -> dict[str, Any]:
     """``{"session": person_id | None, "turns": {turn_idx: person_id}}`` (explicit rows only)."""
     sa = schema.speaker_assignments
     out: dict[str, Any] = {"session": None, "turns": {}}
-    for row in _rows(store, select(sa).where(sa.c.session_id == session_id)):
+    for row in store.query(select(sa).where(sa.c.session_id == session_id)):
         if row["turn_idx"] == SESSION_TURN:
             out["session"] = row["person_id"]
         else:
@@ -213,7 +208,7 @@ def active_memories(store: SessionStore, person_id: str, *, limit: int = 50) -> 
         .order_by(m.c.confidence.desc(), m.c.updated_at.desc())
         .limit(limit)
     )
-    return _rows(store, stmt)
+    return store.query(stmt)
 
 
 def usable_memories(store: SessionStore, person_ids: list[str]) -> list[dict[str, Any]]:
@@ -221,9 +216,7 @@ def usable_memories(store: SessionStore, person_ids: list[str]) -> list[dict[str
     if not person_ids:
         return []
     m = schema.memories
-    return _rows(
-        store, select(m).where(m.c.person_id.in_(person_ids), m.c.status.in_(USABLE_STATUSES)).order_by(m.c.id)
-    )
+    return store.query(select(m).where(m.c.person_id.in_(person_ids), m.c.status.in_(USABLE_STATUSES)).order_by(m.c.id))
 
 
 def add_manual_memory(
@@ -263,7 +256,7 @@ def forgotten_memories(store: SessionStore, person_ids: list[str]) -> list[dict[
     if not person_ids:
         return []
     m = schema.memories
-    return _rows(store, select(m).where(m.c.person_id.in_(person_ids), m.c.status == "forgotten").order_by(m.c.id))
+    return store.query(select(m).where(m.c.person_id.in_(person_ids), m.c.status == "forgotten").order_by(m.c.id))
 
 
 def add_memory(store: SessionStore, row: dict[str, Any], evidence: list[dict[str, Any]]) -> int:
@@ -286,7 +279,7 @@ def _set_memory(conn, memory_id: int, **values: Any) -> None:
 
 def get_memory(store: SessionStore, memory_id: int) -> dict[str, Any] | None:
     """One memory row, or None."""
-    rows = _rows(store, select(schema.memories).where(schema.memories.c.id == memory_id))
+    rows = store.query(select(schema.memories).where(schema.memories.c.id == memory_id))
     return rows[0] if rows else None
 
 
@@ -340,8 +333,7 @@ def review_memory(
             if memory["supersedes"]:
                 _set_memory(conn, memory["supersedes"], status="superseded", superseded_by=memory_id)
         return get_memory(store, memory_id) or memory
-    evidence = _rows(
-        store,
+    evidence = store.query(
         select(schema.memory_evidence.c.session_id, schema.memory_evidence.c.turn_idx, schema.memory_evidence.c.quote)
         .where(schema.memory_evidence.c.memory_id == memory_id)
         .order_by(schema.memory_evidence.c.id),
@@ -375,8 +367,7 @@ def retract_session_memories(store: SessionStore, session_id: str) -> int:
     Memories saved live with the ``remember`` tool are kept: the job did not create them.
     """
     m, e = schema.memories, schema.memory_evidence
-    candidates = _rows(
-        store,
+    candidates = store.query(
         select(m.c.id)
         .join(e, e.c.memory_id == m.c.id)
         .where(
@@ -439,7 +430,7 @@ def list_memories(
     with store.engine.connect() as conn:
         total = conn.execute(select(func.count()).select_from(m).where(*conditions)).scalar_one()
     stmt = select(m).where(*conditions).order_by(m.c.created_at.desc(), m.c.id.desc())
-    rows = _rows(store, stmt.limit(limit).offset(offset))
+    rows = store.query(stmt.limit(limit).offset(offset))
     return {"total": total, "memories": attach_details(store, rows)}
 
 
@@ -459,21 +450,17 @@ def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict
     ids = [r["id"] for r in rows]
     e, u, t = schema.memory_evidence, schema.memory_uses, schema.turns
     evidence: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for row in _rows(store, select(e).where(e.c.memory_id.in_(ids)).order_by(e.c.id)):
+    for row in store.query(select(e).where(e.c.memory_id.in_(ids)).order_by(e.c.id)):
         evidence[row["memory_id"]].append(row)
     turn_keys = {(ev["session_id"], ev["turn_idx"]) for evs in evidence.values() for ev in evs}
     turn_text: dict[tuple[str, int], dict[str, Any]] = {}
     for sid in {k[0] for k in turn_keys}:
-        for turn in _rows(store, select(t).where(t.c.session_id == sid)):
+        for turn in store.query(select(t).where(t.c.session_id == sid)):
             turn_text[(sid, turn["idx"])] = {"user_text": turn["user_text"], "bot_text": turn["bot_text"]}
-    audio: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    for sid in {k[0] for k in turn_keys}:
-        for media in store.rows("media", sid, modality="audio_user"):
-            clip = {"key": media["artifact_key"], "duration_secs": media["duration_secs"]}
-            audio[(sid, media["turn_idx"])].append(clip)
+    audio = store.user_audio_by_turn({k[0] for k in turn_keys})
 
     use_sessions: dict[int, set[str]] = defaultdict(set)
-    for row in _rows(store, select(u.c.memory_id, u.c.session_id).where(u.c.memory_id.in_(ids))):
+    for row in store.query(select(u.c.memory_id, u.c.session_id).where(u.c.memory_id.in_(ids))):
         use_sessions[row["memory_id"]].add(row["session_id"])
     all_sessions = sorted({s for sessions in use_sessions.values() for s in sessions})
     replies: dict[str, int] = {}
@@ -488,7 +475,7 @@ def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict
             )
     related = {r["supersedes"] for r in rows if r["supersedes"]}
     superseded_text = {
-        r["id"]: r["text"] for r in _rows(store, select(schema.memories).where(schema.memories.c.id.in_(related)))
+        r["id"]: r["text"] for r in store.query(select(schema.memories).where(schema.memories.c.id.in_(related)))
     }
     names = {p["id"]: p["name"] for p in list_people(store, include_archived=True)}
     out = []
