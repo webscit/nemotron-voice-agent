@@ -521,3 +521,114 @@ def test_export_keeps_stock_intent_sentences_out_of_the_sentence_file(stores):
     parsed = Intents.from_dict(combined)
     match = recognize_best("tourne-toi vers la droite", parsed, slot_lists=build_slot_lists([], [], []), language="fr")
     assert match.intent.name == "ReachyMoveHead"
+
+
+def test_rerun_keeps_the_sentences_the_session_activated(stores, llm):
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    config = {**_DEFAULTS, "dream": {"intents": {"auto_use_threshold": 0.9}}}
+    llm.answer = ANSWER
+    _run(store, artifacts, "s1", config=config)
+    (first,) = intents.active_suggestions(store, "fr")
+
+    # The re-run does not see its own active sentence as already matching: it proposes it again.
+    progress = _run(store, artifacts, "s1", config=config, progress={"written": True})
+    (again,) = intents.active_suggestions(store, "fr")
+    assert progress["intents"]["retracted"] >= 1
+    assert again["sentences"] == first["sentences"] and again["id"] != first["id"]
+
+
+def test_correcting_a_sentence_of_a_learned_intent(stores):
+    from monitoring.jobs.dream_intents import correction_problems
+
+    store, _ = stores
+    intents.add_suggestion(
+        store,
+        {
+            **_row("ReachyFollowMe", "suis-moi"),
+            "kind": "intent",
+            "tool": {"tool": "head_tracking", "arguments": {"enabled": True}},
+            "response": "Je te suis",
+        },
+        [],
+    )
+    sentence_id = intents.add_suggestion(store, {**_row("ReachyFollowMe", "regarde-moi"), "status": "proposed"}, [])
+    row = intents.get_suggestion(store, sentence_id)
+    assert correction_problems(store, row, ["regarde-moi vers [la ]{direction}"], None, None) == []
+    assert correction_problems(store, row, ["regarde {nope}"], None, None)
+
+
+def test_a_learned_sentence_that_breaks_parsing_keeps_the_custom_intents(monkeypatch):
+    from examples.shared.intent_engine import matcher
+
+    def broken(data, learned, **kwargs):
+        merged, used = merge_learned(data, learned, **kwargs)
+        if learned:
+            merged["intents"]["ReachyDance"]["data"].append({"sentences": ["danse <undefined_rule>"]})
+        return merged, used
+
+    monkeypatch.setattr(matcher, "merge_learned", broken)
+    learned = [LearnedIntent(id=1, kind="sentence", intent="ReachyDance", sentences=("bouge",))]
+    custom = matcher._load_custom(
+        matcher.custom_sentence_data(PACKAGED_SENTENCES_DIR, "fr"), "fr", lambda n: True, learned
+    )
+    assert custom is not None and "ReachyDance" in custom.intents.intents
+
+
+def test_stock_set_with_learned_sentences_is_cached():
+    from examples.shared.intent_engine import matcher
+
+    allowed = ("HassTurnOn",)
+    outside = [LearnedIntent(id=1, kind="sentence", intent="HassTurnOff", sentences=("éteins {name}",))]
+    assert matcher._load_stock("fr", allowed, outside) is matcher._load_stock_cached("fr", allowed)
+    inside = [LearnedIntent(id=2, kind="sentence", intent="HassTurnOn", sentences=("mets en marche {name}",))]
+    first = matcher._load_stock("fr", allowed, inside)
+    assert first is matcher._load_stock("fr", allowed, inside)
+    assert first is not matcher._load_stock_cached("fr", allowed)
+
+
+def test_optional_target_slots_fit_several_stock_blocks():
+    data = home_assistant_intents.get_intents("fr")
+    body = data["intents"]["HassTurnOn"]
+    item = LearnedIntent(
+        id=3, kind="sentence", intent="HassTurnOn", sentences=("mets en marche [<le>]{name} [<dans> [<le>]{area}]",)
+    )
+    blocks, misfits = stock_blocks(item, body, data)
+    assert not misfits
+    shapes = {b["metadata"].get("slot_combination") for b in blocks}
+    assert {"name_only", "name_area"} <= shapes
+
+
+def test_catalog_keeps_an_empty_recorded_allow_list(stores, monkeypatch):
+    from monitoring.jobs.dream_intents import DEFAULTS, IntentCatalog
+
+    store, _ = stores
+    config = {"language": "fr-FR", "intent_engine": {"enabled": True, "home_assistant": True, "allowed_intents": []}}
+    assert IntentCatalog(store, config, dict(DEFAULTS)).allowed == ()
+
+
+def test_base_language_helpers_agree():
+    from examples.shared.intent_engine.matcher import base_language
+
+    for code in ("fr-FR", "FR-fr", "en", " de-CH ", ""):
+        assert intents.base_language(code) == base_language(code)
+
+
+def test_live_uses_only_read_new_events(stores, llm):
+    store, artifacts = stores
+    _session(store, "s1", llm.base_url)
+    llm.answer = ANSWER
+    _run(store, artifacts, "s1")
+    sid = intents.list_suggestions(store)["suggestions"][0]["id"]
+
+    def use(ts):
+        event = {"handled_by": "intent", "intent": "X", "learned": sid}
+        store.write_batch(
+            [("events", {"session_id": "s1", "turn_idx": 9, "ts": ts, "kind": "intent_engine", "data": event})]
+        )
+
+    use(1300.0)
+    assert intents.live_uses(store, [sid]) == {sid: 1}
+    assert intents.live_uses(store, [sid]) == {sid: 1}  # counted once
+    use(1301.0)
+    assert intents.list_suggestions(store)["suggestions"][0]["live_uses"] == 2

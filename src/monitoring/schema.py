@@ -408,9 +408,21 @@ intent_suggestions = Table(
     Column("superseded_by", Integer),
     Column("reviewed_by", String(256)),
     Column("reviewed_at", Float),
+    # Live turns the suggestion answered, counted from ``intent_engine`` events (``intent_use_scan``).
+    # Nullable so ``_add_missing_columns`` can add it to a database created before it.
+    Column("live_uses", Integer, default=0),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
     Index("ix_intent_suggestions_language", "language", "status"),
+)
+
+# One row: the last ``events.id`` counted into ``intent_suggestions.live_uses``, so
+# each count only reads the events recorded since the previous one.
+intent_use_scan = Table(
+    "intent_use_scan",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("last_event_id", Integer, nullable=False),
 )
 
 intent_evidence = Table(

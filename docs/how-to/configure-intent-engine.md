@@ -209,13 +209,13 @@ The job then checks every proposal with hassil, the way the live engine matches:
 
 - Each sentence must parse with the lists and expansion rules of the catalog. Unknown lists and rules, and wildcard lists, are refused.
 - The words of the person in an evidence turn must match the proposal and must not already match the catalog.
-- A sentence for a stock Home Assistant intent must have the shape of one of that intent's stock sentence blocks: the same target slots (`{name}`, `{area}`, or `{floor}`) and the slots that the block fixes, for example `domain: light` for an area command.
+- A sentence for a stock Home Assistant intent must have the shape of that intent's stock sentence blocks: the same target slots (`{name}`, `{area}`, or `{floor}`) and the slots that the block fixes, for example `domain: light` for an area command. When a sentence has optional target slots, such as `{name} [dans {area}]`, each variant must match a block.
 - For a client tool, the matched slots must produce the same tool call that the LLM made.
 - A new intent must use a tool that the client declared, a CamelCase name, and a response template that only uses slots. The name must not clash with an intent of the repository sentence files, `client_tools.yaml`, or the stock Home Assistant sentences, even an intent that was inactive in the session.
 
 The job drops a proposal that no evidence turn matches. A proposed new intent whose literal tool call equals the call of an existing intent becomes a sentence suggestion for that intent. A proposal that reuses the name of a learned intent with the same tool call merges into that intent.
 
-The engine merges a learned sentence for a stock Home Assistant intent as one copy per stock block of the same shape. Each copy inherits the block's fixed slots, `requires_context` (entity domains), `excludes_context`, and response.
+The engine merges a learned sentence for a stock Home Assistant intent as one copy per stock block that matches one of its variants. Each copy inherits the block's fixed slots, `requires_context` (entity domains), `excludes_context`, and response.
 
 The job can only check a sentence that needs Home Assistant names, such as `{name}`, `{area}`, or `{floor}`, when the dreamer can sync Home Assistant. The dreamer reads `HOME_ASSISTANT_URL` and `HOME_ASSISTANT_TOKEN` from the same `.env` as the application, and contacts Home Assistant only when it checks proposals. Without these values, the job keeps the suggestion and marks it unchecked.
 

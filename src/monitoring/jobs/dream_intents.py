@@ -142,8 +142,13 @@ class Check:
 class IntentCatalog:
     """The sentence data and tool mapping a session's intent engine used, rebuilt offline."""
 
-    def __init__(self, store, session_config: dict[str, Any], cfg: dict[str, Any]):
-        """Rebuild the catalog for ``session_config`` (see ``available``)."""
+    def __init__(self, store, session_config: dict[str, Any], cfg: dict[str, Any], *, session_id: str | None = None):
+        """Rebuild the catalog for ``session_config`` (see ``available``).
+
+        ``session_id``: the session being dreamed. Its own unreviewed dream
+        suggestions are left out: a re-run replaces them, so they must not count
+        as already matching its turns.
+        """
         from examples.shared.intent_engine.config import IntentEngineConfig
         from examples.shared.intent_engine.learned import LearnedIntent, tool_entries
         from examples.shared.intent_engine.matcher import _stock_data, custom_sentence_data
@@ -156,14 +161,21 @@ class IntentCatalog:
         self.language = session_config.get("language") or "en-US"
         self.base = intents.base_language(self.language)
         self.env = IntentEngineConfig.from_env()
-        self.allowed = tuple(snapshot.get("allowed_intents") or self.env.allowed_intents)
-        self.blocked_domains = tuple(snapshot.get("blocked_domains") or self.env.blocked_domains)
+        # An empty recorded list is a choice of the session, not a missing value.
+        allowed, blocked = snapshot.get("allowed_intents"), snapshot.get("blocked_domains")
+        self.allowed = tuple(self.env.allowed_intents if allowed is None else allowed)
+        self.blocked_domains = tuple(self.env.blocked_domains if blocked is None else blocked)
         self.wake_words = tuple(snapshot.get("wake_words") or ())
         self.area = snapshot.get("area") or ""
         self.use_home_assistant = bool(snapshot.get("home_assistant"))
         self.client_tools = tuple(session_config.get("client_tools") or ())
 
-        self.learned = [LearnedIntent.from_row(r) for r in intents.active_suggestions(store, self.language)]
+        replaced = set(intents.session_dream_suggestion_ids(store, session_id)) if session_id else set()
+        self.learned = [
+            LearnedIntent.from_row(r)
+            for r in intents.active_suggestions(store, self.language)
+            if r["id"] not in replaced
+        ]
         file_tools = ClientToolMap.load(self.env.sentences_dir)
         self.tool_map = file_tools.with_entries(tool_entries(self.learned))
 
@@ -177,10 +189,10 @@ class IntentCatalog:
         # Tool calls of the learned intents, by name: proposing one again with the same call merges into it.
         self.learned_tools: dict[str, list[dict[str, Any]]] = {}
         for row in intents.suggestions_for(store, self.language, intents.USABLE_STATUSES):
-            if row["kind"] == "intent":
+            if row["kind"] == "intent" and row["id"] not in replaced:
                 self.learned_tools.setdefault(row["intent"], []).append(row["tool"] or {})
-        self.custom, self.stock = self.sentence_data(self.learned)
-        self._parsed: dict[int, tuple[dict[str, Any], Any]] = {}
+        self.custom = self.custom_data(self.learned)
+        self.stock = self.stock_data(self.learned)
         self._before: dict[str, Any] = {}
 
     def keep(self, name: str) -> bool:
@@ -189,25 +201,31 @@ class IntentCatalog:
             return self.tool_map.tool(name) in self.client_tools
         return self.use_home_assistant and name in self.allowed
 
-    def sentence_data(self, learned, extra_custom: str | None = None) -> tuple[dict | None, dict | None]:
-        """``(custom, stock)`` hassil data with ``learned`` merged in, as the live matcher builds it.
+    def custom_data(self, learned, extra_custom: str | None = None) -> dict | None:
+        """Custom hassil data with ``learned`` merged in, as the live matcher builds it.
 
         ``extra_custom`` keeps one more custom intent (a new intent under test).
         """
-        from examples.shared.intent_engine.learned import merge_learned, stock_learned
-        from examples.shared.intent_engine.matcher import _stock_data, custom_parse_data, stock_parse_data
+        from examples.shared.intent_engine.learned import merge_learned
+        from examples.shared.intent_engine.matcher import custom_parse_data
 
         merged, _ = merge_learned(self.files or {}, learned, add_intents=True)
-        custom = custom_parse_data(merged, self.language, lambda name: self.keep(name) or name == extra_custom)
-        stock = None
-        if self.use_home_assistant and (data := _stock_data(self.language)):
-            stock, _ = merge_learned(
-                stock_parse_data(data, self.allowed),
-                stock_learned(self.files, learned),
-                add_intents=False,
-                home_assistant=True,
-            )
-        return custom, stock
+        return custom_parse_data(merged, self.language, lambda name: self.keep(name) or name == extra_custom)
+
+    def stock_data(self, learned) -> dict | None:
+        """Stock hassil data with ``learned`` merged in, as the live matcher builds it (None without Home Assistant)."""
+        from examples.shared.intent_engine.learned import merge_learned, stock_learned
+        from examples.shared.intent_engine.matcher import _stock_data, stock_parse_data
+
+        if not (self.use_home_assistant and (data := _stock_data(self.language))):
+            return None
+        stock, _ = merge_learned(
+            stock_parse_data(data, self.allowed),
+            stock_learned(self.files, learned),
+            add_intents=False,
+            home_assistant=True,
+        )
+        return stock
 
     @property
     def available(self) -> bool:
@@ -358,30 +376,39 @@ class IntentCatalog:
 
         return normalize_text(text, self.language, self.wake_words)
 
-    def _intents(self, data: dict[str, Any]):
-        """``data`` parsed by hassil, once per data object."""
+    @staticmethod
+    def parse(data: dict[str, Any] | None):
+        """Parsed hassil ``Intents`` of sentence data (None for no data or data that does not parse)."""
         from hassil import Intents
 
-        cached = self._parsed.get(id(data))
-        if cached is None or cached[0] is not data:
-            cached = self._parsed[id(data)] = (data, Intents.from_dict(data))
-        return cached[1]
+        if not data:
+            return None
+        try:
+            return Intents.from_dict(data)
+        except Exception as exc:  # hassil raises several parse error types
+            logger.debug(f"dream intents: sentence data does not parse ({type(exc).__name__}: {exc})")
+            return None
 
-    def recognize(self, text: str, *, custom: dict | None = None, stock: dict | None = None):
-        """``(intent name, slots, learned id)`` for ``text`` through custom then stock data, or None."""
+    @cached_property
+    def parsed(self):
+        """``(custom, stock)`` parsed once for the whole job."""
+        return self.parse(self.custom), self.parse(self.stock)
+
+    def recognize(self, text: str, sets=None):
+        """``(intent name, slots, learned id)`` for ``text`` through parsed ``(custom, stock)`` sets, or None."""
         from hassil import recognize_best
 
         from examples.shared.intent_engine.learned import LEARNED_ID_KEY
         from examples.shared.intent_engine.matcher import _EMPTY_SLOT_LISTS
 
         context = {"area": {"value": self.area, "text": self.area}} if self.area else None
-        for data in (custom or self.custom, stock or self.stock):
-            if not data:
+        for parsed in sets or self.parsed:
+            if parsed is None:
                 continue
             try:
                 result = recognize_best(
                     text,
-                    self._intents(data),
+                    parsed,
                     slot_lists=self.slot_lists or _EMPTY_SLOT_LISTS,
                     intent_context=context,
                     language=self.base,
@@ -401,8 +428,13 @@ class IntentCatalog:
         from examples.shared.intent_engine.targets import ClientToolMap
 
         result = Check()
-        extra = candidate.intent if candidate.kind == "intent" else None
-        custom, stock = self.sentence_data([*self.learned, candidate], extra_custom=extra)
+        # Only the set that takes the candidate is rebuilt and parsed again.
+        learned = [*self.learned, candidate]
+        if candidate.kind == "sentence" and self.stock is not None and self.owner(candidate.intent) is self.stock:
+            sets = (self.parsed[0], self.parse(self.stock_data(learned)))
+        else:
+            extra = candidate.intent if candidate.kind == "intent" else None
+            sets = (self.parse(self.custom_data(learned, extra_custom=extra)), self.parsed[1])
         if candidate.kind == "intent":
             tool_map = self.tool_map.with_entries({candidate.intent: candidate.tool or {}})
         else:
@@ -422,7 +454,7 @@ class IntentCatalog:
             if before is not None:
                 result.notes.append(f"turn {turn['idx']} already matches {before[0]}")
                 continue
-            after = self.recognize(text, custom=custom, stock=stock)
+            after = self.recognize(text, sets)
             if after is None or after[0] != candidate.intent or after[2] != _CANDIDATE_ID:
                 result.notes.append(f"turn {turn['idx']} does not match")
                 continue
@@ -752,7 +784,7 @@ def learn_intents(ctx, session_id: str, session_config: dict[str, Any], turns, g
     if not missed:
         intents.retract_session_suggestions(ctx.store, session_id)
         return {"intents_skipped": "no missed turn"}
-    catalog = IntentCatalog(ctx.store, session_config, cfg)
+    catalog = IntentCatalog(ctx.store, session_config, cfg, session_id=session_id)
     if not catalog.available:
         intents.retract_session_suggestions(ctx.store, session_id)
         return {"intents_skipped": "intent engine off or no sentences for the session language"}
@@ -808,7 +840,7 @@ def correction_problems(
         if response is not None and (not response.strip() or not is_local_template(response)):
             problems.append("response is empty or not a slots-only template")
     candidate = LearnedIntent.from_row({**row, "sentences": sentences if sentences is not None else row["sentences"]})
-    home_assistant = row["kind"] == "sentence" and bool(stock_learned(files, [candidate]))
+    home_assistant = row["kind"] == "sentence" and bool(stock_learned(files, [*learned, candidate]))
     if home_assistant:
         data = stock
     elif row["kind"] == "sentence":

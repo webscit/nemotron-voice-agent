@@ -25,7 +25,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from hassil.expression import Group, ListReference, RuleReference
+from hassil.expression import Alternative, Group, ListReference, RuleReference
 from hassil.parse_expression import parse_sentence
 from loguru import logger
 
@@ -33,6 +33,8 @@ LEARNED_ID_KEY = "learned_id"
 # Synced from Home Assistant at session start, not declared in the sentence files.
 # They are also the slots that tell Home Assistant which entities a command targets.
 HOME_ASSISTANT_LISTS = frozenset({"name", "area", "floor"})
+# Bounds the target-slot combinations enumerated per template.
+_MAX_COMBINATIONS = 64
 # Stock block keys a learned copy inherits.
 _INHERITED_KEYS = ("requires_context", "excludes_context", "response")
 
@@ -127,57 +129,99 @@ def sentence_problems(template: str, data: dict[str, Any], *, extra_lists: Itera
     return problems
 
 
-def _stock_shape(sentence: str, rules: dict[str, str]) -> tuple[frozenset[str], set[str]] | None:
-    """``(target slots, all slots)`` of a template, or None when it does not parse."""
+def target_combinations(template: str, rules: dict[str, str]) -> set[frozenset[str]] | None:
+    """The sets of target slots (``{name}``, ``{area}``, ``{floor}``) the variants of a template fill.
+
+    ``"allume {name} [dans {area}]"`` gives ``{{name}, {name, area}}``. None when the
+    template does not parse.
+    """
+    parsed: dict[str, Any] = {}
+
+    def parse(text: str):
+        if text not in parsed:
+            parsed[text] = parse_sentence(text).expression
+        return parsed[text]
+
+    def walk(item, seen: frozenset[str]) -> set[frozenset[str]]:
+        if isinstance(item, ListReference):
+            return {frozenset({item.slot_name}) & HOME_ASSISTANT_LISTS}
+        if isinstance(item, RuleReference):
+            if item.rule_name in seen or item.rule_name not in rules:
+                return {frozenset()}
+            return walk(parse(rules[item.rule_name]), seen | {item.rule_name})
+        if isinstance(item, Alternative):
+            return {combo for child in item.items for combo in walk(child, seen)}
+        if isinstance(item, Group):  # sequence or permutation: every item
+            combos = {frozenset()}
+            for child in item.items:
+                combos = {a | b for a in combos for b in walk(child, seen)}
+                if len(combos) > _MAX_COMBINATIONS:
+                    break
+            return combos
+        return {frozenset()}
+
+    try:
+        return walk(parse(template), frozenset())
+    except Exception:  # hassil raises several parse error types
+        return None
+
+
+def _fits(item: LearnedIntent, sentence: str, block: dict[str, Any], rules: dict[str, str]) -> set[frozenset[str]]:
+    """The target-slot combinations of a learned sentence that a stock block also takes (empty: no fit).
+
+    A variant fits when a variant of one of the block's sentences fills the same
+    target slots, and every slot the block fixes is fixed to the same value by the
+    suggestion or filled by the sentence.
+    """
+    mine = target_combinations(sentence, rules)
+    if not mine:
+        return set()
     try:
         _, _, slots = sentence_references(sentence, rules)
     except ValueError:
-        return None
-    return frozenset(slots & HOME_ASSISTANT_LISTS), slots
-
-
-def _fits(item: LearnedIntent, sentence: str, block: dict[str, Any], rules: dict[str, str]) -> bool:
-    """Whether a learned sentence has the shape of a stock block.
-
-    Same target slots, and every slot the block fixes is fixed to the same value by
-    the suggestion or filled by the sentence.
-    """
-    mine = _stock_shape(sentence, rules)
-    theirs = [_stock_shape(s, rules) for s in block.get("sentences") or []]
-    if mine is None or not theirs or theirs[0] is None:
-        return False
-    if mine[0] != theirs[0][0]:
-        return False
+        return set()
     for key, value in (block.get("slots") or {}).items():
-        if key in mine[1]:
+        if key in slots:
             continue
         if key not in item.slots or str(item.slots[key]).casefold() != str(value).casefold():
-            return False
-    return True
+            return set()
+    theirs: set[frozenset[str]] = set()
+    for template in block.get("sentences") or []:
+        theirs |= target_combinations(template, rules) or set()
+    return mine & theirs
 
 
 def stock_blocks(item: LearnedIntent, body: dict[str, Any], data: dict[str, Any]) -> tuple[list[dict], list[str]]:
     """Data blocks of a learned sentence for a stock Home Assistant intent, and the sentences that fit none.
 
-    Each stock block of the intent with the same shape gets a copy of the
-    fitting sentences, inheriting its fixed slots, context constraints and
-    response. A sentence without a target (no ``{name}``, ``{area}`` or ``{floor}``)
-    only fits the blocks that take the area from the satellite context.
+    Each stock block taking one of a sentence's shapes gets a copy of it,
+    inheriting the block's fixed slots, context constraints and response. A
+    sentence fits when the blocks take all its shapes: ``{name} [dans {area}]``
+    needs a ``{name}`` block and a ``{name}``+``{area}`` block. A sentence without
+    a target (no ``{name}``, ``{area}`` or ``{floor}``) only fits the blocks that
+    take the area from the satellite context.
     """
     rules = data.get("expansion_rules") or {}
-    blocks = []
-    fitted: set[str] = set()
+    covered: dict[str, set[frozenset[str]]] = {s: set() for s in item.sentences}
+    fits: list[tuple[dict[str, Any], list[str]]] = []
     for stock in body.get("data") or []:
-        sentences = [s for s in item.sentences if _fits(item, s, stock, rules)]
+        sentences = []
+        for sentence in item.sentences:
+            if shapes := _fits(item, sentence, stock, rules):
+                covered[sentence] |= shapes
+                sentences.append(sentence)
+        fits.append((stock, sentences))
+    misfits = [s for s in item.sentences if not covered[s] or covered[s] != target_combinations(s, rules)]
+    blocks = []
+    for stock, sentences in fits:
+        sentences = [s for s in sentences if s not in misfits]
         if not sentences:
             continue
-        fitted.update(sentences)
         block = {key: copy.deepcopy(stock[key]) for key in _INHERITED_KEYS if key in stock}
         block["sentences"] = sentences
         block["slots"] = {**(stock.get("slots") or {}), **item.slots}
         block["metadata"] = {**(stock.get("metadata") or {}), LEARNED_ID_KEY: item.id}
         blocks.append(block)
-    misfits = [s for s in item.sentences if s not in fitted]
     return blocks, misfits
 
 

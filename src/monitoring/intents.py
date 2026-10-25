@@ -25,6 +25,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from monitoring import schema
 from monitoring.store import SessionStore
@@ -43,7 +44,11 @@ def _rows(store: SessionStore, stmt) -> list[dict[str, Any]]:
 
 
 def base_language(code: str | None) -> str:
-    """``fr-FR`` -> ``fr``."""
+    """``fr-FR`` -> ``fr``.
+
+    Same as ``intent_engine.matcher.base_language`` (a test keeps them equal);
+    defined here so the store does not import the intent engine and pipecat.
+    """
     return (code or "").split("-")[0].strip().lower()
 
 
@@ -155,14 +160,10 @@ def _set(conn, suggestion_id: int, **values: Any) -> None:
     )
 
 
-def retract_session_suggestions(store: SessionStore, session_id: str) -> int:
-    """Undo a previous ``dream`` run over ``session_id`` (before a re-run).
-
-    The session's evidence is removed from unreviewed dream suggestions; those left
-    without evidence are superseded. Returns how many were superseded.
-    """
+def session_dream_suggestion_ids(store: SessionStore, session_id: str) -> list[int]:
+    """Unreviewed dream suggestions with evidence from ``session_id``: what a re-run replaces."""
     s, e = schema.intent_suggestions, schema.intent_evidence
-    candidates = _rows(
+    rows = _rows(
         store,
         select(s.c.id)
         .join(e, e.c.suggestion_id == s.c.id)
@@ -174,13 +175,23 @@ def retract_session_suggestions(store: SessionStore, session_id: str) -> int:
         )
         .distinct(),
     )
+    return [row["id"] for row in rows]
+
+
+def retract_session_suggestions(store: SessionStore, session_id: str) -> int:
+    """Undo a previous ``dream`` run over ``session_id`` (before a re-run).
+
+    The session's evidence is removed from unreviewed dream suggestions; those left
+    without evidence are superseded. Returns how many were superseded.
+    """
+    e = schema.intent_evidence
     retracted = 0
     with store.engine.begin() as conn:
-        for row in candidates:
-            conn.execute(delete(e).where(e.c.suggestion_id == row["id"], e.c.session_id == session_id))
-            left = conn.execute(select(func.count()).select_from(e).where(e.c.suggestion_id == row["id"])).scalar()
+        for suggestion_id in session_dream_suggestion_ids(store, session_id):
+            conn.execute(delete(e).where(e.c.suggestion_id == suggestion_id, e.c.session_id == session_id))
+            left = conn.execute(select(func.count()).select_from(e).where(e.c.suggestion_id == suggestion_id)).scalar()
             if not left:
-                _set(conn, row["id"], status="superseded", superseded_by=None)
+                _set(conn, suggestion_id, status="superseded", superseded_by=None)
                 retracted += 1
     return retracted
 
@@ -314,22 +325,61 @@ def open_suggestion_count(store: SessionStore) -> int:
         ).scalar_one()
 
 
+def refresh_live_uses(store: SessionStore) -> None:
+    """Count the ``intent_engine`` events recorded since the last refresh into ``live_uses``.
+
+    Only events after the ``intent_use_scan`` watermark are read (a primary-key
+    range). Concurrent refreshes cannot count an event twice: the watermark only
+    moves from the value this refresh read.
+    """
+    ev, scan, s = schema.events, schema.intent_use_scan, schema.intent_suggestions
+    try:
+        with store.engine.begin() as conn:
+            if conn.execute(select(scan.c.id).where(scan.c.id == 1)).first() is None:
+                conn.execute(insert(scan).values(id=1, last_event_id=0))
+    except IntegrityError:  # another refresh created it
+        pass
+    with store.engine.begin() as conn:
+        last = conn.execute(select(scan.c.last_event_id).where(scan.c.id == 1)).scalar_one()
+        newest = conn.execute(select(func.max(ev.c.id)).where(ev.c.id > last)).scalar()
+        if newest is None:
+            return
+        moved = conn.execute(
+            update(scan).where(scan.c.id == 1, scan.c.last_event_id == last).values(last_event_id=newest)
+        ).rowcount
+        if not moved:
+            return
+        learned = ev.c.data["learned"].as_integer()
+        stmt = (
+            select(learned, func.count())
+            .where(
+                ev.c.id > last,
+                ev.c.id <= newest,
+                ev.c.kind == INTENT_EVENT,
+                ev.c.data["handled_by"].as_string() == "intent",
+                learned.is_not(None),
+            )
+            .group_by(learned)
+        )
+        for learned_id, count in conn.execute(stmt).all():
+            conn.execute(
+                update(s)
+                .where(s.c.id == int(learned_id))
+                .values(live_uses=func.coalesce(s.c.live_uses, 0) + int(count))
+            )
+
+
 def live_uses(store: SessionStore, suggestion_ids: list[int]) -> Counter:
     """How many live turns each suggestion answered (intent engine events tagged ``learned``)."""
-    wanted = set(suggestion_ids)
     uses: Counter = Counter()
-    if not wanted:
+    if not suggestion_ids:
         return uses
-    ev = schema.events
-    learned = ev.c.data["learned"].as_integer()
-    stmt = (
-        select(learned, func.count())
-        .where(ev.c.kind == INTENT_EVENT, ev.c.data["handled_by"].as_string() == "intent", learned.in_(wanted))
-        .group_by(learned)
-    )
+    refresh_live_uses(store)
+    s = schema.intent_suggestions
     with store.engine.connect() as conn:
-        for learned_id, count in conn.execute(stmt):
-            uses[int(learned_id)] = int(count)
+        for suggestion_id, count in conn.execute(select(s.c.id, s.c.live_uses).where(s.c.id.in_(suggestion_ids))):
+            if count:
+                uses[suggestion_id] = count
     return uses
 
 

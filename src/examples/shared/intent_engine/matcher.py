@@ -157,10 +157,26 @@ def _load_stock(
 
     Pruning before parsing (instead of filtering matches) keeps an excluded
     wildcard intent from winning over the sentence the user actually said.
-    Learned sentences of the kept intents are merged in.
+    Learned sentences of the kept intents are merged in. Parsing the stock set
+    is slow, so the result is cached per learned suggestion ids: an active
+    suggestion's sentences do not change (a correction is a new suggestion).
     """
+    learned = [item for item in learned if item.intent in allowed_intents]
     if not learned:
         return _load_stock_cached(language, allowed_intents)
+    key = (language, allowed_intents, tuple(sorted(item.id for item in learned)))
+    if key not in _STOCK_LEARNED_CACHE:
+        while len(_STOCK_LEARNED_CACHE) >= _STOCK_LEARNED_CACHE_SIZE:
+            _STOCK_LEARNED_CACHE.pop(next(iter(_STOCK_LEARNED_CACHE)))
+        _STOCK_LEARNED_CACHE[key] = _parse_stock(language, allowed_intents, learned)
+    return _STOCK_LEARNED_CACHE[key]
+
+
+_STOCK_LEARNED_CACHE: dict[tuple, _SentenceSet | None] = {}
+_STOCK_LEARNED_CACHE_SIZE = 4
+
+
+def _parse_stock(language: str, allowed_intents: tuple[str, ...], learned: Sequence[LearnedIntent]):
     data = _stock_data(language)
     if not data:
         return None
@@ -255,6 +271,9 @@ def _load_custom(
     try:
         parsed = Intents.from_dict(data)
     except Exception as exc:  # hassil raises several parse error types
+        if learned:  # a bad learned sentence must not disable the custom intents
+            logger.warning(f"Intent engine: learned sentences for {language} failed to parse ({exc}); ignoring them")
+            return _load_custom(files, language, keep)
         logger.warning(f"Intent engine: custom sentences for {language} failed to parse: {exc}")
         return None
     return _SentenceSet(intents=parsed, responses=responses.get("intents") or {}, errors=responses.get("errors") or {})
