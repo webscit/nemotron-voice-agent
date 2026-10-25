@@ -155,7 +155,10 @@ def test_parse_memories_tolerates_think_tags_and_prose():
 def test_dream_skips_sessions_without_speaker(stores, llm):
     store, artifacts = stores
     _session(store, "s1", llm.base_url)
-    assert _run_dream(store, artifacts, "s1") == {"skipped": "no speaker"}
+    progress = _run_dream(store, artifacts, "s1")
+    assert progress["skipped"] == "no speaker"
+    # The session did not run the intent engine: nothing to learn there either.
+    assert progress["intents_skipped"].startswith("intent engine off")
     assert llm.requests == []
 
 

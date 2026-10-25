@@ -372,3 +372,70 @@ memory_uses = Table(
     Column("ts", Float, nullable=False),
     Index("ix_memory_uses_session", "session_id"),
 )
+
+
+# ---------------------------------------------------------- learned intents
+# Sentences and intents the ``dream`` job learned from how people actually talk
+# (or a reviewer wrote). ``active`` rows are loaded by the live intent engine.
+# Rows are never deleted: rejecting and superseding are status changes.
+intent_suggestions = Table(
+    "intent_suggestions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    # sentence (new sentences for an existing intent) | intent (a new client-tool intent)
+    Column("kind", String(16), nullable=False),
+    # Base language code (``fr``).
+    Column("language", String(16), nullable=False),
+    Column("intent", String(128), nullable=False),
+    # hassil sentence templates.
+    Column("sentences", JSON, nullable=False),
+    # Fixed slot values of the sentences (``{"step": 10}``).
+    Column("slots", JSON),
+    # ``intent`` kind: the ``client_tools.yaml`` entry ({"tool", "arguments"}).
+    Column("tool", JSON),
+    # ``intent`` kind: the spoken response template.
+    Column("response", Text),
+    Column("confidence", Float),
+    # Every evidence utterance matches the sentences, with the slots the tool call used.
+    Column("validated", Boolean, nullable=False, default=False),
+    # {"matched_turns": [...], "notes": [...]}
+    Column("validation", JSON),
+    # proposed (waiting for review) | active (used live) | rejected | superseded
+    Column("status", String(16), nullable=False),
+    # ``dream:<model>`` or ``human:<name>``.
+    Column("source", String(256), nullable=False),
+    Column("source_version", String(256)),
+    Column("superseded_by", Integer),
+    Column("reviewed_by", String(256)),
+    Column("reviewed_at", Float),
+    # Live turns the suggestion answered, counted from ``intent_engine`` events (``intent_use_scan``).
+    # Nullable so ``_add_missing_columns`` can add it to a database created before it.
+    Column("live_uses", Integer, default=0),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Index("ix_intent_suggestions_language", "language", "status"),
+)
+
+# One row: the last ``events.id`` counted into ``intent_suggestions.live_uses``, so
+# each count only reads the events recorded since the previous one.
+intent_use_scan = Table(
+    "intent_use_scan",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("last_event_id", Integer, nullable=False),
+)
+
+intent_evidence = Table(
+    "intent_evidence",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("suggestion_id", Integer, nullable=False),
+    Column("session_id", String(64), nullable=False),
+    Column("turn_idx", Integer),
+    # What the person said (the best available transcript).
+    Column("text", Text),
+    # Tool calls the LLM made for that turn: [{"name", "arguments"}].
+    Column("tool_calls", JSON),
+    Index("ix_intent_evidence_suggestion", "suggestion_id"),
+    Index("ix_intent_evidence_session", "session_id"),
+)

@@ -14,15 +14,16 @@ import asyncio
 import re
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from monitoring import memories, schema, voice_id
+from monitoring import intents, memories, schema, voice_id
 from monitoring.config import MonitoringConfig
 from monitoring.jobs import JOB_REGISTRY
 from monitoring.jobs.reasr import live_source_name, reasr_endpoints, score_session
@@ -118,6 +119,16 @@ class MemoryReviewIn(BaseModel):
     action: str = Field(pattern="^(approve|correct|forget|restore)$")
     text: str | None = Field(None, max_length=500)
     person_id: str | None = None
+
+
+class IntentReviewIn(BaseModel):
+    """Review one learned intent suggestion: approve, correct, reject or restore."""
+
+    annotator: str
+    action: str = Field(pattern="^(approve|correct|reject|restore)$")
+    sentences: list[str] | None = Field(None, min_length=1, max_length=50)
+    intent: str | None = Field(None, max_length=64)
+    response: str | None = Field(None, max_length=300)
 
 
 def _turn_target(session_id: str, turn_idx: int) -> str:
@@ -574,6 +585,13 @@ class ReviewService:
                 "description": "Audit what the agent remembers about people: approve, correct or forget.",
                 "open": memories.open_memory_count(self.store),
             },
+            {
+                "id": "intents",
+                "title": "Intents",
+                "job": "dream",
+                "description": "Tune the intent engine to how people talk: approve learned sentences and intents.",
+                "open": intents.open_suggestion_count(self.store),
+            },
         ]
 
     # --------------------------------------------------------------- people
@@ -666,6 +684,65 @@ class ReviewService:
             person_id=payload.person_id,
         )
         return memories.attach_details(self.store, [row])[0]
+
+    # --------------------------------------------------------------- intents
+    def list_intents(self, **filters: Any) -> dict[str, Any]:
+        """Learned intent suggestions, the most recurrent first."""
+        return intents.list_suggestions(self.store, **filters)
+
+    def review_intent(self, suggestion_id: int, annotator: str, payload: IntentReviewIn) -> dict[str, Any]:
+        """Approve, correct, reject or restore a suggestion; corrected sentences are checked first."""
+        from monitoring.jobs.dream_intents import correction_problems
+
+        if payload.action == "correct":
+            row = intents.get_suggestion(self.store, suggestion_id)
+            if row is None:
+                raise KeyError(suggestion_id)
+            problems = correction_problems(self.store, row, payload.sentences, payload.intent, payload.response)
+            if problems:
+                raise ValueError("; ".join(problems))
+        row = intents.review_suggestion(
+            self.store,
+            suggestion_id,
+            payload.action,
+            reviewer=annotator,
+            sentences=payload.sentences,
+            intent=payload.intent,
+            response=payload.response,
+        )
+        return intents.attach_details(self.store, [row])[0]
+
+    def export_intents(self, language: str) -> str:
+        """Active suggestions as YAML for the sentence files and ``client_tools.yaml``."""
+        import yaml
+
+        from examples.shared.intent_engine.config import IntentEngineConfig
+        from examples.shared.intent_engine.matcher import custom_sentence_data
+
+        sentences_dir = IntentEngineConfig.from_env().sentences_dir
+        files = custom_sentence_data(sentences_dir, language) or {}
+        exported = intents.export_sentences(self.store, language, set(files.get("intents") or {}))
+        dump = {"allow_unicode": True, "sort_keys": False}
+        base = intents.base_language(language)
+        # The directory the engine loads, relative to the working directory (the repository root) when inside it.
+        try:
+            shown = sentences_dir.resolve().relative_to(Path.cwd().resolve())
+        except ValueError:
+            shown = sentences_dir
+        text = (
+            f"# Learned sentences for {base}: add to {shown / base}/\n"
+            + yaml.safe_dump(exported["sentences"], **dump)
+            + f"---\n# Learned client-tool intents: add to {shown / 'client_tools.yaml'}\n"
+            + yaml.safe_dump(exported["client_tools"], **dump)
+        )
+        if exported["home_assistant"]:
+            text += (
+                "---\n# Learned sentences for Home Assistant intents. Do not add them to a custom sentence file:\n"
+                "# a custom file defining a Home Assistant intent replaces its stock sentences. They stay in use\n"
+                "# from the monitoring database; contribute them to the home-assistant-intents project to keep them.\n"
+                + yaml.safe_dump({"language": base, "intents": exported["home_assistant"]}, **dump)
+            )
+        return text
 
 
 def create_review_router(
@@ -858,6 +935,30 @@ def create_review_router(
             return await run(service.review_memory, memory_id, annotator, payload)
         except KeyError:
             raise HTTPException(status_code=404, detail="memory not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @router.get("/intents")
+    async def list_intents(
+        status: str = Query("open", pattern="^(open|usable|all|proposed|active|rejected|superseded)$"),
+        language: str | None = Query(None, max_length=16),
+        kind: str | None = Query(None, pattern="^(sentence|intent)$"),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        return await run(service.list_intents, status=status, language=language, kind=kind, limit=limit, offset=offset)
+
+    @router.get("/intents/export", response_class=PlainTextResponse)
+    async def export_intents(language: str = Query(..., min_length=2, max_length=16)):
+        return PlainTextResponse(await run(service.export_intents, language), media_type="application/yaml")
+
+    @router.post("/intents/{suggestion_id}/review")
+    async def review_intent(suggestion_id: int, payload: IntentReviewIn):
+        annotator = check_annotator(payload.annotator)
+        try:
+            return await run(service.review_intent, suggestion_id, annotator, payload)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="suggestion not found") from None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 

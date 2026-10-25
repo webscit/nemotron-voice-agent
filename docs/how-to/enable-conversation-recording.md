@@ -4,7 +4,8 @@ Session recording stores every conversation of the multilingual assistant: its
 timeline, per-service metrics, transcripts, the exact LLM inputs (including
 images), and audio. You can then compare pipeline variants, and a background
 runner (the *dreamer*) post-processes past sessions while nobody is talking to
-the agent, for example to extract memories about the people it talks to.
+the agent, for example to extract memories about the people it talks to and
+to learn new intent-engine sentences.
 
 Recording has two parts, a hot path and a cold path:
 
@@ -67,6 +68,8 @@ characters. The recorder replaces any other value with a generated id.
 | `memories` | Facts about a person: text, category, confidence, `status` (`proposed`, `active`, `forgotten` or `superseded`), source, and review fields. Rows are never deleted. |
 | `memory_evidence` | The session, turn and quote that support each memory |
 | `memory_uses` | Which memories were injected into which live session |
+| `intent_suggestions` | Intent-engine sentences and intents learned by the `dream` job: kind (`sentence` or `intent`), language, intent, sentences, slots, tool, response, confidence, validation, `status` (`proposed`, `active`, `rejected` or `superseded`), source, and review fields. Rows are never deleted. |
+| `intent_evidence` | The session, turn, user text and LLM tool calls that support each intent suggestion |
 
 Images are never stored inline. Any `data:` image found in the LLM context or in a
 tool result is replaced by `{"type": "media_ref", "sha256": …}`, and the file is
@@ -319,6 +322,25 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   `origin=dreamer|conversation|manual`, and
   `POST /api/review/memories/<id>/review` accepts the actions above, including
   `"action": "restore"`.
+- **Intents.** Sentences and intents that the `dream` job learned from turns
+  the intent engine missed, the most recurrent first. Filter by **To review**,
+  **In use**, **Rejected**, or **All**, and by kind. You can **approve**,
+  **correct**, **reject**, or **restore** a suggestion, and **Export** the
+  active ones per language as sentence-file YAML. Approved suggestions apply to
+  new sessions. Refer to
+  [Learn Sentences From Conversations](configure-intent-engine.md#learn-sentences-from-conversations).
+
+  In the API, `GET /api/review/intents` accepts
+  `status=open|usable|all|proposed|active|rejected|superseded`,
+  `kind=sentence|intent`, `language`, `limit`, and `offset`. Its response
+  also lists in `languages` the languages that have active suggestions.
+  `POST /api/review/intents/<id>/review` accepts
+  `{"annotator", "action", "sentences", "intent", "response"}`, where `action`
+  is `approve`, `correct`, `reject`, or `restore`. A correction with invalid
+  sentences, for example a Home Assistant sentence that fits no stock sentence
+  shape, returns HTTP `422`. A review of a suggestion that another reviewer
+  changed meanwhile also returns HTTP `422` and asks you to reload. `GET /api/review/intents/export?language=fr`
+  returns the YAML export.
 - **ASR reference.** Every recorded user turn, with the ones where the live
   ASR and the reference model (Voxtral) disagree first.
   - Listen, then take the live (`1`) or reference (`2`) text, or edit it (`e`),
@@ -429,14 +451,17 @@ docker compose exec dreamer uv run python -m monitoring.transcripts_csv import /
 docker compose exec dreamer uv run python -m monitoring.jobs enqueue reasr <session_id> ...
 ```
 
-### `dream`: extract memories about people
+### `dream`: extract memories and learn intent sentences
+
+For each ended session, `dream` first extracts memories, and then learns
+intent-engine sentences.
 
 For each ended session attributed to a person, `dream` extracts durable facts
 about that person, such as their name, preferences, relationships, routines,
 events, and health information they shared. The job works as follows:
 
-- **Skipped sessions.** A session without an attributed person is marked done
-  with `skipped` progress. Attribute it on the session page to run the job again.
+- **Skipped sessions.** A session without an attributed person gets `skipped`
+  progress for memories. Attribute it on the session page to run the job again.
 - **Transcript.** For each user turn, the job uses the human reference, then
   the `reasr` reference model transcript, then the live ASR text.
 - **LLM.** By default, the job calls the session's own LLM (the `base_url` and
@@ -459,6 +484,19 @@ events, and health information they shared. The job works as follows:
 The `dream` section of
 [`src/monitoring/jobs/dreamer.yaml`](../../src/monitoring/jobs/dreamer.yaml)
 also sets `reasoning` and `temperature`.
+
+For sessions that ran the intent engine (`INTENT_ENGINE_ENABLED=true`), the job
+then learns from the turns that the engine missed. This part runs even when no
+person is attributed to the session. It proposes new sentences for existing
+intents and new client-tool intents, checks each proposal with hassil against
+what the person said, and stores the result in `intent_suggestions` for review
+in the **Intents** activity. The job progress records `intents_written` and the
+`intents` counts (`created`, `merged`, `rejected_before`, `active`, `dropped`,
+`retracted`, and `notes`), or `intents_skipped` with the reason. The
+`dream.intents` section of `dreamer.yaml` controls this part. By default,
+`auto_use_threshold` is `null`, so every suggestion waits for approval, and new
+intents always wait. For the checks, settings, and review, refer to
+[Learn Sentences From Conversations](configure-intent-engine.md#learn-sentences-from-conversations).
 
 ### Add a job
 

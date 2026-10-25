@@ -257,6 +257,44 @@ export interface MemoryDetail extends MemoryRow {
   used_in_replies: number;
 }
 
+// ---- Learned intents ----
+
+export type IntentSuggestionStatus = "proposed" | "active" | "rejected" | "superseded";
+export type IntentSuggestionFilter = "open" | "usable" | "all" | IntentSuggestionStatus;
+/** ``sentence``: new sentences for an existing intent; ``intent``: a new client-tool intent. */
+export type IntentSuggestionKind = "sentence" | "intent";
+
+export interface IntentEvidence {
+  session_id: string;
+  turn_idx: number | null;
+  text: string | null;
+  tool_calls: { name: string; arguments: Record<string, unknown> }[] | null;
+  audio: { key: string; duration_secs: number | null }[];
+}
+
+export interface IntentSuggestion {
+  id: number;
+  kind: IntentSuggestionKind;
+  language: string;
+  intent: string;
+  sentences: string[];
+  slots: Record<string, unknown> | null;
+  tool: { tool: string; arguments: Record<string, unknown> } | null;
+  response: string | null;
+  confidence: number | null;
+  validated: boolean;
+  validation: { matched_turns?: number[]; notes?: string[] } | null;
+  status: IntentSuggestionStatus;
+  source: string;
+  reviewed_by: string | null;
+  reviewed_at: number | null;
+  created_at: number;
+  occurrences: number;
+  sessions: number;
+  live_uses: number;
+  evidence: IntentEvidence[];
+}
+
 export interface AsrQueueItem {
   session_id: string;
   turn_idx: number;
@@ -572,6 +610,26 @@ export function useMemories(
   });
 }
 
+export function useIntentSuggestions(
+  status: IntentSuggestionFilter,
+  kind: IntentSuggestionKind | "",
+  page: number,
+  pageSize = 20
+) {
+  const params = new URLSearchParams({ status, limit: String(pageSize), offset: String(page * pageSize) });
+  if (kind) params.set("kind", kind);
+  return useQuery({
+    queryKey: ["review", "intents", status, kind, page, pageSize],
+    queryFn: () => request<{ total: number; suggestions: IntentSuggestion[]; languages: string[] }>(`/intents?${params}`),
+    ...live,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function intentExportUrl(language: string): string {
+  return `${BASE}/intents/export?language=${encodeURIComponent(language)}`;
+}
+
 // ---- Mutations ----
 
 export function useSaveReferences() {
@@ -675,6 +733,26 @@ export function useReviewMemory() {
         action: input.action,
         text: input.text,
         person_id: input.personId,
+      })
+  );
+}
+
+export function useReviewIntent() {
+  return useReviewMutation(
+    (input: {
+      id: number;
+      annotator: string;
+      action: "approve" | "correct" | "reject" | "restore";
+      sentences?: string[];
+      intent?: string;
+      response?: string;
+    }) =>
+      postJson<IntentSuggestion>(`/intents/${input.id}/review`, {
+        annotator: input.annotator,
+        action: input.action,
+        sentences: input.sentences,
+        intent: input.intent,
+        response: input.response,
       })
   );
 }

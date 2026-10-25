@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
@@ -39,7 +40,8 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from examples.shared.intent_engine.config import ALLOWED_STATE_RESPONSE_KEYS, IntentEngineConfig
-from examples.shared.intent_engine.matcher import IntentMatch, IntentMatcher, base_language
+from examples.shared.intent_engine.learned import LearnedIntent, tool_entries
+from examples.shared.intent_engine.matcher import IntentMatch, IntentMatcher, base_language, preload_stock
 from examples.shared.intent_engine.targets import (
     ClientToolMap,
     ClientToolTarget,
@@ -200,7 +202,7 @@ class IntentEngineProcessor(FrameProcessor):
         target, reason = self._route(match)
         if target is None:
             logger.info(f"Intent engine: match skipped for '{text}'; {reason}.")
-            self._record("llm", intent=match.name, reason=reason)
+            self._record("llm", intent=match.name, reason=reason, **self._learned(match))
             return False
 
         request = IntentRequest(
@@ -210,7 +212,7 @@ class IntentEngineProcessor(FrameProcessor):
         if self._config.dry_run:
             would_send = target.build_body(request) if target is self._home_assistant else target.build_call(request)
             logger.info(f"Intent engine dry run: {match.name} -> {target.name} would send {would_send}")
-            self._record("llm", intent=match.name, target=target.name, reason="dry_run")
+            self._record("llm", intent=match.name, target=target.name, reason="dry_run", **self._learned(match))
             return False
 
         self._turn_task = self.create_task(self._run_turn(frame, match, target, request))
@@ -244,7 +246,13 @@ class IntentEngineProcessor(FrameProcessor):
         self._metric(METRIC_TARGET_SECS, time.perf_counter() - started)
 
         logger.info(f"Intent engine: {match.name} via {target.name} -> {response.response_type}")
-        self._record("intent", intent=match.name, target=target.name, response_type=response.response_type)
+        self._record(
+            "intent",
+            intent=match.name,
+            target=target.name,
+            response_type=response.response_type,
+            **self._learned(match),
+        )
         if not response.speech:
             return
         await self.push_frame(LLMFullResponseStartFrame())
@@ -260,6 +268,11 @@ class IntentEngineProcessor(FrameProcessor):
         self._turn_task = None
 
     # -------------------------------------------------------------- telemetry
+    @staticmethod
+    def _learned(match: IntentMatch) -> dict[str, Any]:
+        """``learned=<suggestion id>`` when a learned sentence matched."""
+        return {"learned": match.learned_id} if match.learned_id is not None else {}
+
     def _record(self, handled_by: str, **data: Any) -> None:
         if self._recorder:
             self._recorder.event(EVENT_KIND, processor=_PROCESSOR_NAME, handled_by=handled_by, **data)
@@ -267,6 +280,12 @@ class IntentEngineProcessor(FrameProcessor):
     def _metric(self, name: str, value: float) -> None:
         if self._recorder:
             self._recorder.metric(name, value, processor=_PROCESSOR_NAME)
+
+
+async def preload_intent_engine(config: IntentEngineConfig, language: str, learned: Sequence[LearnedIntent]) -> None:
+    """Parse the stock sentences off the event loop, so ``build_intent_engine`` does not block it."""
+    if config.enabled and config.home_assistant_configured:
+        await asyncio.to_thread(preload_stock, language, config.allowed_intents, config.sentences_dir, learned)
 
 
 def build_intent_engine(
@@ -278,15 +297,19 @@ def build_intent_engine(
     client_tool_names: tuple[str, ...] = (),
     client_tool_timeout_secs: float = 5.0,
     recorder: TurnTelemetry | None = None,
+    learned: tuple[LearnedIntent, ...] | list[LearnedIntent] = (),
 ) -> IntentEngineProcessor | None:
-    """Return the engine for a session, or None when it is off or has no sentences."""
+    """Return the engine for a session, or None when it is off or has no sentences.
+
+    ``learned`` are the approved suggestions of the ``dream`` job for the session language.
+    """
     if not config.enabled:
         return None
     use_home_assistant = config.home_assistant_configured
     if not use_home_assistant:
         logger.info("Intent engine: HOME_ASSISTANT_URL or HOME_ASSISTANT_TOKEN is unset; client tools only")
 
-    tool_map = ClientToolMap.load(config.sentences_dir)
+    tool_map = ClientToolMap.load(config.sentences_dir).with_entries(tool_entries(learned))
     declared = set(client_tool_names)
 
     def keep_custom_intent(name: str) -> bool:
@@ -303,6 +326,7 @@ def build_intent_engine(
         area=config.area,
         keep_custom_intent=keep_custom_intent,
         load_stock=use_home_assistant,
+        learned=learned,
     )
     if not matcher.has_data:
         logger.info(f"Intent engine: no active sentences for {language}; every turn goes to the LLM")
@@ -329,7 +353,8 @@ def build_intent_engine(
     logger.info(
         f"Intent engine enabled: language={language}, home_assistant={use_home_assistant}, "
         f"area={config.area or '(none)'}, dry_run={config.dry_run}, "
-        f"timeout={config.timeout_secs:.1f}s, custom_intents={matcher.custom_intent_names or '(none)'}"
+        f"timeout={config.timeout_secs:.1f}s, custom_intents={matcher.custom_intent_names or '(none)'}, "
+        f"learned={len(learned)}"
     )
     return IntentEngineProcessor(
         config=config,
