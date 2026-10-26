@@ -43,12 +43,14 @@ from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     FunctionCallsStartedFrame,
+    InputAudioRawFrame,
     InputImageRawFrame,
     InterruptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMTextFrame,
     MetricsFrame,
+    OutputAudioRawFrame,
     TranscriptionFrame,
     UserImageRawFrame,
     UserStartedSpeakingFrame,
@@ -57,6 +59,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import LLMService
 from pipecat.turns.user_start.transcription_user_turn_start_strategy import TranscriptionUserTurnStartStrategy
 
@@ -189,6 +192,29 @@ class _VideoChunkWriter:
         self._artifacts.commit(self._key)
         self._container = None
         return [("__video_chunk__", {"artifact_key": self._key, "ts": self._opened_at})]
+
+
+class _ConversationAudioBuffer(AudioBufferProcessor):
+    """``AudioBufferProcessor`` that notes when its first sample was captured.
+
+    The recording starts with the first audio frame after ``start_recording``,
+    not when the recorder was created: ``first_audio_at`` dates ``conversation.wav``.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.first_audio_at: float | None = None
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if (
+            self.first_audio_at is None
+            and isinstance(frame, (InputAudioRawFrame, OutputAudioRawFrame))
+            and frame.sample_rate
+            and self.has_audio()
+        ):
+            # The frame just buffered ends now.
+            self.first_audio_at = time.time() - len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
 
 
 class _StereoWavWriter:
@@ -789,7 +815,7 @@ class SessionRecorder:
         turns, stereo = self.settings.record_audio_turns, self.settings.record_audio_stereo
         if not turns and not stereo:
             return None
-        processor = AudioBufferProcessor(
+        processor = _ConversationAudioBuffer(
             sample_rate=RECORDING_SAMPLE_RATE,
             num_channels=2 if stereo else 1,
             buffer_size=RECORDING_SAMPLE_RATE * 2 * _STEREO_CHUNK_SECS if stereo else 0,
@@ -920,7 +946,8 @@ class SessionRecorder:
                     {
                         "session_id": self.session_id,
                         "turn_idx": None,
-                        "ts": self.started_at,
+                        # When its first sample was captured.
+                        "ts": (self._audio.first_audio_at if self._audio else None) or self.started_at,
                         "modality": "audio_conversation",
                         "source": "pipeline",
                         "sha256": media_utils.sha256(self._stereo.key.encode()),

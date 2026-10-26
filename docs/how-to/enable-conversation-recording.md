@@ -59,7 +59,7 @@ characters. The recorder replaces any other value with a generated id.
 | `events` | Timeline: VAD and bot speaking, interruptions, final ASR, function calls (requested, sent, result, cancelled), latency breakdowns, errors |
 | `metrics` | Flat numeric samples: `ttfb`, `processing`, `llm_usage.*`, `tts_usage`, `user_bot_latency`, `first_bot_speech_latency`, `turn_duration`, … Zero-valued `ttfb` and `processing` samples, which Pipecat emits at startup, are not stored; plus the client's own `client.*` metrics (processor `client`) | |
 | `llm_calls` | The full LLM input, tools, output, function calls, TTFT, tokens, and `n_images` / `image_pixels` for each call of the conversation LLM |
-| `media` | Audio clips, images and video, deduplicated by SHA-256. `source` is `context`, `tool:<name>`, `user_image` or `camera:<track>`. |
+| `media` | Audio clips, images and video, deduplicated by SHA-256. `source` is `context`, `tool:<name>`, `user_image` or `camera:<track>`. The `ts` of an audio clip is the time of its first sample. For `conversation.wav`, that is when the first user or bot audio reached the recorder, usually the greeting, and not when the session started. |
 | `annotations` | Job outputs and human labels: `(target, source, kind, value)` |
 | `jobs` | Post-processing queue with checkpointed `progress` |
 | `people` | People the agent talks to: name and an `archived` flag |
