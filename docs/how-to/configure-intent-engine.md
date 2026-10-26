@@ -141,6 +141,8 @@ A server feature can ask a follow-up question in its reply. Only the next user t
 
 - The custom sentences are matched with the hassil intent context `dialog: <context>`. A sentence block with `requires_context: {dialog: <context>}` matches only while such a question is pending. Messaging uses `dialog: messaging` for its yes, no, and change sentences, so a plain "oui" never matches outside the dialog.
 - A question can capture the next turn's own words as a slot, for example a dictated message. The turn is then taken word for word, even when it resembles another command, unless it matches one of the intents that the question accepts, such as "annule."
+- A question can let a short answer open a longer turn. When the turn starts with one of these answers, such as "Oui. Lis mes messages.", the leading answer counts and the rest is ignored. A turn with conflicting answers, such as "oui" and "non", matches nothing.
+- A question can take the next turn as more of the user's words when the user starts talking before the agent finishes asking it. Messaging uses this to add the rest of a dictated message that turn detection cut off.
 - When the next turn matches nothing, the engine asks the question again once, and it stays open for one more turn. After a second miss, the turn goes to the LLM.
 
 A `{message}`-style wildcard slot returns the user's original words with their punctuation, even though hassil matches without punctuation. The following example from `fr/messaging.yaml` matches only during the messaging dialog.

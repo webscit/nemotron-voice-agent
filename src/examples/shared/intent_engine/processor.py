@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     Frame,
@@ -70,6 +71,8 @@ METRIC_MATCH_SECS = "intent_match_secs"
 METRIC_TARGET_SECS = "intent_target_secs"
 _PROCESSOR_NAME = "IntentEngine"
 _SYNC_RETRY_SECS = 30.0
+# Longest leading answer looked for in a longer turn ("non ne l'envoie pas").
+_MAX_ANSWER_WORDS = 5
 
 
 class TurnTelemetry(Protocol):
@@ -116,6 +119,8 @@ class IntentEngineProcessor(FrameProcessor):
         self._recorder = recorder
         # The question the last reply asked, answered by the next user turn.
         self._dialog: FollowUp | None = None
+        # Whether the bot finished speaking since the question was asked.
+        self._question_heard = False
         self._turn_task: asyncio.Task | None = None
         self._sync_task: asyncio.Task | None = None
         self._last_sync_attempt = 0.0
@@ -127,6 +132,11 @@ class IntentEngineProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
             self._start_sync()
             return
+        if isinstance(frame, InterruptionFrame) and self._dialog is not None and not self._question_heard:
+            # The user went on talking before the question was heard to the end.
+            self._dialog = replace(self._dialog, interrupted=True)
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            self._question_heard = True
         if isinstance(frame, (InterruptionFrame, EndFrame, CancelFrame)):
             await self._cancel_turn()
         elif isinstance(frame, FunctionCallResultFrame) and self._client_tools:
@@ -144,6 +154,11 @@ class IntentEngineProcessor(FrameProcessor):
         await super().cleanup()
         if self._home_assistant:
             await self._home_assistant.aclose()
+
+    def open_dialog(self, follow_up: FollowUp) -> None:
+        """Make ``follow_up`` the pending question, asked by a server target outside of a matched turn."""
+        self._dialog = follow_up
+        self._question_heard = False
 
     # ------------------------------------------------------------ entity sync
     def _start_sync(self) -> None:
@@ -218,7 +233,9 @@ class IntentEngineProcessor(FrameProcessor):
         if match is None and dialog is not None and dialog.reprompt:
             logger.info(f"Intent engine: No answer to the pending question in '{text}'; asking again.")
             self._record("intent", reason="reprompt")
-            self._dialog = replace(dialog, reprompt=None)
+            # Asked again after a non-answer: the next words are an answer, not more of a message.
+            self._dialog = replace(dialog, reprompt=None, interrupted=False, continue_intent=None)
+            self._question_heard = False
             self._turn_task = self.create_task(self._speak(dialog.reprompt))
             return True
         if match is None:
@@ -255,14 +272,59 @@ class IntentEngineProcessor(FrameProcessor):
             return match
         if match is not None and match.name in dialog.accept:
             return replace(match, slots={**dialog.slots, **match.slots})
+        words = strip_tags(text)
         if dialog.capture and dialog.capture_intent:
             # Dictation: the user's own words, whatever other intent they resemble.
-            words = strip_tags(text)
             if words:
                 return IntentMatch(
                     name=dialog.capture_intent, slots={**dialog.slots, dialog.capture: words}, custom=True
                 )
+            return match
+        if dialog.leading and (match is None or dialog.interrupted):
+            answer, found = self._leading_answer(words, dialog)
+            if found:
+                return answer
+        if dialog.interrupted and dialog.continue_intent and dialog.continue_slot and words:
+            # Said before the question was heard: the user's words go on.
+            return IntentMatch(
+                name=dialog.continue_intent, slots={**dialog.slots, dialog.continue_slot: words}, custom=True
+            )
         return match
+
+    def _leading_answer(self, words: str, dialog: FollowUp) -> tuple[IntentMatch | None, bool]:
+        """Answer ``dialog`` from the answers ``words`` start with ("Oui. Lis mes messages.").
+
+        Return ``(answer, True)`` when the turn starts with a ``leading`` answer.
+        The answer is None when the turn also gives a conflicting one ("Oui. Non."),
+        so the question is asked again. A later ``accept`` answer that is not a
+        ``leading`` one, such as "change it" in "No, change it", wins over the
+        leading one. Words after the answers are ignored.
+        """
+        rest = words.split()
+        answers: list[IntentMatch] = []
+        while rest:
+            for size in range(min(len(rest), _MAX_ANSWER_WORDS), 0, -1):
+                answer = self._dialog_match(" ".join(rest[:size]), dialog)
+                if answer is not None and answer.name in dialog.accept:
+                    answers.append(answer)
+                    rest = rest[size:]
+                    break
+            else:
+                break
+        if not answers or answers[0].name not in dialog.leading:
+            return None, False
+        if len({answer.name for answer in answers} & dialog.leading) > 1:
+            logger.info(f"Intent engine: conflicting answers in '{words}'")
+            return None, True
+        answer = next((a for a in answers if a.name not in dialog.leading), answers[0])
+        if rest:
+            logger.info(f"Intent engine: answer {answer.name}; ignoring '{' '.join(rest)}'")
+        return replace(answer, slots={**dialog.slots, **answer.slots}), True
+
+    def _dialog_match(self, text: str, dialog: FollowUp) -> IntentMatch | None:
+        """Match ``text`` alone against the sentences of ``dialog``'s context."""
+        extra = self._server.slot_lists() if self._server else None
+        return self._matcher.match(text, None, extra_slot_lists=extra, dialog=dialog.context)
 
     async def _speak(self, speech: str) -> None:
         """Speak ``speech`` the way an LLM reply would be spoken."""
@@ -306,6 +368,7 @@ class IntentEngineProcessor(FrameProcessor):
             **self._learned(match),
         )
         self._dialog = response.follow_up
+        self._question_heard = False
         if not response.speech:
             return
         await self._speak(response.speech)
@@ -388,7 +451,8 @@ def build_intent_engine(
     if not matcher.has_data:
         logger.info(f"Intent engine: no active sentences for {language}; every turn goes to the LLM")
         return None
-    if server is not None:
+    if server is not None and not config.dry_run:
+        # In a dry run the engine only logs: the server target leaves every reply to the LLM.
         server.bind_templates(matcher)
 
     home_assistant = None
@@ -416,7 +480,7 @@ def build_intent_engine(
         f"server={server.name if server else '(none)'}, "
         f"learned={len(learned)}"
     )
-    return IntentEngineProcessor(
+    processor = IntentEngineProcessor(
         config=config,
         language=language,
         matcher=matcher,
@@ -427,3 +491,7 @@ def build_intent_engine(
         server=server,
         recorder=recorder,
     )
+    bind_dialog = getattr(server, "bind_dialog", None)
+    if bind_dialog is not None and not config.dry_run:
+        bind_dialog(processor.open_dialog)
+    return processor

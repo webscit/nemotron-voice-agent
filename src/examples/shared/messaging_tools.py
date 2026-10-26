@@ -11,6 +11,10 @@ trusted voice ID tier); contacts without an owner are shared.
 Sending takes two steps: ``send_message`` only prepares a draft that the agent
 reads back, and ``confirm_send_message`` sends it once the user has answered,
 so a misheard name or text never leaves the house unconfirmed.
+
+When the intent engine runs, it speaks the outcome of these two tools itself
+(``announcer``) and the LLM is not run on their result: the read-back is the
+draft as stored, and "sent" is only said once the gateway sent it.
 """
 
 from __future__ import annotations
@@ -25,6 +29,12 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.frames.frames import (
+    FunctionCallResultProperties,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
+)
 
 from examples.shared.person_memory import PersonContext
 from messaging.contacts import Contact, match_contacts
@@ -75,8 +85,10 @@ def _schemas() -> list[FunctionSchema]:
         FunctionSchema(
             name=SEND_TOOL_NAME,
             description=(
-                "Prepare a text message to one of the user's contacts. It is NOT sent yet: read the recipient and "
-                "the text back to the user and ask them to confirm. Call it again to change the draft."
+                "Prepare a text message to one of the user's contacts. It is NOT sent yet: the user must confirm "
+                "it first. When the result has 'spoken', the user already heard the read-back and the question; "
+                "otherwise read the recipient and the text back and ask them to confirm. Call it again to change "
+                "the draft."
             ),
             properties={
                 "contact": {"type": "string", "description": contact_hint},
@@ -163,6 +175,8 @@ class MessagingTools:
         self._current_person = current_person
         self._user_turn = user_turn
         self._draft: Draft | None = None
+        # Speech for the result of a send step, or None to let the LLM speak (set by ``MessagingIntents``).
+        self.announcer: Callable[[str, dict[str, Any]], str | None] | None = None
 
     # ------------------------------------------------------------ handlers
     async def check_messages(self, params: FunctionCallParams) -> None:
@@ -179,11 +193,26 @@ class MessagingTools:
         """Server-side ``send_message(contact, text)`` tool handler: prepares a draft."""
         args = params.arguments
         query = " ".join(str(args.get("contact") or "").split())
-        await params.result_callback(self._prepare(query, str(args.get("text") or "").strip()))
+        await self._finish(params, SEND_TOOL_NAME, self._prepare(query, str(args.get("text") or "").strip()))
 
     async def confirm_send_message(self, params: FunctionCallParams) -> None:
         """Server-side ``confirm_send_message()`` tool handler."""
-        await params.result_callback(await self.send_draft())
+        await self._finish(params, CONFIRM_TOOL_NAME, await self.send_draft())
+
+    async def _finish(self, params: FunctionCallParams, tool: str, result: dict[str, Any]) -> None:
+        """Return ``result`` to the LLM, or speak it from the announcer without running the LLM."""
+        speech = self.announcer(tool, result) if self.announcer else None
+        if speech is None:
+            await params.result_callback(result)
+            return
+        result = {key: value for key, value in result.items() if key != "next"}
+        await params.result_callback(
+            {**result, "spoken": speech}, properties=FunctionCallResultProperties(run_llm=False)
+        )
+        # Spoken the way an LLM reply is, so TTS and the assistant context handle it as usual.
+        await params.llm.push_frame(LLMFullResponseStartFrame())
+        await params.llm.push_frame(LLMTextFrame(speech))
+        await params.llm.push_frame(LLMFullResponseEndFrame())
 
     # ------------------------------------------------------- shared steps
     # Used by the LLM tools above and by the intent engine (``messaging_intents``).

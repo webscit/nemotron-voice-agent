@@ -186,6 +186,14 @@ does not match, and every messaging request when the engine is off. The engine
 and the LLM tools share one draft, so you can start a message one way and
 confirm it the other way.
 
+When the LLM calls `send_message` or `confirm_send_message` while the engine is
+on, the agent speaks the result from the dialog templates, and the LLM does not
+reply to it. The agent reads back the draft exactly as stored, and it says
+"C'est envoyé" ("Sent") only after the homeserver accepted the message. If the
+LLM confirms a draft that does not exist, the agent says that no message is
+waiting. After a read-back, the engine answers your yes or no as in the dialog
+below.
+
 ### Example Exchanges
 
 The following French exchange checks, reads, and answers messages:
@@ -227,13 +235,24 @@ The dialog works as follows:
   Bob?"), the agent takes your next turn as the message, word for word, even
   when it sounds like a command. Say "annule" ("cancel") to stop instead.
 - **Confirm.** The agent reads the message back and asks "Je l'envoie ?"
-  ("Shall I send it?"). Answer "oui" ("yes") to send it, "non" ("no") to
-  drop it, "change le message" ("change it") to dictate it again, or
-  "non, plutôt que ..." ("say that ... instead") to replace the text.
+  ("Shall I send it?"). Answer "oui" ("yes") or "je confirme" ("I confirm")
+  to send it, "non" ("no") to drop it, "change le message" ("change it") to
+  dictate it again, or "non, plutôt que ..." ("say that ... instead") to
+  replace the text.
+- **Continue.** If you start talking again before the agent finishes the
+  read-back, your words are added to the message. The agent then reads the
+  whole message back and asks again.
 - **One-shot sending.** "Dis à Bob que ...", "Envoie un message à Bob pour lui
   dire que ...", or "Tell Bob that ..." go straight to the confirmation. After
   the agent reads messages from one sender, "Réponds-lui que ..." ("Reply
   saying that ...") answers that sender.
+
+An answer can open a longer turn. For example, "Oui. Lis mes messages." counts
+as "oui", and the agent ignores the rest. This happens when speech recognition
+joins a short answer to your next sentence. When the turn holds both "oui" and
+"non", the agent asks again. A later "change le message" wins over a leading
+"non". While the agent waits for a dictated message, every word is part of the
+message, including a leading "non".
 
 A question lasts one turn. When your answer matches nothing, the agent asks
 once more, for example "Je l'envoie à Bob ? Réponds par oui ou par non." If
@@ -300,10 +319,15 @@ This first version has the following limitations:
 - **Multilingual assistant only.** Other examples do not register the messaging
   tools.
 - **Direct rooms only.** The agent ignores rooms with more than two members.
-- **One turn per dictation.** When turn detection splits a long dictated
-  message into two user turns, the voice dialog keeps only the first part. The
-  agent answers the second part with the yes-or-no question again. Dictate the
-  message in one breath, or say "Dis à Bob que ..." with the whole text.
+- **Pauses after the read-back.** When turn detection splits a dictated
+  message, the voice dialog adds the second part only if you start it before
+  the read-back ends. If you wait until the agent has finished, it takes your
+  words as an answer and asks the yes-or-no question again. Say "change le
+  message" and dictate the whole message again.
+- **LLM claims without a tool call.** The agent speaks the result of the
+  messaging tools itself, but the LLM can still claim that it sent a message
+  without calling any tool. The prompt forbids it. The voice dialog avoids the
+  LLM for the usual phrasings.
 - **No learned messaging sentences.** The `dream` job does not learn new
   messaging sentences yet. Add phrasings to the `messaging.yaml` files.
 
@@ -319,5 +343,6 @@ The following table lists common symptoms and checks:
 | The agent does not join a contact's invitation | The inviter is not in the contacts file. Add them, then invite the agent again. |
 | The agent says a contact belongs to someone else | The contact has an `owner`, and the agent does not know for sure who is talking. Pick the person in **Who's talking** or let the voice ID recognize them. |
 | The agent never sends the message | You must confirm the draft in a later turn, within 5 minutes, as the same person who asked for it. |
+| The agent says a message was sent, but it never arrives | Look for a `function_result` event of `confirm_send_message` with status `sent` in the turn. Without one, the LLM answered without sending. Turn on the voice dialog, and add the phrasing you used to the `messaging.yaml` files. |
 | The LLM answers messaging requests instead of the voice dialog | Confirm that `INTENT_ENGINE_ENABLED=true` is set, that the session language is French or English, and that the `Intent engine enabled` log line shows `server=messaging`. With a custom `INTENT_ENGINE_SENTENCES_DIR`, copy the `messaging.yaml` files there. |
-| A dictated message is cut off | Turn detection split the message into two turns. Refer to [Limitations](#limitations). |
+| A dictated message is cut off | Turn detection split the message into two turns, and you continued after the read-back ended. Refer to [Limitations](#limitations). |

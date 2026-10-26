@@ -21,6 +21,7 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -108,6 +109,15 @@ class FollowUp:
     slots: dict[str, Any] = field(default_factory=dict)
     # Spoken once when the next turn matches nothing; the question then stays open for one more turn.
     reprompt: str | None = None
+    # ``accept`` intents that may open a longer turn ("Yes. Read them."): the leading answer counts,
+    # the rest of the turn is ignored unless it gives a conflicting answer.
+    leading: frozenset[str] = frozenset()
+    # Intent and slot that receive the next turn's words when the user talked before the question
+    # was heard to the end: they had not finished (a dictated message going on).
+    continue_intent: str | None = None
+    continue_slot: str | None = None
+    # Set by the engine when the user talked before the question was heard to the end.
+    interrupted: bool = False
 
 
 @dataclass
@@ -145,6 +155,9 @@ class ServerTarget(Protocol):
 
     def slot_lists(self) -> dict[str, SlotList]:
         """Return the hassil lists its sentences use (refreshed every turn)."""
+
+    def bind_dialog(self, open_dialog: Callable[[FollowUp], None]) -> None:
+        """Receive the engine's ``open_dialog``, to ask a question outside of ``handle``."""
 
     def build_call(self, request: IntentRequest) -> Any:
         """Return what ``handle`` would do, for the dry-run log."""
