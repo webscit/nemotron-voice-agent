@@ -71,9 +71,8 @@ class PerTurnReminderProcessor(FrameProcessor):
 def with_reasoning(extra: dict, enabled: bool) -> dict:
     """Return a copy of OpenAI extra params with reasoning toggled.
 
-    Sets ``extra_body.chat_template_kwargs.enable_thinking``. Used to enable
-    reasoning for the out-of-band summarizer (better summary faithfulness)
-    while spoken turns stay reasoning-off for low latency.
+    Sets ``extra_body.chat_template_kwargs.enable_thinking``. Used to keep
+    reasoning off for the out-of-band summarizer, whatever the spoken turns use.
     """
     merged = copy.deepcopy(extra) if extra else {}
     extra_body = merged.setdefault("extra_body", {})
