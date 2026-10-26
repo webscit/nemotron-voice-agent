@@ -39,6 +39,15 @@ By default the cascaded pipeline uses Pipecat's ML-based [**Smart Turn**](https:
 
 The [Omni examples](../../src/examples/omni_assistant/README.md) run ASR inside the model, so Pipecat's stock Smart Turn stop strategy has no upstream `TranscriptionFrame` to await. They use a custom `AudioOnlySmartTurnStopStrategy` that combines the same [Smart Turn](https://docs.pipecat.ai/api-reference/server/utilities/turn-detection/smart-turn-overview) model (`LocalSmartTurnAnalyzerV3`, fallback `stop_secs` default `1.0`, `SMART_TURN_STOP_SECS`) with a `VADUserTurnStartStrategy`. The custom strategy finalizes the turn as soon as the analyzer returns `COMPLETE`.
 
+### Short Answers That VAD Misses
+
+In the Multilingual assistant, a turn usually starts when Silero VAD detects speech. VAD reports speech only after 0.2 s of continuous speech, and a one-syllable answer such as "oui" or "non" is often shorter than that. ASR still transcribes the answer, so a final transcript that arrives without a VAD turn starts a turn of its own. The following rules apply to these turns:
+
+- Only final transcripts start a turn. Interim transcripts never do.
+- A transcript does not start a turn while the bot is speaking, or during the first 0.3 s after it stops. Echo of the bot's own voice therefore cannot interrupt the bot. VAD still handles barge-in.
+- In Smart Turn mode, the turn ends 0.3 s after its final transcript, unless VAD reports that the user is still speaking. In pure-VAD mode, the turn ends right away.
+- The session recorder stores a `transcript_turn_started` event for each such turn. Use these events to measure how often VAD misses short answers.
+
 ## Chat History Limit
 
 Every turn appends to the LLM's context. Left unbounded, that context keeps growing, which raises latency (more tokens to process means a higher time-to-first-token), increases cost, and eventually overflows the model's context window. For real-time voice, a small, bounded context is what keeps replies fast. Pipecat manages history through its [context aggregators](https://docs.pipecat.ai/guides/learn/context-management) and built-in [context summarization](https://docs.pipecat.ai/pipecat/fundamentals/context-summarization). The examples wire a **turn-count** window (`CHAT_HISTORY_RECENT_TURNS`) on top for a predictable per-turn budget.

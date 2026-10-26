@@ -10,9 +10,7 @@ from argparse import Namespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from pipecat.runner.types import EvalRunnerArguments, RunnerArguments
-from pipecat.turns.user_start.transcription_user_turn_start_strategy import TranscriptionUserTurnStartStrategy
 from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
-from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import TurnAnalyzerUserTurnStopStrategy
 
 from examples.multilingual.pipeline import (
     _build_multilingual_user_aggregator_params,
@@ -20,6 +18,7 @@ from examples.multilingual.pipeline import (
     _prepare_session_language_codes,
     _resolve_llm_supported_languages,
 )
+from examples.multilingual.transcript_turns import FinalTranscriptUserTurnStartStrategy, TranscriptTurnStopStrategy
 from examples.shared.pipeline_utils import SMART_TURN_FALLBACK_SECS
 
 
@@ -32,12 +31,14 @@ class _FakeVADAnalyzer:
     pass
 
 
-def _assert_vad_only_start(testcase: unittest.TestCase, strategies) -> None:
+def _assert_vad_then_final_transcript_start(testcase: unittest.TestCase, strategies) -> None:
     testcase.assertIsNotNone(strategies)
     assert strategies is not None
-    testcase.assertEqual(len(strategies.start), 1)
+    testcase.assertEqual(len(strategies.start), 2)
     testcase.assertIsInstance(strategies.start[0], VADUserTurnStartStrategy)
-    testcase.assertFalse(any(isinstance(strategy, TranscriptionUserTurnStartStrategy) for strategy in strategies.start))
+    # The fallback opens a turn from a final transcript VAD missed; interim text never does.
+    testcase.assertIsInstance(strategies.start[1], FinalTranscriptUserTurnStartStrategy)
+    testcase.assertFalse(strategies.start[1]._use_interim)
 
 
 class MultilingualTurnStrategyTests(unittest.TestCase):
@@ -85,7 +86,7 @@ class MultilingualTurnStrategyTests(unittest.TestCase):
 
         self.assertFalse(_is_eval_transport(args))
 
-    def test_default_multilingual_turn_start_is_vad_only(self) -> None:
+    def test_default_multilingual_turn_start_is_vad_then_final_transcript(self) -> None:
         with (
             patch.dict(os.environ, {"USE_SILERO_VAD_TURN_DETECTION": "false"}),
             patch("examples.multilingual.pipeline.SileroVADAnalyzer", return_value=_FakeVADAnalyzer()),
@@ -97,10 +98,10 @@ class MultilingualTurnStrategyTests(unittest.TestCase):
             params = _build_multilingual_user_aggregator_params(welcome_enabled=True)
 
         self.assertIsInstance(params.vad_analyzer, _FakeVADAnalyzer)
-        _assert_vad_only_start(self, params.user_turn_strategies)
+        _assert_vad_then_final_transcript_start(self, params.user_turn_strategies)
         assert params.user_turn_strategies is not None
         self.assertEqual(len(params.user_turn_strategies.stop), 1)
-        self.assertIsInstance(params.user_turn_strategies.stop[0], TurnAnalyzerUserTurnStopStrategy)
+        self.assertIsInstance(params.user_turn_strategies.stop[0], TranscriptTurnStopStrategy)
         analyzer = params.user_turn_strategies.stop[0]._turn_analyzer
         self.assertIsInstance(analyzer, _FakeTurnAnalyzer)
         self.assertEqual(analyzer.params.stop_secs, SMART_TURN_FALLBACK_SECS)
@@ -121,7 +122,7 @@ class MultilingualTurnStrategyTests(unittest.TestCase):
         # No welcome message means no first bot turn, so muting would deadlock.
         self.assertEqual(params.user_mute_strategies, [])
 
-    def test_silero_timeout_multilingual_turn_start_is_vad_only(self) -> None:
+    def test_silero_timeout_multilingual_turn_start_is_vad_then_final_transcript(self) -> None:
         with (
             patch.dict(
                 os.environ,
@@ -135,7 +136,7 @@ class MultilingualTurnStrategyTests(unittest.TestCase):
             params = _build_multilingual_user_aggregator_params(welcome_enabled=True)
 
         self.assertIsInstance(params.vad_analyzer, _FakeVADAnalyzer)
-        _assert_vad_only_start(self, params.user_turn_strategies)
+        _assert_vad_then_final_transcript_start(self, params.user_turn_strategies)
 
     def test_eval_transport_skips_language_prewarm(self) -> None:
         to_thread = AsyncMock()

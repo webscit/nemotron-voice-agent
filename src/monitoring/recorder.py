@@ -58,6 +58,7 @@ from pipecat.frames.frames import (
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.services.llm_service import LLMService
+from pipecat.turns.user_start.transcription_user_turn_start_strategy import TranscriptionUserTurnStartStrategy
 
 from monitoring import media as media_utils
 from monitoring import system_metrics, turn_metrics
@@ -403,6 +404,9 @@ class SessionRecorder:
         @user_aggregator.event_handler("on_user_turn_started")
         async def _on_user_turn_started(aggregator, strategy):
             self._start_user_turn()
+            if isinstance(strategy, TranscriptionUserTurnStartStrategy):
+                # VAD missed the speech (often a short "yes"): the transcript opened the turn.
+                self.event("transcript_turn_started", processor=type(strategy).__name__)
 
         @user_aggregator.event_handler("on_user_turn_stopped")
         async def _on_user_turn_stopped(aggregator, strategy, message):

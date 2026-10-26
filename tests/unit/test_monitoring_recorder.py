@@ -390,3 +390,37 @@ def test_invalid_client_session_id_is_replaced(tmp_path):
     recorder = SessionRecorder.create(session_id="../escape", example="e", config={}, settings=_settings(tmp_path))
     assert recorder is not None and recorder.session_id != "../escape"
     assert "/" not in recorder.prefix.removeprefix("sessions/").split("/", 1)[1].rstrip("/")
+
+
+def test_turn_opened_by_a_transcript_is_recorded(tmp_path):
+    from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
+
+    from examples.multilingual.transcript_turns import FinalTranscriptUserTurnStartStrategy
+
+    settings = _settings(tmp_path)
+    store = SessionStore(settings.db_url)
+    store.create_schema()
+
+    async def scenario():
+        recorder = SessionRecorder(
+            session_id="s3",
+            example="multilingual-assistant",
+            config={},
+            settings=settings,
+            store=store,
+            artifacts=LocalArtifactStore(settings.artifacts_dir),
+        )
+        user_agg, assistant_agg = FakeEmitter(), FakeEmitter()
+        recorder.attach(object(), user_agg, assistant_agg)
+        await recorder.start()
+        await user_agg.emit("on_user_turn_started", VADUserTurnStartStrategy())
+        await user_agg.emit("on_user_turn_stopped", None, _message("Envoie un message à Bob"))
+        await user_agg.emit("on_user_turn_started", FinalTranscriptUserTurnStartStrategy())
+        await user_agg.emit("on_user_turn_stopped", None, _message("Oui"))
+        await recorder.close()
+
+    asyncio.run(scenario())
+
+    events = [(e["turn_idx"], e["data"]) for e in store.rows("events", "s3") if e["kind"] == "transcript_turn_started"]
+    assert len(events) == 1
+    assert events[0][0] == 2
