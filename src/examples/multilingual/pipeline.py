@@ -74,6 +74,7 @@ from examples.shared.messaging_tools import (
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
 from examples.shared.person_memory import PERSON_MEMORY_ADDON_KEY, load_person_context, record_person_session
 from examples.shared.pipeline_utils import (
+    PIPELINE_AUDIO_OUT_SAMPLE_RATE,
     apply_pinned_prompt_summary,
     build_context_messages,
     build_pipeline_params,
@@ -91,6 +92,7 @@ from examples.shared.prewarm import (
     validate_llm_session_language,
 )
 from examples.shared.tts_text_normalizer import LanguageAwareVoiceFormatter
+from examples.shared.voice_capture import UserTurnAudioCapture
 from examples.shared.voice_id import (
     ENROLL_TOOL_NAME,
     FACE_ID_ADDON_KEY,
@@ -585,6 +587,8 @@ async def bot(runner_args: RunnerArguments) -> None:
     # Sentences and intents learned by the dream job and approved in review.
     learned_intents = await load_learned_intents_async(fixed_session_language) if intent_engine_config.enabled else []
     await preload_intent_engine(intent_engine_config, fixed_session_language, learned_intents)
+    # Voice messages: the audio of the turn the engine handles is the recording.
+    voice_capture = UserTurnAudioCapture() if messaging_enabled else None
     intent_engine = build_intent_engine(
         intent_engine_config,
         language=fixed_session_language,
@@ -595,8 +599,18 @@ async def bot(runner_args: RunnerArguments) -> None:
         recorder=recorder,
         learned=learned_intents,
         # The messaging dialog runs in the engine (deterministic); the LLM tools stay for other phrasings.
-        server=MessagingIntents(messaging_tools, matrix_gateway.contacts.all) if messaging_enabled else None,
+        server=MessagingIntents(
+            messaging_tools,
+            matrix_gateway.contacts.all,
+            voice_capture=voice_capture.take_last_turn,
+            playback_sample_rate=PIPELINE_AUDIO_OUT_SAMPLE_RATE,
+        )
+        if messaging_enabled
+        else None,
     )
+
+    # The capture sits right before the engine, which is the only one to use it.
+    engine_processors = [p for p in (voice_capture, intent_engine) if p] if intent_engine else []
 
     pipeline = Pipeline(
         [
@@ -605,7 +619,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             user_aggregator,
             *voice_id_processors,
             reminder_processor,
-            *([intent_engine] if intent_engine else []),
+            *engine_processors,
             llm,
             tts,
             transport.output(),

@@ -189,7 +189,7 @@ npx skills add .
 | How-to | [Realtime Gateway](docs/how-to/use-realtime-gateway.md) | OpenAI Realtime–compatible `WS /v1/realtime`: how it works and how to connect |
 | How-to | [Intent Engine](docs/how-to/configure-intent-engine.md) | Answer device commands without the LLM through Home Assistant intents and client tools |
 
-Step-by-step **how-to guides** are indexed in the [Configuration Guide](docs/02-configuration-guide.md). They cover configuring .env, models, and prompts, enabling opentelemetry tracing, a TURN Server, the audio recorder for debugging, and Matrix text messaging, plus the Realtime integrator gateway.
+Step-by-step **how-to guides** are indexed in the [Configuration Guide](docs/02-configuration-guide.md). They cover configuring .env, models, and prompts, enabling opentelemetry tracing, a TURN Server, the audio recorder for debugging, and Matrix text and voice messaging, plus the Realtime integrator gateway.
 
 ---
 

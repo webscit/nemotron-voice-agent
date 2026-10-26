@@ -15,6 +15,10 @@ so a misheard name or text never leaves the house unconfirmed.
 When the intent engine runs, it speaks the outcome of these two tools itself
 (``announcer``) and the LLM is not run on their result: the read-back is the
 draft as stored, and "sent" is only said once the gateway sent it.
+
+Voice messages are only recorded and played through the intent-engine dialog
+(``messaging_intents``), which hears the user's audio: ``prepare_voice`` drafts
+a recording, sent by the same ``send_draft``.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from examples.shared.person_memory import PersonContext
 from messaging.contacts import Contact, match_contacts
 from messaging.gateway import MatrixError, MatrixGateway
 from messaging.inbox import KIND_AUDIO, InboxMessage
+from messaging.voice import VoiceCodecError, decode_audio, encode_voice, pcm_duration_ms, waveform
 
 if TYPE_CHECKING:
     from pipecat.services.llm_service import FunctionCallParams
@@ -53,6 +58,13 @@ MESSAGING_ADDON_KEY = "messaging_addon"
 MAX_MESSAGE_LEN = 2000
 MAX_READ_MESSAGES = 5
 DRAFT_TTL_SECS = 300.0
+# Voice messages: shorter recordings are taken for a mistake, longer ones are not sent;
+# received ones play for at most MAX_PLAY_SECS.
+MIN_VOICE_SECS = 0.5
+MAX_VOICE_SECS = 120.0
+MAX_PLAY_SECS = 300.0
+# "Play the voice message from Bob" looks for it among this many latest messages.
+VOICE_LOOKBACK = 20
 
 
 def _schemas() -> list[FunctionSchema]:
@@ -136,10 +148,26 @@ def describe_message(message: InboxMessage, contact_name: str) -> dict[str, Any]
     result: dict[str, Any] = {"from": contact_name, "when": spoken_time(message.sent_at)}
     if message.kind == KIND_AUDIO:
         result["voice_message"] = True
-        result["note"] = "This is a voice message; you cannot play it yet. Tell the user it is waiting in Element."
+        result["note"] = (
+            "This is a voice message, which you cannot play yourself. Tell the user to say "
+            f'"play the voice message from {contact_name}" to hear it.'
+        )
     else:
         result["text"] = message.body
     return result
+
+
+@dataclass(frozen=True)
+class VoiceRecording:
+    """A recorded voice message: 16-bit mono PCM."""
+
+    audio: bytes
+    sample_rate: int
+
+    @property
+    def duration_ms(self) -> int:
+        """Length of the recording."""
+        return pcm_duration_ms(self.audio, self.sample_rate)
 
 
 @dataclass(frozen=True)
@@ -147,11 +175,13 @@ class Draft:
     """A message waiting for confirmation."""
 
     contact: Contact
+    # For a voice message: what the ASR heard, used as its caption.
     text: str
     sender_name: str | None
     person_id: str | None
     user_turn: int
     created_at: float
+    voice: VoiceRecording | None = None
 
 
 class MessagingTools:
@@ -279,6 +309,20 @@ class MessagingTools:
         await self._gateway.mark_read([m for m in messages if m.read_at is None])
         return [(m, by_id[m.sender]) for m in messages], more
 
+    async def latest_voice(self, contacts: list[Contact]) -> tuple[InboxMessage, Contact] | None:
+        """The latest voice message from ``contacts``, read or not (marked read), or None."""
+        by_id = {c.matrix_id: c for c in contacts}
+        messages = await asyncio.to_thread(
+            self._gateway.inbox.messages, list(by_id), unread_only=False, limit=VOICE_LOOKBACK
+        )
+        voice = [m for m in messages if m.kind == KIND_AUDIO]
+        if not voice:
+            return None
+        message = voice[-1]
+        if message.read_at is None:
+            await self._gateway.mark_read([message])
+        return message, by_id[message.sender]
+
     def prepare(self, contact: Contact, text: str) -> dict[str, Any]:
         """Make ``text`` the draft for ``contact``, replacing any earlier draft."""
         text = " ".join(text.split())
@@ -304,6 +348,38 @@ class MessagingTools:
             "text": text,
             "next": "Read the recipient and the message back and ask the user to confirm before sending.",
         }
+
+    def prepare_voice(self, contact: Contact, recording: VoiceRecording, transcript: str) -> dict[str, Any]:
+        """Make ``recording`` the draft for ``contact`` (a voice message), replacing any earlier draft."""
+        seconds = recording.duration_ms / 1000
+        if seconds < MIN_VOICE_SECS:
+            return {"error": "Nothing was recorded.", "code": "no_voice"}
+        if seconds > MAX_VOICE_SECS:
+            return {
+                "error": f"The recording is too long; keep it under {MAX_VOICE_SECS:.0f} seconds.",
+                "code": "voice_too_long",
+            }
+        person = self._person_row()
+        self._draft = Draft(
+            contact=contact,
+            text=" ".join(transcript.split())[:MAX_MESSAGE_LEN],
+            sender_name=person["name"] if person else None,
+            person_id=person["id"] if person else None,
+            user_turn=self._user_turn(),
+            created_at=time.monotonic(),
+            voice=recording,
+        )
+        return {"status": "draft, not sent", "to": contact.name, "seconds": round(seconds)}
+
+    async def voice_audio(self, message: InboxMessage, sample_rate: int) -> bytes:
+        """The audio of a received voice message, as 16-bit mono PCM at ``sample_rate``."""
+        if not message.media_url:
+            raise MatrixError("the voice message has no media")
+        data = await self._gateway.download(message.media_url)
+        try:
+            return await asyncio.to_thread(decode_audio, data, sample_rate, max_secs=MAX_PLAY_SECS)
+        except VoiceCodecError as exc:
+            raise MatrixError(str(exc)) from exc
 
     def cancel_draft(self) -> None:
         """Drop the draft."""
@@ -339,7 +415,10 @@ class MessagingTools:
     async def _send(self, draft: Draft) -> dict[str, Any]:
         body = f"{draft.sender_name}: {draft.text}" if draft.sender_name else draft.text
         try:
-            await self._gateway.send_text(draft.contact, body)
+            if draft.voice is not None:
+                await self._send_voice(draft, body)
+            else:
+                await self._gateway.send_text(draft.contact, body)
         except MatrixError as exc:
             logger.warning(f"Matrix: sending to {draft.contact.name} failed: {exc}")
             return {
@@ -350,6 +429,18 @@ class MessagingTools:
             self._draft = None
         logger.info(f"Matrix: sent a message to {draft.contact.name} for {draft.sender_name or 'a guest'}")
         return {"status": "sent", "to": draft.contact.name}
+
+    async def _send_voice(self, draft: Draft, body: str) -> None:
+        voice = draft.voice
+        try:
+            audio = await asyncio.to_thread(encode_voice, voice.audio, voice.sample_rate)
+            levels = await asyncio.to_thread(waveform, voice.audio)
+        except VoiceCodecError as exc:
+            raise MatrixError(str(exc)) from exc
+        caption = body if draft.text else (draft.sender_name or "")
+        await self._gateway.send_voice(
+            draft.contact, audio, duration_ms=voice.duration_ms, waveform=levels, body=caption or "Voice message"
+        )
 
     # ------------------------------------------------------------ LLM tools
     async def _check(self) -> dict[str, Any]:

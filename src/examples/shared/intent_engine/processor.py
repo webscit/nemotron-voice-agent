@@ -12,6 +12,9 @@ context frame for a finished user turn, the processor matches the transcript:
   ``LLMTextFrame``, ``LLMFullResponseEndFrame``). TTS, the assistant aggregator,
   chat-history summarization, and interruptions therefore behave as usual, and
   the reply lands in the context as an assistant message.
+- A reply with audio clips (a voice message) speaks each sentence as its own
+  response, and pushes the clip's audio between them: the TTS service keeps
+  frames in order, so the clip plays after the sentence before it.
 
 The processor always waits for the target's answer before speaking. If the
 target cannot answer, the swallowed frame is released to the LLM.
@@ -37,6 +40,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    OutputAudioRawFrame,
     StartFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -51,6 +55,7 @@ from examples.shared.intent_engine.matcher import (
     strip_tags,
 )
 from examples.shared.intent_engine.targets import (
+    AudioClip,
     ClientToolMap,
     ClientToolTarget,
     FollowUp,
@@ -73,6 +78,8 @@ _PROCESSOR_NAME = "IntentEngine"
 _SYNC_RETRY_SECS = 30.0
 # Longest leading answer looked for in a longer turn ("non ne l'envoie pas").
 _MAX_ANSWER_WORDS = 5
+# Audio clips are pushed in frames of this length (the output transport re-chunks them).
+_CLIP_FRAME_SECS = 0.5
 
 
 class TurnTelemetry(Protocol):
@@ -369,9 +376,27 @@ class IntentEngineProcessor(FrameProcessor):
         )
         self._dialog = response.follow_up
         self._question_heard = False
+        if response.parts:
+            await self._output(response.parts)
+            return
         if not response.speech:
             return
         await self._speak(response.speech)
+
+    async def _output(self, parts: Sequence[str | AudioClip]) -> None:
+        """Speak the sentences of a reply and play its clips, in order."""
+        for part in parts:
+            if isinstance(part, AudioClip):
+                await self._play(part)
+            elif part.strip():
+                await self._speak(part)
+
+    async def _play(self, clip: AudioClip) -> None:
+        step = int(clip.sample_rate * _CLIP_FRAME_SECS) * 2 * clip.num_channels
+        for start in range(0, len(clip.audio), step):
+            await self.push_frame(
+                OutputAudioRawFrame(clip.audio[start : start + step], clip.sample_rate, clip.num_channels)
+            )
 
     async def _cancel_turn(self) -> None:
         """Drop the in-flight intent (interruption or shutdown)."""

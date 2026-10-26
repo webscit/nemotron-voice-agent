@@ -13,6 +13,10 @@ in the next turn through the engine's follow-up:
 - "Send a message to Bob" -> "What should I tell Bob?" -> <the user's words> -> read back,
   "Shall I send it?" -> yes -> sent / no -> dropped / "change it" -> dictation again.
 - "Tell Bob that <message>" goes straight to the read-back.
+- Voice messages: received ones play inside "read my messages", or with "play the
+  voice message from Bob". "Send a voice message to Bob" -> "I'm listening" -> the
+  next turn's audio is the message -> "Shall I send it?" -> yes / no / "play it" /
+  "start over" (record again).
 
 A yes/no answer may open a longer turn ("Oui. Lis-les."): the leading answer
 counts. Words said over the read-back of a draft, before "Shall I send it?" was
@@ -30,6 +34,8 @@ a draft made by either one is the same draft.
 
 from __future__ import annotations
 
+import asyncio
+import re
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -41,14 +47,16 @@ from loguru import logger
 
 from examples.shared.intent_engine.responses import render_local
 from examples.shared.intent_engine.targets import (
+    AudioClip,
     FollowUp,
     IntentRequest,
     IntentResponse,
     SpeechTemplates,
     TargetUnavailable,
 )
-from examples.shared.messaging_tools import CONFIRM_TOOL_NAME, SEND_TOOL_NAME, MessagingTools
+from examples.shared.messaging_tools import CONFIRM_TOOL_NAME, SEND_TOOL_NAME, MessagingTools, VoiceRecording
 from messaging.contacts import Contact
+from messaging.gateway import MatrixError
 from messaging.inbox import KIND_AUDIO, InboxMessage
 
 CHECK_INTENT = "MessagingCheck"
@@ -58,8 +66,12 @@ REPLY_INTENT = "MessagingReply"
 YES_INTENT = "MessagingYes"
 NO_INTENT = "MessagingNo"
 CHANGE_INTENT = "MessagingChange"
-# Not in the sentence files: the engine routes dictated words here, and words said over a read-back.
+SEND_VOICE_INTENT = "MessagingSendVoice"
+PLAY_INTENT = "MessagingPlay"
+# Not in the sentence files: the engine routes dictated words (and the recorded turn) here,
+# and words said over a read-back.
 DICTATE_INTENT = "MessagingDictate"
+RECORD_INTENT = "MessagingRecord"
 CONTINUE_INTENT = "MessagingContinue"
 MESSAGING_INTENTS = frozenset(
     {
@@ -70,7 +82,10 @@ MESSAGING_INTENTS = frozenset(
         YES_INTENT,
         NO_INTENT,
         CHANGE_INTENT,
+        SEND_VOICE_INTENT,
+        PLAY_INTENT,
         DICTATE_INTENT,
+        RECORD_INTENT,
         CONTINUE_INTENT,
     }
 )
@@ -87,7 +102,12 @@ OFFER_READ = "offer_read"
 OFFER_MORE = "offer_more"
 OFFER_REPLY = "offer_reply"
 DICTATION = "dictation"
+RECORDING = "recording"
 CONFIRM = "confirm"
+
+# Where a template plays clip <n> (``slots.messages[i].play``); the reply is split there.
+_CLIP_MARK = "⟦clip{}⟧"
+_CLIP_MARK_RE = re.compile(r"⟦clip(\d+)⟧")
 
 # Error ``code`` of ``MessagingTools`` -> response key.
 _ERROR_KEYS = {
@@ -99,17 +119,25 @@ _ERROR_KEYS = {
     "too_long": "too_long",
     "no_draft": "no_draft",
     "send_failed": "send_failed",
+    "voice_too_long": "voice_too_long",
 }
 
 
-def message_slots(message: InboxMessage, contact: Contact, now: datetime | None = None) -> dict[str, Any]:
-    """Template slots of a received message; the template says when it arrived in its own language."""
+def message_slots(
+    message: InboxMessage, contact: Contact, now: datetime | None = None, *, play: str = ""
+) -> dict[str, Any]:
+    """Template slots of a received message; the template says when it arrived in its own language.
+
+    ``play`` is the mark where a voice message plays (empty when it cannot be played).
+    """
     sent = datetime.fromtimestamp(message.sent_at)
     now = now or datetime.now()
     return {
         "sender": contact.name,
         "text": "" if message.kind == KIND_AUDIO else message.body,
         "voice": message.kind == KIND_AUDIO,
+        "play": play,
+        "seconds": max(1, round(message.duration_ms / 1000)) if message.duration_ms else 0,
         "time": f"{sent:%H:%M}",
         "today": sent.date() == now.date(),
         "yesterday": sent.date() == (now - timedelta(days=1)).date(),
@@ -139,10 +167,24 @@ class MessagingIntents:
     # A send waits out matrix.org rate limits; the engine falls back to the LLM after this.
     timeout_secs = 15.0
 
-    def __init__(self, tools: MessagingTools, contacts: Callable[[], list[Contact]]):
-        """Run the dialog on ``tools``; ``contacts`` returns every contact (for the slot list)."""
+    def __init__(
+        self,
+        tools: MessagingTools,
+        contacts: Callable[[], list[Contact]],
+        *,
+        voice_capture: Callable[[], AudioClip | None] | None = None,
+        playback_sample_rate: int = 22050,
+    ):
+        """Run the dialog on ``tools``; ``contacts`` returns every contact (for the slot list).
+
+        ``voice_capture`` returns the audio of the turn being handled (``UserTurnAudioCapture``);
+        without it, voice messages cannot be recorded. Received ones are decoded at
+        ``playback_sample_rate``.
+        """
         self._tools = tools
         self._contacts = contacts
+        self._voice_capture = voice_capture
+        self._playback_sample_rate = playback_sample_rate
         self._templates: SpeechTemplates | None = None
         self._open_dialog: Callable[[FollowUp], None] | None = None
         self._lists_key: tuple[Contact, ...] | None = None
@@ -209,13 +251,37 @@ class MessagingIntents:
             return self._draft(self._contact, str(slots.get(MESSAGE_SLOT) or ""))
         if request.name == CONTINUE_INTENT:
             draft = self._tools.draft
-            if state != CONFIRM or draft is None:
-                raise TargetUnavailable("no draft to continue")
+            if state != CONFIRM or draft is None or draft.voice is not None:
+                raise TargetUnavailable("no text draft to continue")
             return self._draft(draft.contact, f"{draft.text} {slots.get(MESSAGE_SLOT) or ''}")
+        if request.name == SEND_VOICE_INTENT:
+            if slots.get(CONTACT_SLOT):
+                contact = self._tools.resolve(str(slots[CONTACT_SLOT]))
+                if isinstance(contact, dict):
+                    return self._error(contact)
+            elif self._reply_to is not None:
+                contact = self._reply_to
+            else:
+                raise TargetUnavailable("nobody to send a voice message to")
+            return self._ask_voice(contact)
+        if request.name == RECORD_INTENT:
+            if state != RECORDING or self._contact is None:
+                raise TargetUnavailable("no recording pending")
+            return self._record(self._contact, str(slots.get(MESSAGE_SLOT) or ""))
+        if request.name == PLAY_INTENT:
+            draft = self._tools.draft
+            if state == CONFIRM and draft is not None and draft.voice is not None and not slots.get(CONTACT_SLOT):
+                return self._replay(draft.contact, draft.voice)
+            if slots.get(CONTACT_SLOT):
+                contact = self._tools.resolve(str(slots[CONTACT_SLOT]))
+                if isinstance(contact, dict):
+                    return self._error(contact)
+                return await self._play_latest([contact])
+            return await self._play_latest(self._tools.allowed_contacts())
         if request.name == YES_INTENT:
             return await self._yes(state)
         if request.name == NO_INTENT:
-            if state in (CONFIRM, DICTATION):
+            if state in (CONFIRM, DICTATION, RECORDING):
                 self._tools.cancel_draft()
                 return self._reply("cancelled")
             return self._reply("ok")
@@ -223,6 +289,8 @@ class MessagingIntents:
             draft = self._tools.draft
             if state != CONFIRM or draft is None:
                 raise TargetUnavailable("no draft to change")
+            if draft.voice is not None and not slots.get(MESSAGE_SLOT):
+                return self._ask_voice(draft.contact)
             return self._compose(draft.contact, slots.get(MESSAGE_SLOT))
         raise TargetUnavailable(f"unknown messaging intent {request.name}")
 
@@ -256,22 +324,85 @@ class MessagingIntents:
         senders = list(dict.fromkeys(contact for _, contact in messages))
         self._reply_to = senders[0] if len(senders) == 1 else None
         self._read_contacts = contacts
+        clips = await self._voice_clips([message for message, _ in messages])
+        marks = {index: _CLIP_MARK.format(n) for n, index in enumerate(sorted(clips))}
         slots = {
-            "messages": [message_slots(message, contact) for message, contact in messages],
+            "messages": [
+                message_slots(message, contact, play=marks.get(index, ""))
+                for index, (message, contact) in enumerate(messages)
+            ],
             "more": more,
             "reply_to": self._reply_to.name if self._reply_to and not more else None,
         }
+        played = [clips[index] for index in sorted(clips)]
         if more:
-            return self._reply("messages", slots, ask=OFFER_MORE)
+            return self._reply("messages", slots, ask=OFFER_MORE, clips=played)
         if self._reply_to is not None:
-            return self._reply("messages", slots, ask=OFFER_REPLY, contact=self._reply_to)
-        return self._reply("messages", slots)
+            return self._reply("messages", slots, ask=OFFER_REPLY, contact=self._reply_to, clips=played)
+        return self._reply("messages", slots, clips=played)
+
+    async def _voice_clips(self, messages: list[InboxMessage]) -> dict[int, AudioClip]:
+        """The playable audio of the voice messages among ``messages``, by index (failures left out)."""
+        indexes = [i for i, message in enumerate(messages) if message.kind == KIND_AUDIO]
+        rate = self._playback_sample_rate
+        results = await asyncio.gather(
+            *(self._tools.voice_audio(messages[i], rate) for i in indexes), return_exceptions=True
+        )
+        clips: dict[int, AudioClip] = {}
+        for index, result in zip(indexes, results, strict=True):
+            if isinstance(result, MatrixError):
+                logger.warning(f"Matrix: cannot play voice message {messages[index].event_id}: {result}")
+            elif isinstance(result, BaseException):
+                raise result
+            elif result:
+                clips[index] = AudioClip(result, rate)
+        return clips
+
+    async def _play_latest(self, contacts: list[Contact]) -> IntentResponse:
+        try:
+            found = await self._tools.latest_voice(contacts)
+        except Exception as exc:
+            logger.opt(exception=exc).warning("Matrix: could not read messages")
+            return self._reply("read_failed")
+        if found is None:
+            name = contacts[0].name if len(contacts) == 1 else None
+            return self._reply("no_voice_message", {CONTACT_SLOT: name})
+        message, contact = found
+        clips = await self._voice_clips([message])
+        self._reply_to = contact
+        slots = {
+            "messages": [message_slots(message, contact, play=_CLIP_MARK.format(0) if clips else "")],
+            "more": False,
+            "reply_to": contact.name,
+        }
+        return self._reply("messages", slots, ask=OFFER_REPLY, contact=contact, clips=list(clips.values()))
 
     def _compose(self, contact: Contact, message: Any) -> IntentResponse:
         """Draft ``message`` for ``contact``, or ask for the words first."""
         if message and str(message).strip():
             return self._draft(contact, str(message))
         return self._reply("ask_text", {CONTACT_SLOT: contact.name}, ask=DICTATION, contact=contact)
+
+    def _ask_voice(self, contact: Contact) -> IntentResponse:
+        if self._voice_capture is None:
+            raise TargetUnavailable("voice messages need the microphone audio")
+        return self._reply("ask_voice", {CONTACT_SLOT: contact.name}, ask=RECORDING, contact=contact)
+
+    def _record(self, contact: Contact, transcript: str) -> IntentResponse:
+        """Draft the turn just heard as a voice message for ``contact``."""
+        clip = self._voice_capture() if self._voice_capture else None
+        if clip is None:
+            return self._reply("no_voice", {CONTACT_SLOT: contact.name}, ask=RECORDING, contact=contact)
+        result = self._tools.prepare_voice(contact, VoiceRecording(clip.audio, clip.sample_rate), transcript)
+        if result.get("code") == "no_voice":
+            return self._reply("no_voice", {CONTACT_SLOT: contact.name}, ask=RECORDING, contact=contact)
+        if "error" in result:
+            return self._error(result)
+        return self._reply("confirm_voice", {CONTACT_SLOT: contact.name, "seconds": result["seconds"]}, ask=CONFIRM)
+
+    def _replay(self, contact: Contact, voice: VoiceRecording) -> IntentResponse:
+        slots = {CONTACT_SLOT: contact.name, "play": _CLIP_MARK.format(0)}
+        return self._reply("replay_voice", slots, ask=CONFIRM, clips=[AudioClip(voice.audio, voice.sample_rate)])
 
     def _draft(self, contact: Contact, text: str) -> IntentResponse:
         result = self._tools.prepare(contact, text)
@@ -345,29 +476,58 @@ class MessagingIntents:
         ask: str | None = None,
         contact: Contact | None = None,
         response_type: str = "action_done",
+        clips: list[AudioClip] | None = None,
     ) -> IntentResponse:
-        """Render reply ``key``; ``ask`` makes it a question answered by the next turn."""
+        """Render reply ``key``; ``ask`` makes it a question answered by the next turn.
+
+        ``clips`` play where the rendered reply has their marks (``_CLIP_MARK``).
+        """
         slots = slots or {}
         speech = self._render(key, slots)
         self._state = ask
         self._contact = contact
         follow_up = None
-        if ask == DICTATION:
-            # Any words are the message, except "cancel".
+        if ask in (DICTATION, RECORDING):
+            # Any words are the message (or the recording), except "cancel".
             follow_up = FollowUp(
                 context=DIALOG_CONTEXT,
                 capture=MESSAGE_SLOT,
-                capture_intent=DICTATE_INTENT,
+                capture_intent=DICTATE_INTENT if ask == DICTATION else RECORD_INTENT,
                 accept=frozenset({NO_INTENT}),
             )
         elif ask is not None:
+            draft = self._tools.draft
+            continues = ask == CONFIRM and draft is not None and draft.voice is None
             follow_up = FollowUp(
                 context=DIALOG_CONTEXT,
-                accept=frozenset({YES_INTENT, NO_INTENT, CHANGE_INTENT}),
+                accept=frozenset({YES_INTENT, NO_INTENT, CHANGE_INTENT, PLAY_INTENT}),
                 reprompt=self._render(f"reprompt_{ask}", slots),
                 leading=frozenset({YES_INTENT, NO_INTENT}),
-                # Said over the read-back: the message goes on.
-                continue_intent=CONTINUE_INTENT if ask == CONFIRM else None,
-                continue_slot=MESSAGE_SLOT if ask == CONFIRM else None,
+                # Said over the read-back of a text draft: the message goes on.
+                continue_intent=CONTINUE_INTENT if continues else None,
+                continue_slot=MESSAGE_SLOT if continues else None,
             )
-        return IntentResponse(speech=speech, response_type=response_type, speech_slots=slots, follow_up=follow_up)
+        parts = _split_clips(speech, clips or [])
+        if _CLIP_MARK_RE.search(speech):
+            speech = " ".join(_CLIP_MARK_RE.sub(" ", speech).split())
+        return IntentResponse(
+            speech=speech,
+            response_type=response_type,
+            speech_slots=slots,
+            follow_up=follow_up,
+            parts=parts,
+        )
+
+
+def _split_clips(speech: str, clips: list[AudioClip]) -> tuple[str | AudioClip, ...]:
+    """``speech`` cut at its clip marks, with the clips in between; () when it plays none."""
+    if not _CLIP_MARK_RE.search(speech):
+        return ()
+    parts: list[str | AudioClip] = []
+    for n, piece in enumerate(_CLIP_MARK_RE.split(speech)):
+        if n % 2 == 0:
+            if piece.strip():
+                parts.append(" ".join(piece.split()))
+        elif int(piece) < len(clips):
+            parts.append(clips[int(piece)])
+    return tuple(parts) if any(isinstance(part, AudioClip) for part in parts) else ()

@@ -7,8 +7,9 @@
 # {contact} is filled by the server from the contacts file. MessagingYes, MessagingNo and
 # MessagingChange only match right after the agent asked a messaging question
 # (requires_context: dialog: messaging). After "What should I tell Bob?", the next turn
-# is taken as the message itself (except "cancel"). A longer turn that starts with a yes or no
-# ("Yes. Read them.") is answered by that yes or no.
+# is taken as the message itself (except "cancel"). After "I'm listening", the next turn is
+# recorded as a voice message. A longer turn that starts with a yes or no ("Yes. Read them.")
+# is answered by that yes or no.
 language: en
 intents:
   MessagingCheck:
@@ -39,6 +40,23 @@ intents:
       - sentences:
           - "(reply|answer)[ to (him|her|them)]"
           - "(reply|answer) [to (him|her|them) ](that|saying) {message}"
+  MessagingSendVoice:
+    data:
+      - sentences:
+          - "(send|record|leave) [a ]voice message (to|for) {contact}"
+          - "(send|leave) {contact} a voice message"
+          - "reply to {contact} (with|by) [a ]voice message"
+          - "(reply|answer) [to (him|her|them) ](with|by) [a ]voice message"
+  MessagingPlay:
+    data:
+      - sentences:
+          - "(play|play me|listen to) [the |my ][latest |last ]voice message from {contact}"
+          - "(play|play me|listen to) [the |my ][latest |last ]voice message"
+          - "(play|play me) {contact}'s [latest |last ]voice message"
+      - sentences:
+          - "(play it|play it again|play it back|replay it|let me hear it|listen to it|play the message)"
+        requires_context:
+          dialog: messaging
   MessagingYes:
     data:
       - sentences:
@@ -74,10 +92,17 @@ responses:
       unread: >-
         {% set n = slots.senders | length %}{% set who = slots.senders[0] if n == 1 else (slots.senders[:-1] | join(', ')) ~ ' and ' ~ slots.senders[-1] %}{% if slots.count == 1 %}You have a new message from {{ who }}. Shall I read it?{% else %}You have {{ slots.count }} new messages from {{ who }}. Shall I read them?{% endif %}
       messages: >-
-        {% set months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] %}{% for m in slots.messages %}{% if m.today %}At {{ m.time }}{% elif m.yesterday %}Yesterday at {{ m.time }}{% else %}On {{ months[m.month - 1] }} {{ m.day }}{% endif %}, {{ m.sender }} {% if m.voice %}sent you a voice message, which I cannot play yet.{% else %}wrote: {{ m.text }}{% if m.text[-1:] not in '.!?…' %}.{% endif %}{% endif %} {% endfor %}{% if slots.more %}There are more messages. Shall I go on?{% elif slots.reply_to %}Do you want to reply to {{ slots.reply_to }}?{% endif %}
+        {% set months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] %}{% for m in slots.messages %}{% if m.today %}At {{ m.time }}{% elif m.yesterday %}Yesterday at {{ m.time }}{% else %}On {{ months[m.month - 1] }} {{ m.day }}{% endif %}, {{ m.sender }} {% if m.voice %}sent you a{% if m.seconds %} {{ m.seconds }}-second{% endif %} voice message{% if m.play %}: {{ m.play }}{% else %}, which I can't play.{% endif %}{% else %}wrote: {{ m.text }}{% if m.text[-1:] not in '.!?…' %}.{% endif %}{% endif %} {% endfor %}{% if slots.more %}There are more messages. Shall I go on?{% elif slots.reply_to %}Do you want to reply to {{ slots.reply_to }}?{% endif %}
       ask_text: "What should I tell {{ slots.contact }}?"
       confirm: >-
         I'll tell {{ slots.contact }}: {{ slots.message }}{% if slots.message[-1:] not in '.!?…' %}.{% endif %} Shall I send it?
+      ask_voice: "I'm listening: say your message for {{ slots.contact }}."
+      no_voice: "I didn't hear anything. Say your message for {{ slots.contact }}."
+      confirm_voice: >-
+        I recorded {{ slots.seconds }} second{{ 's' if slots.seconds > 1 else '' }} for {{ slots.contact }}. Shall I send it, or do you want to hear it first?
+      replay_voice: "Here is your message: {{ slots.play }} Shall I send it to {{ slots.contact }}?"
+      no_voice_message: >-
+        {% if slots.contact %}You have no voice message from {{ slots.contact }}.{% else %}You have no voice message.{% endif %}
       sent: "Sent to {{ slots.contact }}."
       cancelled: "OK, I won't send it."
       ok: "OK."
@@ -89,6 +114,7 @@ responses:
       not_allowed: "Only the person who dictated this message can confirm it."
       no_contact: "I can't find that contact."
       too_long: "That message is too long; please give me a shorter one."
+      voice_too_long: "That voice message is too long: two minutes at most."
       no_draft: "There is no message waiting to be sent."
       send_failed: "I can't send the message right now."
       read_failed: "I can't read the messages right now."
