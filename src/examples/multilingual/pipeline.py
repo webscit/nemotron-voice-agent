@@ -327,7 +327,10 @@ async def bot(runner_args: RunnerArguments) -> None:
         settings=llm_settings,
     )
 
-    summary_extra = with_reasoning(base_extra, True)
+    # Reasoning off: a summary runs after every turn once the history is long, and with
+    # reasoning it kept the GPU busy for a minute, often for a summary thrown away
+    # because the next turn changed the context.
+    summary_extra = with_reasoning(base_extra, False)
     summary_llm_settings = NvidiaLLMSettings(model=model_id)
     if summary_extra:
         summary_llm_settings.extra = summary_extra

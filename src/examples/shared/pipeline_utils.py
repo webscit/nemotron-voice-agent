@@ -202,12 +202,28 @@ def build_context_messages(base_prompt: str, system_prompt: str = "") -> list[di
     return [{"role": "system", "content": base_prompt}]
 
 
+SUMMARY_PREFIX = "Conversation summary of earlier turns: "
+
+
+def _is_user_turn(msg: dict) -> bool:
+    """A user message, other than the pinned summary (which also has the user role)."""
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    return not (isinstance(content, str) and content.startswith(SUMMARY_PREFIX))
+
+
+def summary_batch_turns(recent_turns: int) -> int:
+    """Turns past the recent window that start a summary: half a window, so each run folds several."""
+    return max(1, recent_turns // 2)
+
+
 def find_recent_turn_start(messages: list[dict], recent_turns: int) -> int:
     """Return the first message index for the last N user turns."""
     turns_seen = 0
     for index in range(len(messages) - 1, -1, -1):
         msg = messages[index]
-        if isinstance(msg, dict) and msg.get("role") == "user":
+        if _is_user_turn(msg):
             turns_seen += 1
             if turns_seen == recent_turns:
                 return index
@@ -254,12 +270,20 @@ async def apply_pinned_prompt_summary(
     recent_turns: int,
     summary_system_prompt: str = "",
 ) -> None:
-    """Summarize old chat turns while preserving the initial prompt messages."""
+    """Summarize old chat turns while preserving the initial prompt messages.
+
+    A summary starts only once the history is ``summary_batch_turns`` past the
+    recent window, then keeps the last ``recent_turns`` turns. Summarizing one
+    turn at a time would cost an LLM call after every assistant turn.
+    """
     if recent_turns < 1:
         return
 
     messages = list(context.get_messages())
     preserve_count = max(0, preserve_prompt_messages)
+    turns = sum(1 for msg in messages[preserve_count:] if _is_user_turn(msg))
+    if turns < recent_turns + summary_batch_turns(recent_turns):
+        return
     recent_start = find_recent_turn_start(messages[preserve_count:], recent_turns)
     if recent_start <= 0:
         return
@@ -288,7 +312,7 @@ async def apply_pinned_prompt_summary(
 
     summary_message = {
         "role": "user",
-        "content": f"Conversation summary of earlier turns: {summary_text}",
+        "content": f"{SUMMARY_PREFIX}{summary_text}",
     }
     context.set_messages([*pinned_messages, summary_message, *recent_messages])
     logger.info(
