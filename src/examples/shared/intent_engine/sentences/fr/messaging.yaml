@@ -15,8 +15,8 @@ intents:
   MessagingCheck:
     data:
       - sentences:
-          - "[est-ce que ](j'ai|tu as|il y a) (des|de nouveaux|un nouveau|un|du) [nouveau[x] ]message[s] [pour moi]"
-          - "(as-tu|t'as|tu as) (des|de nouveaux|un) message[s] pour moi"
+          - "[est-ce que ](j'ai|tu as|il y a) (des|de nouveaux|de nouveau|un nouveau|un|du) [nouveau[x] ]message[s] [pour moi]"
+          - "(as-tu|as tu|a tu|t'as|tu as) (des|de nouveaux|de nouveau|un) message[s] pour moi"
           - "[est-ce que ]quelqu'un m'a écrit"
           - "j'ai reçu (des|un|de nouveaux) message[s]"
   MessagingRead:
@@ -28,11 +28,11 @@ intents:
   MessagingSend:
     data:
       - sentences:
-          - "(envoie|envoyer|écris|écrire) un [petit ]message à {contact}"
-          - "(envoie|envoyer|écris|écrire) un [petit ]message à {contact} (pour lui dire|pour dire|disant|qui dit) [que ]{message}"
-          - "(écris|écrire) à {contact}"
-          - "(envoie|écris) à {contact} [que ]{message}"
-          - "[dis ]à {contact} que {message}"
+          - "[(je veux|je voudrais|j'aimerais|je vais) ](envoie|envoyer|écris|écrit|écrire) un [petit ]message à {contact}"
+          - "(envoie|envoyer|écris|écrit|écrire) un [petit ]message à {contact} (pour lui dire|pour dire|disant|qui dit) [que ]{message}"
+          - "(écris|écrit|écrire) à {contact}"
+          - "(envoie|écris|écrit) à {contact} [que ]{message}"
+          - "[(dis|di|dit) ]à {contact} que {message}"
           - "(préviens|prévenir) {contact} que {message}"
           - "(réponds|répondre) à {contact}"
           - "(réponds|répondre) à {contact} que {message}"

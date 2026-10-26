@@ -27,7 +27,7 @@ from pipecat.services.llm_service import LLMService
 from pipecat.workers.runner import WorkerRunner
 
 from examples.shared.intent_engine.config import IntentEngineConfig
-from examples.shared.intent_engine.matcher import original_span
+from examples.shared.intent_engine.matcher import original_span, respell_slot_values
 from examples.shared.intent_engine.processor import build_intent_engine
 from examples.shared.messaging_intents import MessagingIntents, contact_slot_list
 from examples.shared.messaging_tools import MessagingTools
@@ -306,14 +306,45 @@ def test_english_dialog(gateway):
     assert gateway.sent == [("Bob", "Alice: I'm on my way!")]
 
 
-def test_contact_slot_list_has_names_aliases_and_unaccented_forms():
+def test_contact_slot_list_has_names_and_aliases():
     lists = contact_slot_list([Contact(name="Élodie", matrix_id=ELODIE, aliases=("Lolo",))])
     assert {(str(value.text_in.text), value.value_out) for value in lists.values} == {
         ("Élodie", ELODIE),
-        ("elodie", ELODIE),
         ("Lolo", ELODIE),
-        ("lolo", ELODIE),
     }
+
+
+def test_contact_matches_whatever_the_accents(tmp_path):
+    # The contacts file says "Frederic", the ASR writes "Frédéric" (session aba977fa6ca5).
+    contacts = tmp_path / "contacts.yaml"
+    contacts.write_text(f'contacts:\n  - name: Frederic\n    matrix_id: "{BOB}"\n', encoding="utf-8")
+    gw = FakeGateway(MatrixConfig("https://matrix.org", "@agent:matrix.org", "t", "", tmp_path, contacts))
+
+    async def scenario():
+        async with Harness(gw, ALICE) as h:
+            for asked in ("Je vais envoyer un message à Frédéric", "Écrit un message à FRÉDÉRIC."):
+                assert await h.says(asked) == "Qu'est-ce que je dis à Frederic ?"
+                assert await h.says("Non") == "D'accord, je ne l'envoie pas."
+            answer = await h.says("Di à Frédéric que le repas est prêt.")
+            assert answer == "Je dis à Frederic : le repas est prêt. Je l'envoie ?"
+            assert await h.says("Oui") == "C'est envoyé à Frederic."
+            assert await h.says("A tu de nouveau message pour moi?") == "Tu n'as pas de nouveau message."
+            assert h.llm.requests == 0
+
+    try:
+        run(scenario())
+    finally:
+        gw.inbox.close()
+    assert gw.sent == [("Frederic", "Alice: le repas est prêt.")]
+
+
+def test_respell_slot_values():
+    lists = contact_slot_list([Contact(name="Élodie", matrix_id=ELODIE, aliases=("Tante Zoé",))])
+    assert respell_slot_values("dis à ELODIE et à tante zoe que oui", {"contact": lists}) == (
+        "dis à Élodie et à Tante Zoé que oui"
+    )
+    # Whole words only.
+    assert respell_slot_values("les élodies", {"contact": lists}) == "les élodies"
 
 
 def test_original_span():

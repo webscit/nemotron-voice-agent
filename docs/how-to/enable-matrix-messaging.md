@@ -242,7 +242,8 @@ handles the turn. The recorder stores the repeated question as an
 `intent_engine` event with the reason `reprompt`.
 
 The contact names in the sentences come from the contacts file: every `name`
-and alias, also without accents, so "Helene" matches "Hélène". The dialog
+and alias. Accents and case do not matter in either direction: "Helene" in the
+file matches "Hélène" from speech recognition, and the other way round. The dialog
 follows the same rules as the LLM tools. A contact with an `owner` needs the
 person known for sure, only the person who dictated a message can confirm it,
 and a guest's message is sent without a name. A message that is being sent

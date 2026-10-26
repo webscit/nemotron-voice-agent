@@ -39,7 +39,7 @@ from examples.shared.intent_engine.targets import (
     TargetUnavailable,
 )
 from examples.shared.messaging_tools import MessagingTools
-from messaging.contacts import Contact, fold_name
+from messaging.contacts import Contact
 from messaging.inbox import KIND_AUDIO, InboxMessage
 
 CHECK_INTENT = "MessagingCheck"
@@ -100,13 +100,15 @@ def message_slots(message: InboxMessage, contact: Contact, now: datetime | None 
 
 
 def contact_slot_list(contacts: list[Contact]) -> TextSlotList:
-    """The hassil ``contact`` list: every name and alias (also without accents), valued by Matrix id."""
+    """The hassil ``contact`` list: every name and alias, valued by Matrix id.
+
+    The matcher respells names said with other accents or case (``respell_slot_values``).
+    """
     pairs: list[tuple[str, str]] = []
     for contact in contacts:
         for name in contact.names():
-            for text in dict.fromkeys((remove_punctuation(name).strip(), fold_name(remove_punctuation(name)))):
-                if text:
-                    pairs.append((text, contact.matrix_id))
+            if text := remove_punctuation(name).strip():
+                pairs.append((text, contact.matrix_id))
     return TextSlotList.from_tuples(pairs, name=CONTACT_SLOT, allow_template=False)
 
 

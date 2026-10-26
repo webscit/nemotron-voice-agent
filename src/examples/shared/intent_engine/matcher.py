@@ -15,6 +15,7 @@ are merged into the set that defines their intent.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -24,6 +25,7 @@ from typing import Any
 import home_assistant_intents
 import yaml
 from hassil import Intents, recognize_best
+from hassil.expression import TextChunk
 from hassil.intents import SlotList, TextSlotList
 from hassil.util import merge_dict, remove_punctuation
 from loguru import logger
@@ -111,6 +113,42 @@ def original_span(text: str, captured: Any) -> Any:
     # Trailing punctuation too, French style included ("tu viens ?").
     found = re.search(rf"{pattern}(?:\s*[^\w\s]+)*", text, flags=re.IGNORECASE)
     return found.group(0).strip() if found else captured
+
+
+def _fold(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def respell_slot_values(text: str, slot_lists: dict[str, SlotList]) -> str:
+    """``text`` with list values said with other accents or case spelled as in the list.
+
+    hassil compares accents exactly, so a contact written "Frederic" never matches
+    the ASR's "Frédéric" (and the other way round). Longer values are respelled first.
+    """
+    values = {
+        str(value.text_in.text).strip()
+        for slot_list in slot_lists.values()
+        if isinstance(slot_list, TextSlotList)
+        for value in slot_list.values
+        if isinstance(value.text_in, TextChunk)
+    }
+    # Fold character by character to map positions in the folded text back to ``text``.
+    folded, origin = [], []
+    for index, char in enumerate(text):
+        for folded_char in _fold(char):
+            folded.append(folded_char)
+            origin.append(index)
+    folded_text = "".join(folded)
+    spans: list[tuple[int, int, str]] = []
+    for value in sorted(filter(None, values), key=len, reverse=True):
+        for found in re.finditer(rf"(?<!\w){re.escape(_fold(value))}(?!\w)", folded_text):
+            start, end = origin[found.start()], origin[found.end() - 1] + 1
+            if all(end <= s or start >= e for s, e, _ in spans):
+                spans.append((start, end, value))
+    for start, end, value in sorted(spans, reverse=True):
+        text = text[:start] + value + text[end:]
+    return text
 
 
 def build_slot_lists(
@@ -397,17 +435,24 @@ class IntentMatcher:
             return None
         logger.info(f"Intent engine: normalized text '{text}'")
         custom_context = {**(self._context or {}), "dialog": dialog} if dialog else self._context
+        custom_text = respell_slot_values(text, extra_slot_lists) if extra_slot_lists else text
         candidates = [
-            (self._custom, {**(slot_lists or _EMPTY_SLOT_LISTS), **(extra_slot_lists or {})}, True, custom_context)
+            (
+                self._custom,
+                custom_text,
+                {**(slot_lists or _EMPTY_SLOT_LISTS), **(extra_slot_lists or {})},
+                True,
+                custom_context,
+            )
         ]
         if slot_lists is not None:
-            candidates.append((self._stock, slot_lists, False, self._context))
-        for sentence_set, lists, custom, intent_context in candidates:
+            candidates.append((self._stock, text, slot_lists, False, self._context))
+        for sentence_set, candidate_text, lists, custom, intent_context in candidates:
             if sentence_set is None:
                 continue
             try:
                 result = recognize_best(
-                    text,
+                    candidate_text,
                     sentence_set.intents,
                     slot_lists=lists,
                     intent_context=intent_context,
@@ -422,7 +467,7 @@ class IntentMatcher:
                 return IntentMatch(
                     name=result.intent.name,
                     slots={
-                        entity.name: original_span(text, entity.value) if entity.is_wildcard else entity.value
+                        entity.name: original_span(candidate_text, entity.value) if entity.is_wildcard else entity.value
                         for entity in result.entities_list
                     },
                     response_key=result.response or "default",
