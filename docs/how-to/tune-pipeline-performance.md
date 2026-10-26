@@ -45,7 +45,7 @@ Every turn appends to the LLM's context. Left unbounded, that context keeps grow
 
 We use context summarization logic for our examples to always **pin the initial prompt / system messages** loaded at session start. Nemotron's chat template carries the assistant instructions and tool definitions in the *user* section, so those must stay verbatim. Evicting them (as a token-based window might) would degrade tool-calling and persona. Only the older **conversational** turns are trimmed, and the handling differs by example:
 
-- **Generic** and **Multilingual** assistants **summarize** older history: once the conversation grows past the recent window, the older turns are condensed into a single pinned summary message (an additional LLM call after the turn), and the most recent `CHAT_HISTORY_RECENT_TURNS` turns are kept verbatim.
+- **Generic** and **Multilingual** assistants **summarize** older history: after the conversation grows half a window past the recent window, the older turns are condensed into a single pinned summary message (an additional LLM call after the turn, with reasoning off), and the most recent `CHAT_HISTORY_RECENT_TURNS` turns are kept verbatim.
 - **Frontend/Backend Agent** uses a plain **sliding window**: older non-prompt messages are dropped, keeping only the most recent `CHAT_HISTORY_RECENT_TURNS` messages.
 
 ### Configuration
@@ -61,11 +61,13 @@ CHAT_HISTORY_RECENT_TURNS=10
 
 ### How It Works
 
-When the message count exceeds `CHAT_HISTORY_RECENT_TURNS`:
+When the history grows past `CHAT_HISTORY_RECENT_TURNS`, the following steps apply:
 
 1. Initial prompt messages loaded at session start are always preserved.
 2. The most recent `CHAT_HISTORY_RECENT_TURNS` turns are kept verbatim.
 3. Older non-prompt turns are **summarized into one pinned summary message** (Generic / Multilingual) or **removed** (Frontend/Backend Agent).
+
+The Generic and Multilingual assistants summarize in batches. A summary runs only after the history reaches `CHAT_HISTORY_RECENT_TURNS` plus half of that value, for example 15 turns with the default of 10. The pinned summary does not count as a turn. The context therefore holds between `CHAT_HISTORY_RECENT_TURNS` and 1.5 times that many turns, and the summarizer runs about once every five turns instead of after every turn.
 
 ### Recommendations
 
