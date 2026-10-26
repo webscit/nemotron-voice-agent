@@ -1536,6 +1536,7 @@ name = "nemotron-voice-agent"
 version = "2.2.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "av" },
     { name = "hassil" },
     { name = "home-assistant-intents" },
     { name = "imageio-ffmpeg" },
@@ -1575,6 +1576,7 @@ eval = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", specifier = ">=17.1.0" },
     { name = "hassil", specifier = ">=3.12.1" },
     { name = "home-assistant-intents", specifier = ">=2026.9.30" },
     { name = "imageio-ffmpeg", specifier = ">=0.5.1" },
