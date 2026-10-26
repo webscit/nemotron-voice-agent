@@ -15,6 +15,7 @@ are merged into the set that defines their intent.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -24,6 +25,7 @@ from typing import Any
 import home_assistant_intents
 import yaml
 from hassil import Intents, recognize_best
+from hassil.expression import TextChunk
 from hassil.intents import SlotList, TextSlotList
 from hassil.util import merge_dict, remove_punctuation
 from loguru import logger
@@ -70,6 +72,11 @@ def _language_candidates(code: str) -> list[str]:
     return list(dict.fromkeys(key for key in (code, base_language(code)) if key))
 
 
+def strip_tags(text: str) -> str:
+    """``text`` without its leading speaker / presence tags, whitespace collapsed (dictated words)."""
+    return _TAG_RE.sub("", " ".join((text or "").split())).strip()
+
+
 def normalize_text(text: str, language: str, wake_words: Iterable[str] = ()) -> str:
     """Collapse whitespace and strip leading tags, greeting, and/or wake word.
 
@@ -90,6 +97,58 @@ def normalize_text(text: str, language: str, wake_words: Iterable[str] = ()) -> 
         return text
     stripped = re.sub(rf"^{prefix}", "", text, count=1, flags=re.IGNORECASE).strip()
     return stripped or text
+
+
+def original_span(text: str, captured: Any) -> Any:
+    """The words of ``text`` that a wildcard captured, with their punctuation.
+
+    hassil matches without punctuation, so a dictated message "le dîner est prêt,
+    tu viens ?" comes back as "le dîner est prêt tu viens". The words are found
+    again in ``text`` and returned as the user said them.
+    """
+    words = str(captured or "").split()
+    if not words:
+        return captured
+    pattern = r"[\W_]+".join(re.escape(word) for word in words)
+    # Trailing punctuation too, French style included ("tu viens ?").
+    found = re.search(rf"{pattern}(?:\s*[^\w\s]+)*", text, flags=re.IGNORECASE)
+    return found.group(0).strip() if found else captured
+
+
+def _fold(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def respell_slot_values(text: str, slot_lists: dict[str, SlotList]) -> str:
+    """``text`` with list values said with other accents or case spelled as in the list.
+
+    hassil compares accents exactly, so a contact written "Frederic" never matches
+    the ASR's "Frédéric" (and the other way round). Longer values are respelled first.
+    """
+    values = {
+        str(value.text_in.text).strip()
+        for slot_list in slot_lists.values()
+        if isinstance(slot_list, TextSlotList)
+        for value in slot_list.values
+        if isinstance(value.text_in, TextChunk)
+    }
+    # Fold character by character to map positions in the folded text back to ``text``.
+    folded, origin = [], []
+    for index, char in enumerate(text):
+        for folded_char in _fold(char):
+            folded.append(folded_char)
+            origin.append(index)
+    folded_text = "".join(folded)
+    spans: list[tuple[int, int, str]] = []
+    for value in sorted(filter(None, values), key=len, reverse=True):
+        for found in re.finditer(rf"(?<!\w){re.escape(_fold(value))}(?!\w)", folded_text):
+            start, end = origin[found.start()], origin[found.end() - 1] + 1
+            if all(end <= s or start >= e for s, e, _ in spans):
+                spans.append((start, end, value))
+    for start, end, value in sorted(spans, reverse=True):
+        text = text[:start] + value + text[end:]
+    return text
 
 
 def build_slot_lists(
@@ -356,28 +415,47 @@ class IntentMatcher:
         """Return ``text`` as it is matched, without leading tags, greeting, or wake word."""
         return normalize_text(text, self._language, self._wake_words)
 
-    def match(self, text: str, slot_lists: dict[str, SlotList] | None = None) -> IntentMatch | None:
+    def match(
+        self,
+        text: str,
+        slot_lists: dict[str, SlotList] | None = None,
+        *,
+        extra_slot_lists: dict[str, SlotList] | None = None,
+        dialog: str | None = None,
+    ) -> IntentMatch | None:
         """Return the best match for ``text``, or None.
 
         Stock Home Assistant sentences are only tried when ``slot_lists`` (the
-        synced entity, area, and floor names) is provided.
+        synced entity, area, and floor names) is provided. ``extra_slot_lists``
+        (server target lists, such as contacts) and ``dialog`` (the context of a
+        pending follow-up question) only apply to the custom sentences.
         """
         text = self.normalize(text)
         if not text:
             return None
         logger.info(f"Intent engine: normalized text '{text}'")
-        candidates = [(self._custom, slot_lists or _EMPTY_SLOT_LISTS, True)]
+        custom_context = {**(self._context or {}), "dialog": dialog} if dialog else self._context
+        custom_text = respell_slot_values(text, extra_slot_lists) if extra_slot_lists else text
+        candidates = [
+            (
+                self._custom,
+                custom_text,
+                {**(slot_lists or _EMPTY_SLOT_LISTS), **(extra_slot_lists or {})},
+                True,
+                custom_context,
+            )
+        ]
         if slot_lists is not None:
-            candidates.append((self._stock, slot_lists, False))
-        for sentence_set, lists, custom in candidates:
+            candidates.append((self._stock, text, slot_lists, False, self._context))
+        for sentence_set, candidate_text, lists, custom, intent_context in candidates:
             if sentence_set is None:
                 continue
             try:
                 result = recognize_best(
-                    text,
+                    candidate_text,
                     sentence_set.intents,
                     slot_lists=lists,
-                    intent_context=self._context,
+                    intent_context=intent_context,
                     language=base_language(self._language),
                     best_slot_name="name",
                 )
@@ -388,7 +466,10 @@ class IntentMatcher:
                 learned_id = (result.intent_metadata or {}).get(LEARNED_ID_KEY)
                 return IntentMatch(
                     name=result.intent.name,
-                    slots={entity.name: entity.value for entity in result.entities_list},
+                    slots={
+                        entity.name: original_span(candidate_text, entity.value) if entity.is_wildcard else entity.value
+                        for entity in result.entities_list
+                    },
                     response_key=result.response or "default",
                     custom=custom,
                     learned_id=learned_id if isinstance(learned_id, int) else None,

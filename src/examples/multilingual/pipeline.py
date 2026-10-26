@@ -59,6 +59,17 @@ from examples.shared.memory_tools import (
     MemoryTools,
     with_memory_tools,
 )
+from examples.shared.messaging_intents import MessagingIntents
+from examples.shared.messaging_tools import (
+    CHECK_TOOL_NAME,
+    CONFIRM_TOOL_NAME,
+    MESSAGING_ADDON_KEY,
+    MESSAGING_TOOL_NAMES,
+    READ_TOOL_NAME,
+    SEND_TOOL_NAME,
+    MessagingTools,
+    with_messaging_tools,
+)
 from examples.shared.nemotron_speech_text_filter import NemotronSpeechTextFilter
 from examples.shared.person_memory import PERSON_MEMORY_ADDON_KEY, load_person_context, record_person_session
 from examples.shared.pipeline_utils import (
@@ -89,6 +100,7 @@ from examples.shared.voice_id import (
     VoiceIdSession,
     voice_id_available,
 )
+from messaging.gateway import get_gateway
 from monitoring.recorder import CLIENT_METRICS_MESSAGE, SessionRecorder
 from tracing import IS_TRACING_ENABLED
 from utils import (
@@ -425,6 +437,15 @@ async def bot(runner_args: RunnerArguments) -> None:
     if people_store_available and not memory_tools_enabled:
         logger.warning(f"Memory tools disabled: the client declares its own {' or '.join(MEMORY_TOOL_NAMES)} tool")
     tools_schema = with_memory_tools(client_tools_schema) if memory_tools_enabled else client_tools_schema
+    # Matrix messaging: the agent's own Matrix account, when MATRIX_* is configured on the server.
+    matrix_gateway = get_gateway()
+    messaging_enabled = matrix_gateway is not None and not set(MESSAGING_TOOL_NAMES) & set(client_tool_names)
+    if matrix_gateway is not None and not messaging_enabled:
+        logger.warning("Messaging tools disabled: the client declares a tool with the same name")
+    if messaging_enabled:
+        tools_schema = with_messaging_tools(tools_schema)
+        prompt_without_person = render_prompt_addon(prompt_without_person, prompt_catalog, MESSAGING_ADDON_KEY, {})
+        base_system_content = render_pinned_prompt(person_context)
 
     messages = build_context_messages(base_system_content, system_prompt)
     if tools_schema is not None:
@@ -504,6 +525,24 @@ async def bot(runner_args: RunnerArguments) -> None:
         llm.register_function(FORGET_TOOL_NAME, memory_tools.forget, cancel_on_interruption=False)
         logger.info(f"Registered memory tools: {', '.join(MEMORY_TOOL_NAMES)}")
 
+    # User turns so far: a message draft is only sent once the user answered the read-back.
+    user_turns = 0
+    if messaging_enabled:
+        messaging_tools = MessagingTools(
+            gateway=matrix_gateway,
+            current_person=voice_id_session.confirmed_person if voice_id_session else lambda: person_context,
+            user_turn=lambda: user_turns,
+        )
+        for tool_name, handler in (
+            (CHECK_TOOL_NAME, messaging_tools.check_messages),
+            (READ_TOOL_NAME, messaging_tools.read_messages),
+            (SEND_TOOL_NAME, messaging_tools.send_message),
+            (CONFIRM_TOOL_NAME, messaging_tools.confirm_send_message),
+        ):
+            # Not cancelled on interruption: a message read or sent is so either way.
+            llm.register_function(tool_name, handler, cancel_on_interruption=False)
+        logger.info(f"Registered messaging tools: {', '.join(MESSAGING_TOOL_NAMES)}")
+
     session_snapshot = _session_snapshot(
         example="multilingual-assistant",
         pipeline_mode=body.get("pipeline_mode", ""),
@@ -550,6 +589,8 @@ async def bot(runner_args: RunnerArguments) -> None:
         client_tool_timeout_secs=CLIENT_FUNCTION_TIMEOUT_SECS,
         recorder=recorder,
         learned=learned_intents,
+        # The messaging dialog runs in the engine (deterministic); the LLM tools stay for other phrasings.
+        server=MessagingIntents(messaging_tools, matrix_gateway.contacts.all) if messaging_enabled else None,
     )
 
     pipeline = Pipeline(
@@ -644,6 +685,8 @@ async def bot(runner_args: RunnerArguments) -> None:
                 **{name: RTVIFunctionCallReportLevel.FULL for name in client_tool_names},
                 # Server-side tool: never reported to the client as a call to run.
                 ENROLL_TOOL_NAME: RTVIFunctionCallReportLevel.DISABLED,
+                # Messages are private: their content is not streamed to the client.
+                **{name: RTVIFunctionCallReportLevel.DISABLED for name in MESSAGING_TOOL_NAMES},
             }
         ),
     )
@@ -659,6 +702,8 @@ async def bot(runner_args: RunnerArguments) -> None:
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
+        nonlocal user_turns
+        user_turns += 1
         await task.queue_frame(
             RTVIServerMessageFrame(
                 data={

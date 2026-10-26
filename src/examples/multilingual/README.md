@@ -80,7 +80,8 @@ TTS voices and supported language codes are discovered at runtime by prewarming 
 | `services.local.yaml` | on-prem service endpoints (server / single GPU), registry default `nemotron-asr-streaming-multilingual` |
 | `tools.py` | validates client-declared tool schemas into a `ToolsSchema` for the LLM context |
 | `tool_handlers.py` | server-side RTVI forwarding handler for those client-executed tools |
-| `../shared/intent_engine/` | optional intent engine: hassil matching, Home Assistant and client-tool targets, and custom sentences |
+| `../shared/intent_engine/` | optional intent engine: hassil matching, Home Assistant, client-tool, and server targets, multi-turn follow-ups, and custom sentences |
+| `../shared/messaging_intents.py` | Matrix messaging as an intent-engine dialog (server target) |
 
 ### TTS text normalization
 
@@ -144,6 +145,10 @@ When session recording is enabled (`MONITORING_ENABLED=true`), the client header
 
 A client that computes speaker embeddings can identify who speaks in each turn by sending `speaker-update` messages over RTVI. The pipeline then tags each user message with the speaker for the LLM, attributes the turn, loads the memories of the recognized person, and offers a server-side `enroll_speaker` tool to remember a new voice. This also requires `MONITORING_ENABLED=true`. A client with a camera can also confirm the speaker by face (tier `verified`) and report who is in view with `presence-update` messages; the pipeline then names the people in view to the LLM and greets a recognized person who comes into view while nobody speaks. For details, refer to [Identify Speakers by Voice](../../../docs/how-to/enable-conversation-recording.md#identify-speakers-by-voice) and the [Voice ID protocol](../../../docs/voice-id-protocol.md).
 
+### Matrix messaging
+
+When the server has a Matrix account (`MATRIX_HOMESERVER`, `MATRIX_USER_ID`, and `MATRIX_ACCESS_TOKEN` in `.env`), the LLM gets the server-side `check_messages`, `read_messages`, `send_message`, and `confirm_send_message` tools and the `messaging_addon` prompt block. People can ask whether they have new messages, have them read aloud, and dictate text messages to the contacts in `data/matrix/contacts.yaml`. `send_message` only prepares a draft; the server sends it after the user confirms in a later turn. This first version supports text only: it does not support end-to-end encrypted rooms, and it cannot play received voice messages yet. With `INTENT_ENGINE_ENABLED=true`, the intent engine also runs messaging as a deterministic voice dialog in French and English, without the LLM: it offers to read new messages, takes the next turn as the dictated text, and reads the draft back before it sends. The LLM tools stay available for other phrasings. Refer to [Use the Voice Dialog](../../../docs/how-to/enable-matrix-messaging.md#use-the-voice-dialog). For setup, contacts, and limitations, refer to [Enable Matrix Messaging](../../../docs/how-to/enable-matrix-messaging.md).
+
 ### Switching the multilingual ASR model
 
 **Parakeet 1.1B RNNT Multilingual** offers stronger multilingual recognition quality at higher latency (see [Model Selection Notes](#model-selection-notes)). To run it instead of the default Nemotron ASR Streaming Multilingual on-prem:
@@ -197,6 +202,7 @@ Multilingual behavior depends on the ASR model, the LLM, and the selected TTS vo
 | Port conflict on the ASR sidecar | Parakeet and Nemotron streaming both bind `50152` | Run only one local ASR. When opting into Parakeet, scale the Nemotron sidecar off (`--scale nemotron-asr-streaming-multilingual=0`) |
 | The bot does not know who is talking or what it remembers | Monitoring is off, no person is selected, the person is archived, or no memory is `active` yet | Set `MONITORING_ENABLED=true`, pick a person in **Who's talking** before connecting, and approve their `proposed` memories in the review UI. The `dream` job runs only after the session ends and while no session is live |
 | The assistant says it cannot remember or forget something | The speaker is unknown or uncertain, so the `remember` and `forget` tools refuse to act, or the client declares its own `remember` or `forget` tool, which disables the server tools | Pick a person in **Who's talking** or enroll the voice, then ask again. To undo a forget, use **Restore** on the **Memories** page with the **Forgotten** filter |
+| The assistant cannot find a contact or never sends a message | The contact is missing from the contacts file, belongs to another person (`owner`), or the draft was not confirmed in a later turn within 5 minutes | Refer to [Enable Matrix Messaging](../../../docs/how-to/enable-matrix-messaging.md#troubleshooting) |
 | Random ASR text while silent | Parakeet RNNT noise sensitivity | Expected with the Parakeet opt-in. The default Nemotron ASR is less prone to this. Otherwise reduce room noise and use a good mic |
 
 For ASR, LLM, and TTS model details and general failure modes, see [Configure ASR](../../../docs/how-to/configure-asr.md), [Configure TTS](../../../docs/how-to/configure-tts.md), [Configure LLM](../../../docs/how-to/configure-llm.md), and the [Troubleshooting guide](../../../docs/06-troubleshooting.md).

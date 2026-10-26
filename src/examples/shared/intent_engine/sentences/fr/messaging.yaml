@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# French sentences of the Matrix messaging dialog (src/examples/shared/messaging_intents.py).
+# Active when Matrix messaging is configured on the server (MATRIX_* in .env).
+#
+# {contact} is filled by the server from the contacts file. MessagingYes, MessagingNo and
+# MessagingChange only match right after the agent asked a messaging question
+# (requires_context: dialog: messaging). After "Qu'est-ce que je dis à Bob ?", the next
+# turn is taken as the message itself (except "annule").
+#
+# Leading "dis", "ok", "merci"... are stripped before matching, so sentences make them optional.
+language: fr
+intents:
+  MessagingCheck:
+    data:
+      - sentences:
+          - "[est-ce que ](j'ai|tu as|il y a) (des|de nouveaux|de nouveau|un nouveau|un|du) [nouveau[x] ]message[s] [pour moi]"
+          - "(as-tu|as tu|a tu|t'as|tu as) (des|de nouveaux|de nouveau|un) message[s] pour moi"
+          - "[est-ce que ]quelqu'un m'a écrit"
+          - "j'ai reçu (des|un|de nouveaux) message[s]"
+  MessagingRead:
+    data:
+      - sentences:
+          - "(lis|lire|lis-moi|relis|relis-moi) (mes|les) [nouveaux ]messages"
+          - "(lis|lire|lis-moi|relis|relis-moi) (le|les|mes) [nouveau[x] ]message[s] de {contact}"
+          - "qu'est-ce (que |qu'){contact} (m'a écrit|m'a dit|a écrit|dit)"
+  MessagingSend:
+    data:
+      - sentences:
+          - "[(je veux|je voudrais|j'aimerais|je vais) ](envoie|envoyer|écris|écrit|écrire) un [petit ]message à {contact}"
+          - "(envoie|envoyer|écris|écrit|écrire) un [petit ]message à {contact} (pour lui dire|pour dire|disant|qui dit) [que ]{message}"
+          - "(écris|écrit|écrire) à {contact}"
+          - "(envoie|écris|écrit) à {contact} [que ]{message}"
+          - "[(dis|di|dit) ]à {contact} que {message}"
+          - "(préviens|prévenir) {contact} que {message}"
+          - "(réponds|répondre) à {contact}"
+          - "(réponds|répondre) à {contact} que {message}"
+  MessagingReply:
+    data:
+      - sentences:
+          - "(réponds-lui|réponds lui|répond-lui|réponds-leur)"
+          - "(réponds-lui|réponds lui|répond-lui|réponds-leur) [que ]{message}"
+  MessagingYes:
+    data:
+      - sentences:
+          - "(oui|ouais|ok|d'accord|vas-y|volontiers|bien sûr|parfait|c'est bon|je veux bien|continue)"
+          - "oui (vas-y|s'il te plaît|merci|je veux bien|envoie[-le]|lis-les|lis-le)"
+          - "(envoie|envoie-le|envoie-la|lis-les|lis-le|lis-moi les|lis-les-moi)"
+        requires_context:
+          dialog: messaging
+  MessagingNo:
+    data:
+      - sentences:
+          - "(non|non merci|annule|annuler|non annule|laisse tomber|pas maintenant|pas la peine|stop|arrête)"
+          - "(n'envoie pas|ne l'envoie pas|non ne l'envoie pas)"
+        requires_context:
+          dialog: messaging
+  MessagingChange:
+    data:
+      - sentences:
+          - "(change|modifie|corrige|recommence) [le message]"
+          - "[non ][(mets|écris) ]plutôt [que ]{message}"
+        requires_context:
+          dialog: messaging
+
+lists:
+  message:
+    wildcard: true
+
+responses:
+  intents:
+    Messaging:
+      no_new: "Tu n'as pas de nouveau message."
+      no_new_from: "Tu n'as pas de nouveau message de {{ slots.contact }}."
+      unread: >-
+        {% set n = slots.senders | length %}{% set who = slots.senders[0] if n == 1 else (slots.senders[:-1] | join(', ')) ~ ' et ' ~ slots.senders[-1] %}{% if slots.count == 1 %}Tu as un nouveau message de {{ who }}. Je te le lis ?{% else %}Tu as {{ slots.count }} nouveaux messages de {{ who }}. Je te les lis ?{% endif %}
+      messages: >-
+        {% set months = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'] %}{% for m in slots.messages %}{% if m.today %}À {{ m.time }}{% elif m.yesterday %}Hier à {{ m.time }}{% else %}Le {{ m.day }} {{ months[m.month - 1] }}{% endif %}, {{ m.sender }} {% if m.voice %}t'a envoyé un message vocal, que je ne peux pas encore écouter.{% else %}a écrit : {{ m.text }}{% if m.text[-1:] not in '.!?…' %}.{% endif %}{% endif %} {% endfor %}{% if slots.more %}Il y a d'autres messages. Je continue ?{% elif slots.reply_to %}Tu veux répondre à {{ slots.reply_to }} ?{% endif %}
+      ask_text: "Qu'est-ce que je dis à {{ slots.contact }} ?"
+      confirm: >-
+        Je dis à {{ slots.contact }} : {{ slots.message }}{% if slots.message[-1:] not in '.!?…' %}.{% endif %} Je l'envoie ?
+      sent: "C'est envoyé à {{ slots.contact }}."
+      cancelled: "D'accord, je ne l'envoie pas."
+      ok: "D'accord."
+      reprompt_offer_read: "Tu veux que je te les lise ? Réponds par oui ou par non."
+      reprompt_offer_more: "Je continue ? Réponds par oui ou par non."
+      reprompt_offer_reply: "Tu veux répondre à {{ slots.reply_to }} ? Réponds par oui ou par non."
+      reprompt_confirm: "Je l'envoie à {{ slots.contact }} ? Réponds par oui ou par non."
+      unknown_person: "Je ne sais pas avec certitude qui me parle, alors je ne peux pas utiliser ce contact."
+      not_allowed: "Seule la personne qui a dicté ce message peut confirmer l'envoi."
+      no_contact: "Je ne trouve pas ce contact."
+      too_long: "Ce message est trop long, dis-m'en un plus court."
+      no_draft: "Il n'y a pas de message en attente."
+      send_failed: "Je n'arrive pas à envoyer le message pour l'instant."
+      read_failed: "Je n'arrive pas à lire les messages pour l'instant."
+      failed: "Désolé, ça n'a pas marché."

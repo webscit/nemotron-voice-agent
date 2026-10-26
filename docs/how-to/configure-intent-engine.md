@@ -2,10 +2,11 @@
 
 The intent engine answers device commands without the large language model (LLM). It matches the final user transcript against sentence templates with [hassil](https://github.com/OHF-Voice/hassil), executes a match directly, and speaks a templated reply. A matched turn skips both LLM calls that a tool-calling turn needs. Every other turn reaches the LLM unchanged.
 
-The engine is available in the Multilingual Assistant example and is off by default. It supports the following two targets:
+The engine is available in the Multilingual Assistant example and is off by default. It supports the following three targets:
 
 - **Home Assistant**: executes built-in Home Assistant intents, such as turning a light on, through the Home Assistant REST API.
 - **Client tools**: calls a tool that the client declared at connect time, such as the head and volume tools of a Reachy Mini robot.
+- **Server features**: executes intents of a feature that runs in the server process. Matrix messaging uses this target to check, read, and send messages through a multi-turn dialog. Refer to [Use the Voice Dialog](enable-matrix-messaging.md#use-the-voice-dialog).
 
 ## Before You Begin
 
@@ -44,7 +45,7 @@ The engine stays off when `INTENT_ENGINE_ENABLED` is not `true`. The token stays
 
 ### Use Client Tools Without Home Assistant
 
-Set only `INTENT_ENGINE_ENABLED=true` and leave `HOME_ASSISTANT_URL` or `HOME_ASSISTANT_TOKEN` unset. The engine then loads only the custom sentences that map to tools the client declared. It does not load the stock Home Assistant sentences and sends no request to Home Assistant. When the client declares none of the mapped tools, the engine stays off for that session.
+Set only `INTENT_ENGINE_ENABLED=true` and leave `HOME_ASSISTANT_URL` or `HOME_ASSISTANT_TOKEN` unset. The engine then loads only the custom sentences that map to tools the client declared. It does not load the stock Home Assistant sentences and sends no request to Home Assistant. When the client declares none of the mapped tools, and no server feature such as [Matrix messaging](enable-matrix-messaging.md#use-the-voice-dialog) is configured, the engine stays off for that session.
 
 ## Settings
 
@@ -72,6 +73,8 @@ The engine sits between the user context aggregator and the LLM and handles each
 2. It matches the text against the custom sentences first, and then against the stock Home Assistant sentences for the session language. A session language such as `fr-FR` uses the `fr` sentences. A language without sentences never matches.
 3. On a miss, the turn goes to the LLM.
 4. On a hit, the engine executes the intent, waits for the result, and then speaks the reply. The reply is stored in the chat history as an assistant message.
+
+A reply from a server feature can ask a question that the next turn answers, such as "Je l'envoie ?" Refer to [Multi-Turn Dialogs](#multi-turn-dialogs).
 
 The following table describes how the engine handles failures.
 
@@ -115,6 +118,7 @@ A custom intent is active in one of the following cases:
 
 - Its name is on the allow-list and Home Assistant is configured. The engine sends it to Home Assistant. Use this to add phrasings for a built-in intent.
 - `client_tools.yaml` maps it to a tool that the client declared for the session.
+- A configured server feature executes it, for example the `Messaging*` intents of `fr/messaging.yaml` and `en/messaging.yaml` when Matrix messaging is configured. Refer to [Customize the Sentences](enable-matrix-messaging.md#customize-the-sentences).
 
 The following example adds a phrasing for `HassTurnOn`.
 
@@ -130,6 +134,27 @@ intents:
 ```
 
 Restart the example service after you change a sentence file.
+
+### Multi-Turn Dialogs
+
+A server feature can ask a follow-up question in its reply. Only the next user turn answers the question, and it is matched as follows:
+
+- The custom sentences are matched with the hassil intent context `dialog: <context>`. A sentence block with `requires_context: {dialog: <context>}` matches only while such a question is pending. Messaging uses `dialog: messaging` for its yes, no, and change sentences, so a plain "oui" never matches outside the dialog.
+- A question can capture the next turn's own words as a slot, for example a dictated message. The turn is then taken word for word, even when it resembles another command, unless it matches one of the intents that the question accepts, such as "annule."
+- When the next turn matches nothing, the engine asks the question again once, and it stays open for one more turn. After a second miss, the turn goes to the LLM.
+
+A `{message}`-style wildcard slot returns the user's original words with their punctuation, even though hassil matches without punctuation. The following example from `fr/messaging.yaml` matches only during the messaging dialog.
+
+```yaml
+language: fr
+intents:
+  MessagingYes:
+    data:
+      - sentences:
+          - "(oui|ouais|ok|d'accord|vas-y)"
+        requires_context:
+          dialog: messaging
+```
 
 ## Map Intents to Client Tools
 
@@ -178,7 +203,7 @@ Note the following behavior:
 
 When [conversation recording](enable-conversation-recording.md) is enabled, the engine stores the following data for each user turn:
 
-- An `intent_engine` event with `handled_by` set to `intent` or `llm`, the intent name, the target, and the reason for a fall-through, such as `no_match`, `blocked_domain`, or `target_unavailable`. When a learned sentence matched, the event also carries `learned` with the suggestion ID.
+- An `intent_engine` event with `handled_by` set to `intent` or `llm`, the intent name, the target, and the reason for a fall-through, such as `no_match`, `blocked_domain`, or `target_unavailable`. A repeated follow-up question is recorded with `handled_by` set to `intent` and the reason `reprompt`. When a learned sentence matched, the event also carries `learned` with the suggestion ID.
 - The `intent_match_secs` metric with the matching time.
 - The `intent_target_secs` metric with the round-trip time of the target.
 
@@ -190,6 +215,8 @@ The `dream` job of the [offline post-processing runner](enable-conversation-reco
 
 - **New sentences** for an intent that the engine already has, for example another phrasing of `HassTurnOn` or `ReachyMoveHead`.
 - **New intents** for a recurring request that the LLM answered with one client tool call whose arguments are the same every time. A new intent maps its sentences to that client tool and adds a short spoken response.
+
+The job does not learn sentences for server features such as Matrix messaging yet.
 
 ### Requirements
 

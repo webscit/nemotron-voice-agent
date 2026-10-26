@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# English sentences of the Matrix messaging dialog (src/examples/shared/messaging_intents.py).
+# Active when Matrix messaging is configured on the server (MATRIX_* in .env).
+#
+# {contact} is filled by the server from the contacts file. MessagingYes, MessagingNo and
+# MessagingChange only match right after the agent asked a messaging question
+# (requires_context: dialog: messaging). After "What should I tell Bob?", the next turn
+# is taken as the message itself (except "cancel").
+language: en
+intents:
+  MessagingCheck:
+    data:
+      - sentences:
+          - "(do|did) I (have|get|got) [any ][new ]message[s]"
+          - "(are there|is there) [any ][new ]message[s] [for me]"
+          - "(any|got any) [new ]messages [for me]"
+          - "did (anyone|somebody|someone) (write|message) [to ]me"
+  MessagingRead:
+    data:
+      - sentences:
+          - "(read|read me|reread) (my|the) [new ]messages"
+          - "(read|read me|reread) (my|the) [new ]message[s] from {contact}"
+          - "what did {contact} (write|say|send)"
+  MessagingSend:
+    data:
+      - sentences:
+          - "(send|write) [a ]message to {contact}"
+          - "(send|write) {contact} a message"
+          - "(send|write) [a ]message to {contact} (saying|to say|that says) [that ]{message}"
+          - "(tell|text|message) {contact} [that ]{message}"
+          - "(text|message|write to) {contact}"
+          - "reply to {contact}"
+          - "reply to {contact} [that ]{message}"
+  MessagingReply:
+    data:
+      - sentences:
+          - "(reply|answer)[ to (him|her|them)]"
+          - "(reply|answer) [to (him|her|them) ](that|saying) {message}"
+  MessagingYes:
+    data:
+      - sentences:
+          - "(yes|yeah|yep|sure|ok|okay|go ahead|please|of course|send it|read them|read it|continue|go on)"
+          - "yes (please|go ahead|send it|read them|read it)"
+        requires_context:
+          dialog: messaging
+  MessagingNo:
+    data:
+      - sentences:
+          - "(no|nope|no thanks|cancel|forget it|never mind|not now|stop|don't send it)"
+        requires_context:
+          dialog: messaging
+  MessagingChange:
+    data:
+      - sentences:
+          - "(change|edit|correct) [it|the message]"
+          - "start over"
+          - "[no ](say|write) [that ]{message} instead"
+        requires_context:
+          dialog: messaging
+
+lists:
+  message:
+    wildcard: true
+
+responses:
+  intents:
+    Messaging:
+      no_new: "You have no new messages."
+      no_new_from: "You have no new messages from {{ slots.contact }}."
+      unread: >-
+        {% set n = slots.senders | length %}{% set who = slots.senders[0] if n == 1 else (slots.senders[:-1] | join(', ')) ~ ' and ' ~ slots.senders[-1] %}{% if slots.count == 1 %}You have a new message from {{ who }}. Shall I read it?{% else %}You have {{ slots.count }} new messages from {{ who }}. Shall I read them?{% endif %}
+      messages: >-
+        {% set months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'] %}{% for m in slots.messages %}{% if m.today %}At {{ m.time }}{% elif m.yesterday %}Yesterday at {{ m.time }}{% else %}On {{ months[m.month - 1] }} {{ m.day }}{% endif %}, {{ m.sender }} {% if m.voice %}sent you a voice message, which I cannot play yet.{% else %}wrote: {{ m.text }}{% if m.text[-1:] not in '.!?…' %}.{% endif %}{% endif %} {% endfor %}{% if slots.more %}There are more messages. Shall I go on?{% elif slots.reply_to %}Do you want to reply to {{ slots.reply_to }}?{% endif %}
+      ask_text: "What should I tell {{ slots.contact }}?"
+      confirm: >-
+        I'll tell {{ slots.contact }}: {{ slots.message }}{% if slots.message[-1:] not in '.!?…' %}.{% endif %} Shall I send it?
+      sent: "Sent to {{ slots.contact }}."
+      cancelled: "OK, I won't send it."
+      ok: "OK."
+      reprompt_offer_read: "Do you want me to read them? Please say yes or no."
+      reprompt_offer_more: "Shall I go on? Please say yes or no."
+      reprompt_offer_reply: "Do you want to reply to {{ slots.reply_to }}? Please say yes or no."
+      reprompt_confirm: "Shall I send it to {{ slots.contact }}? Please say yes or no."
+      unknown_person: "I don't know for sure who is talking, so I can't use this contact."
+      not_allowed: "Only the person who dictated this message can confirm it."
+      no_contact: "I can't find that contact."
+      too_long: "That message is too long; please give me a shorter one."
+      no_draft: "There is no message waiting to be sent."
+      send_failed: "I can't send the message right now."
+      read_failed: "I can't read the messages right now."
+      failed: "Sorry, that didn't work."
