@@ -48,6 +48,7 @@ from examples.multilingual.multilingual_processor import (
 )
 from examples.multilingual.tool_handlers import ClientToolResultBridge, build_client_tool_handler
 from examples.multilingual.tools import build_client_tools, perceivable_client_tools
+from examples.multilingual.transcript_turns import FinalTranscriptUserTurnStartStrategy, TranscriptTurnStopStrategy
 from examples.shared.audio_recorder import create_audio_recorder
 from examples.shared.intent_engine import IntentEngineConfig, build_intent_engine
 from examples.shared.intent_engine.learned import load_learned_intents_async
@@ -76,7 +77,7 @@ from examples.shared.pipeline_utils import (
     apply_pinned_prompt_summary,
     build_context_messages,
     build_pipeline_params,
-    build_smart_turn_stop_strategies,
+    build_smart_turn_analyzer,
     build_user_mute_strategies,
     create_transport,
     register_session_start_handlers,
@@ -132,14 +133,14 @@ def _is_eval_transport(runner_args: RunnerArguments) -> bool:
 
 
 def _build_multilingual_user_aggregator_params(welcome_enabled: bool) -> LLMUserAggregatorParams:
-    """Use VAD-only turn starts so interim ASR text does not start a user turn."""
+    """Start turns from VAD, or from a final transcript VAD missed; interim ASR text never starts one."""
     if not parse_env_bool("USE_SILERO_VAD_TURN_DETECTION", default=False):
         return LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
             user_mute_strategies=build_user_mute_strategies(welcome_enabled),
             user_turn_strategies=UserTurnStrategies(
-                start=[VADUserTurnStartStrategy()],
-                stop=build_smart_turn_stop_strategies(),
+                start=[VADUserTurnStartStrategy(), FinalTranscriptUserTurnStartStrategy()],
+                stop=[TranscriptTurnStopStrategy(turn_analyzer=build_smart_turn_analyzer())],
             ),
         )
 
@@ -148,7 +149,8 @@ def _build_multilingual_user_aggregator_params(welcome_enabled: bool) -> LLMUser
         vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=stop_secs)),
         user_mute_strategies=build_user_mute_strategies(welcome_enabled),
         user_turn_strategies=UserTurnStrategies(
-            start=[VADUserTurnStartStrategy()],
+            # A transcript-only turn ends right away here (user_speech_timeout=0).
+            start=[VADUserTurnStartStrategy(), FinalTranscriptUserTurnStartStrategy()],
             stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.0)],
         ),
     )
