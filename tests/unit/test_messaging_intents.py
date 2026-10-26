@@ -11,8 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     EndFrame,
     Frame,
+    InterruptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -98,14 +100,15 @@ class Tap(FrameProcessor):
 class Harness:
     """engine (messaging only, no Home Assistant) -> fake LLM -> tap -> assistant aggregator."""
 
-    def __init__(self, gateway, person=None, language="fr-FR"):
+    def __init__(self, gateway, person=None, language="fr-FR", dry_run=False):
         self.person = person
         self.gateway = gateway
-        self.tools = MessagingTools(gateway=gateway, current_person=lambda: self.person, user_turn=lambda: 0)
+        self.turn = 0
+        self.tools = MessagingTools(gateway=gateway, current_person=lambda: self.person, user_turn=lambda: self.turn)
         self.context = LLMContext([{"role": "system", "content": "sys"}])
         self.llm = FakeLLM()
         self.engine = build_intent_engine(
-            IntentEngineConfig(enabled=True),
+            IntentEngineConfig(enabled=True, dry_run=dry_run),
             language=language,
             context=self.context,
             llm=self.llm,
@@ -131,11 +134,34 @@ class Harness:
         await self.worker.queue_frame(EndFrame())
         await asyncio.wait_for(self._task, timeout=5)
 
-    async def says(self, text: str) -> str:
-        """One user turn; returns what the agent answered."""
+    async def says(self, text: str, *, heard: bool = True) -> str:
+        """One user turn; returns what the agent answered.
+
+        ``heard`` plays the previous reply to the end first; otherwise the user talks over it.
+        """
+        await self.worker.queue_frame(BotStoppedSpeakingFrame() if heard else InterruptionFrame())
         before = len(self.tap.spoken)
+        self.turn += 1
         self.context.add_message({"role": "user", "content": text})
         await self.worker.queue_frame(LLMContextFrame(context=self.context))
+        return await self._reply(before)
+
+    async def llm_calls(self, tool: str, **arguments) -> tuple[dict, object, str | None]:
+        """The LLM calls ``tool``; returns its result, the result properties and what was spoken."""
+        before = len(self.tap.spoken)
+        calls = []
+
+        async def callback(result, *, properties=None):
+            calls.append((result, properties))
+
+        params = SimpleNamespace(arguments=arguments, result_callback=callback, llm=self.llm)
+        await getattr(self.tools, tool)(params)
+        ((result, properties),) = calls
+        if properties is not None and properties.run_llm is False:
+            return result, properties, await self._reply(before)
+        return result, properties, None
+
+    async def _reply(self, before: int) -> str:
         async with asyncio.timeout(3):
             while len(self.tap.spoken) == before:
                 await asyncio.sleep(0.01)
@@ -363,3 +389,147 @@ def test_system_note_does_not_answer_the_pending_question(gateway):
 
     run(scenario())
     assert gateway.sent == [("Bob", "j'arrive")]
+
+
+# ------------------------------------------------------- glued yes/no answers
+def test_answer_glued_to_the_next_sentence_counts(gateway):
+    _receive(gateway, "$1", BOB, "Je vais bien merci")
+
+    async def scenario():
+        async with Harness(gateway, ALICE) as h:
+            await h.says("J'ai reçu de nouveaux messages.")
+            # Session 321b8c1eb79d: a short "Oui" glued to the next turn by the ASR.
+            answer = await h.says("Oui.  Li mes nouveaux messages.")
+            assert "Bob a écrit : Je vais bien merci." in answer
+            assert await h.says("Oui, oui  Oui") == "Qu'est-ce que je dis à Bob ?"
+            await h.says("Moi, ça va")
+            assert await h.says("Oui  Envoie le message.") == "C'est envoyé à Bob."
+            assert h.llm.requests == 0
+
+    run(scenario())
+    assert gateway.sent == [("Bob", "Alice: Moi, ça va")]
+
+
+def test_conflicting_answers_ask_again(gateway):
+    async def scenario():
+        async with Harness(gateway) as h:
+            await h.says("Dis à Bob que je pars")
+            assert await h.says("Oui  Oui.  Non.") == "Je l'envoie à Bob ? Réponds par oui ou par non."
+            assert await h.says("Oui, je confirme") == "C'est envoyé à Bob."
+
+    run(scenario())
+    assert gateway.sent == [("Bob", "je pars")]
+
+
+def test_a_later_change_wins_over_a_leading_no(gateway):
+    async def scenario():
+        async with Harness(gateway) as h:
+            await h.says("Dis à Bob que je pars")
+            assert await h.says("Non, change le message") == "Qu'est-ce que je dis à Bob ?"
+            assert h.tools.draft is not None
+
+    run(scenario())
+
+
+def test_dictation_starting_with_no_is_the_message(gateway):
+    async def scenario():
+        async with Harness(gateway) as h:
+            await h.says("Écris à Bob")
+            answer = await h.says("Non, je ne viens pas ce soir")
+            assert answer == "Je dis à Bob : Non, je ne viens pas ce soir. Je l'envoie ?"
+
+    run(scenario())
+
+
+def test_english_answer_glued_to_the_next_sentence(gateway):
+    async def scenario():
+        async with Harness(gateway, language="en-US") as h:
+            await h.says("Tell Bob that I'm late")
+            assert await h.says("Yes. Thank you so much") == "Sent to Bob."
+
+    run(scenario())
+    assert gateway.sent == [("Bob", "I'm late")]
+
+
+# ------------------------------------------------------------ split dictation
+def test_words_said_over_the_read_back_continue_the_message(gateway):
+    async def scenario():
+        async with Harness(gateway, ALICE) as h:
+            assert await h.says("Dis à Bob que je rentre tard") == "Je dis à Bob : je rentre tard. Je l'envoie ?"
+            # Turn detection cut the dictation: the user goes on over the read-back.
+            answer = await h.says("et que je mange dehors", heard=False)
+            assert answer == "Je dis à Bob : je rentre tard et que je mange dehors. Je l'envoie ?"
+            assert await h.says("Oui", heard=False) == "C'est envoyé à Bob."
+
+    run(scenario())
+    assert gateway.sent == [("Bob", "Alice: je rentre tard et que je mange dehors")]
+
+
+def test_words_after_the_read_back_do_not_continue_the_message(gateway):
+    async def scenario():
+        async with Harness(gateway) as h:
+            await h.says("Dis à Bob que je rentre tard")
+            answer = await h.says("et que je mange dehors")
+            assert answer == "Je l'envoie à Bob ? Réponds par oui ou par non."
+            # Talking over the question asked again is an answer, not more of the message.
+            assert await h.says("euh attends", heard=False) == LLM_REPLY
+            assert h.tools.draft.text == "je rentre tard"
+
+    run(scenario())
+    assert gateway.sent == []
+
+
+# ------------------------------------------------- send steps run by the LLM
+def test_llm_draft_is_read_back_and_confirmed_by_the_engine(gateway):
+    async def scenario():
+        async with Harness(gateway, ALICE) as h:
+            h.turn = 1
+            result, properties, spoken = await h.llm_calls("send_message", contact="Robert", text="Le repas est prêt.")
+            assert spoken == "Je dis à Bob : Le repas est prêt. Je l'envoie ?"
+            assert result["spoken"] == spoken and "next" not in result
+            assert properties.run_llm is False
+            # The yes goes to the engine, which says what the gateway did.
+            assert await h.says("Oui, je confirme") == "C'est envoyé à Bob."
+            assert h.llm.requests == 0
+
+    run(scenario())
+    assert gateway.sent == [("Bob", "Alice: Le repas est prêt.")]
+
+
+def test_llm_confirming_without_a_draft_never_says_sent(gateway):
+    async def scenario():
+        async with Harness(gateway) as h:
+            # Session aba977fa6ca5: the LLM confirmed a draft it never made, then said it was sent.
+            result, properties, spoken = await h.llm_calls("confirm_send_message")
+            assert result["code"] == "no_draft"
+            assert properties.run_llm is False
+            assert spoken == "Il n'y a pas de message en attente."
+
+    run(scenario())
+    assert gateway.sent == []
+
+
+def test_llm_confirm_says_what_the_gateway_did(gateway):
+    async def scenario():
+        async with Harness(gateway) as h:
+            await h.says("Dis à Bob que j'arrive")
+            gateway.fail = True
+            h.turn += 1
+            _, _, spoken = await h.llm_calls("confirm_send_message")
+            assert spoken == "Je n'arrive pas à envoyer le message pour l'instant."
+            gateway.fail = False
+            _, _, spoken = await h.llm_calls("confirm_send_message")
+            assert spoken == "C'est envoyé à Bob."
+
+    run(scenario())
+    assert gateway.sent == [("Bob", "j'arrive")]
+
+
+def test_llm_speaks_its_send_steps_in_a_dry_run(gateway):
+    async def scenario():
+        async with Harness(gateway, dry_run=True) as h:
+            result, properties, spoken = await h.llm_calls("send_message", contact="Bob", text="Coucou")
+            assert properties is None and spoken is None
+            assert "next" in result
+
+    run(scenario())
