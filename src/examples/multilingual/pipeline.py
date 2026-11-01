@@ -47,9 +47,16 @@ from examples.multilingual.multilingual_processor import (
     with_reasoning,
 )
 from examples.multilingual.tool_handlers import ClientToolResultBridge, build_client_tool_handler
-from examples.multilingual.tools import build_client_tools, perceivable_client_tools
+from examples.multilingual.tools import build_client_tools, perceivable_client_tools, without_tools
 from examples.multilingual.transcript_turns import FinalTranscriptUserTurnStartStrategy, TranscriptTurnStopStrategy
 from examples.shared.audio_recorder import create_audio_recorder
+from examples.shared.decision_tools import (
+    DecisionModelConfig,
+    DecisionToolsProcessor,
+    SystemOneClient,
+    active_decision_tools,
+    load_decision_tools,
+)
 from examples.shared.intent_engine import IntentEngineConfig, build_intent_engine
 from examples.shared.intent_engine.learned import load_learned_intents_async
 from examples.shared.intent_engine.processor import preload_intent_engine
@@ -436,6 +443,16 @@ async def bot(runner_args: RunnerArguments) -> None:
     base_system_content = render_pinned_prompt(person_context)
 
     client_tools_schema, client_tool_names = build_client_tools(body.get("tools"))
+    # Client tools a decision model calls after each answer: hidden from the LLM while it is configured.
+    decision_config = DecisionModelConfig.from_env()
+    decision_tools = (
+        active_decision_tools(load_decision_tools(), body.get("tools"), client_tool_names)
+        if decision_config.enabled
+        else ()
+    )
+    if decision_tools:
+        client_tools_schema = without_tools(client_tools_schema, {tool.name for tool in decision_tools})
+        logger.info(f"Decision tools: {', '.join(tool.name for tool in decision_tools)} ({decision_config.model})")
     # Voice ID and the memory tools need the people store, so they are off without monitoring.
     people_store_available = await asyncio.to_thread(voice_id_available)
     memory_tools_enabled = people_store_available and not set(MEMORY_TOOL_NAMES) & set(client_tool_names)
@@ -567,6 +584,7 @@ async def bot(runner_args: RunnerArguments) -> None:
         },
         person=person_context.snapshot if person_context else None,
         intent_engine=intent_engine_config.snapshot(),
+        decision_tools={**decision_config.snapshot(), "tools": [tool.name for tool in decision_tools]},
     )
     recorder = SessionRecorder.create(
         session_id=body.get("session_id") or None,
@@ -598,6 +616,22 @@ async def bot(runner_args: RunnerArguments) -> None:
         server=MessagingIntents(messaging_tools, matrix_gateway.contacts.all) if messaging_enabled else None,
     )
 
+    async def send_rtvi_message(message) -> None:
+        await task.rtvi.push_transport_message(message)
+
+    # Right after the LLM: decides on each complete answer while TTS speaks it.
+    decision_processor = (
+        DecisionToolsProcessor(
+            context=context,
+            tools=decision_tools,
+            client=SystemOneClient(decision_config),
+            send_message=send_rtvi_message,
+            recorder=recorder,
+        )
+        if decision_tools
+        else None
+    )
+
     pipeline = Pipeline(
         [
             transport.input(),
@@ -607,6 +641,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             reminder_processor,
             *([intent_engine] if intent_engine else []),
             llm,
+            *([decision_processor] if decision_processor else []),
             tts,
             transport.output(),
             *audio_processors,
