@@ -584,7 +584,12 @@ async def bot(runner_args: RunnerArguments) -> None:
         },
         person=person_context.snapshot if person_context else None,
         intent_engine=intent_engine_config.snapshot(),
-        decision_tools={**decision_config.snapshot(), "tools": [tool.name for tool in decision_tools]},
+        # The questions asked (enum-filtered catalog): the dreamer's ``redecide`` job replays them.
+        decision_tools={
+            **decision_config.snapshot(),
+            "tools": [tool.name for tool in decision_tools],
+            "questions": {tool.name: tool.question() for tool in decision_tools},
+        },
     )
     recorder = SessionRecorder.create(
         session_id=body.get("session_id") or None,

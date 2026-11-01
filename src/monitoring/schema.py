@@ -114,6 +114,13 @@ turn_metrics = Table(
     Column("completion_tokens", Integer),
     Column("gpu_load_mean", Float),
     Column("gpu_load_peak", Float),
+    # Decision model of the turn's first answer (not a stage: it runs alongside TTS).
+    Column("decision_secs", Float),
+    # Decision call send time - first bot audio (negative: before the robot spoke).
+    Column("decision_lag_secs", Float),
+    # called | none | low_confidence | error
+    Column("decision_outcome", String(16)),
+    Column("decision_choice", String(64)),
     Column("computed_at", Float, nullable=False),
 )
 
@@ -126,7 +133,7 @@ tool_calls = Table(
     Column("call_id", String(128), primary_key=True),
     Column("turn_idx", Integer),
     Column("name", String(128), nullable=False),
-    # llm | intent
+    # llm | intent | decision
     Column("trigger", String(16), nullable=False),
     # client | home_assistant
     Column("target", String(32), nullable=False),

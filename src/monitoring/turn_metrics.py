@@ -36,6 +36,15 @@ the remainder always add up to ``total_secs``:
 - ``text_aggregation``: first token -> first sentence handed to the TTS.
 - ``tts``: TTS time to first byte.
 
+Decision tools
+--------------
+The decision model runs after the LLM answer, alongside TTS, so it is not a stage:
+``decision_secs`` is its latency for the turn's first answer, ``decision_outcome``
+and ``decision_choice`` what it decided, and ``decision_lag_secs`` when its call
+was sent relative to the first bot audio (negative: before the robot spoke). Its
+calls are ``tool_calls`` rows with the ``decision`` trigger; they count for the
+response latency when perceivable, but not for the turn kind or ``n_tool_calls``.
+
 Turn kind
 ---------
 ``intent`` (the intent engine answered) > ``vision`` (an LLM call of the turn had
@@ -97,13 +106,16 @@ INTENT_EVENT = "intent_engine"
 INTENT_MATCH_METRIC = "intent_match_secs"
 INTENT_TARGET_METRIC = "intent_target_secs"
 INTENT_CALL_ID_PREFIX = "intent-"
+DECISION_EVENT = "decision_tool"
+DECISION_METRIC = "decision_secs"
+DECISION_CALL_ID_PREFIX = "decision-"
 HOME_ASSISTANT_TARGET = "home_assistant"
 # Results the client-tool timeout handler and pipecat's own timeout produce.
 TIMEOUT_ERROR_PREFIX = "Timed out"
 
 # Slack when matching events that are recorded a few milliseconds apart.
 _EPS = 0.05
-_METRIC_NAMES = ("ttfb", "text_aggregation", INTENT_MATCH_METRIC, INTENT_TARGET_METRIC)
+_METRIC_NAMES = ("ttfb", "text_aggregation", INTENT_MATCH_METRIC, INTENT_TARGET_METRIC, DECISION_METRIC)
 _LLM_CALL_COLUMNS = (
     "id",
     "turn_idx",
@@ -190,12 +202,16 @@ def _tool_calls(trace: dict[str, Any], perceivable: set[str]) -> list[dict[str, 
     def started(call_id: str | None, name: str | None, ts: float) -> None:
         if not call_id or call_id in calls:
             return
-        from_intent = call_id not in llm_ids and call_id.startswith(INTENT_CALL_ID_PREFIX)
+        trigger = "llm"
+        if call_id not in llm_ids and call_id.startswith(INTENT_CALL_ID_PREFIX):
+            trigger = "intent"
+        elif call_id not in llm_ids and call_id.startswith(DECISION_CALL_ID_PREFIX):
+            trigger = "decision"
         calls[call_id] = {
             "session_id": session_id,
             "call_id": call_id,
             "name": name or "?",
-            "trigger": "intent" if from_intent else "llm",
+            "trigger": trigger,
             "target": "client",
             "sent_at": ts,
             "duration_secs": None,
@@ -388,6 +404,15 @@ def _turn_row(
             stages[stage] = sum(lengths) if lengths else None
         unexplained = max(0.0, total - sum(s["end"] - s["start"] for s in segments))
 
+    # ---- decision model (the turn's first answer)
+    decisions = [e for e in events if e["kind"] == DECISION_EVENT]
+    decision = next((e for e in decisions if data(e).get("outcome") == "called"), decisions[0] if decisions else None)
+    decision_secs = next((m["value"] for m in metrics if m["name"] == DECISION_METRIC), None)
+    decision_sends = [c["sent_at"] for c in calls if c["trigger"] == "decision"]
+    decision_lag = min(decision_sends) - audio if decision_sends and audio is not None else None
+    # Decision calls follow every answer: they do not make a turn a tool turn.
+    calls = [c for c in calls if c["trigger"] != "decision"]
+
     # ---- kind, counts, load
     intent_handled = any(e["kind"] == INTENT_EVENT and data(e).get("handled_by") == "intent" for e in events)
     n_images = sum(c.get("n_images") or 0 for c in llm_calls)
@@ -424,6 +449,10 @@ def _turn_row(
         "completion_tokens": sum(completion) if completion else None,
         "gpu_load_mean": sum(loads) / len(loads) if loads else None,
         "gpu_load_peak": max(loads) if loads else None,
+        "decision_secs": decision_secs,
+        "decision_lag_secs": decision_lag,
+        "decision_outcome": data(decision).get("outcome") if decision else None,
+        "decision_choice": data(decision).get("choice") if decision else None,
         "computed_at": time.time(),
     }
     updates: dict[str, Any] = {}

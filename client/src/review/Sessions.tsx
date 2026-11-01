@@ -21,7 +21,7 @@ import { powerLabel } from "./chartTheme";
 import { TurnTimeline } from "./TurnTimeline";
 import { MemoryStatusBadge } from "./Memories";
 import { AudioClips, ImageStrip, StatusLine, TranscriptTable, WerBadge } from "./components";
-import { formatDate, formatDuration, formatSecs, reviewHref, useAnnotator } from "./utils";
+import { formatDate, formatDuration, formatPct, formatSecs, reviewHref, useAnnotator } from "./utils";
 
 export function SessionsList() {
   const sessions = useSessions();
@@ -298,6 +298,42 @@ function TurnCard({
           <p className="text-sm">{turn.bot_text}</p>
         </div>
       )}
+      <DecisionChoices decisions={turn.decisions} />
+    </div>
+  );
+}
+
+/** Decision tool choices of a turn by source: the live model, then the ``redecide`` models. */
+function DecisionChoices({ decisions }: Readonly<{ decisions: Record<string, Record<string, string>> }>) {
+  const sources = Object.keys(decisions);
+  if (!sources.length) return null;
+  const live = sources.find((source) => source.startsWith("live:"));
+  return (
+    <div className="rv-side">
+      <span className="rv-label">Decision tools</span>
+      <table className="rv-table rv-table-static text-sm">
+        <tbody>
+          {sources.map((source) => (
+            <tr key={source}>
+              <td className="rv-mono">{source}</td>
+              <td>
+                {Object.entries(decisions[source]).map(([tool, choice]) => {
+                  const differs = live !== undefined && source !== live && decisions[live]?.[tool] !== choice;
+                  return (
+                    <span
+                      key={tool}
+                      className={`rv-badge ${differs ? "rv-badge-warn" : "rv-badge-muted"}`}
+                      title={differs ? `differs from ${live}` : tool}
+                    >
+                      {tool}: {choice}
+                    </span>
+                  );
+                })}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -336,6 +372,25 @@ export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>
               >
                 Re-run reasr
               </button>
+              {Object.entries(data.decision_summary).map(([source, summary]) => (
+                <span
+                  key={source}
+                  className="rv-badge rv-badge-muted"
+                  title={`${source} vs ${summary.reference_sources.join(", ")} over ${summary.turns} turns`}
+                >
+                  {source} agrees {formatPct(summary.agreement)}
+                </span>
+              ))}
+              {"decision_tools" in data.session.config && (
+                <button
+                  className="btn-secondary"
+                  disabled={requeue.isPending}
+                  onClick={() => requeue.mutate({ kind: "redecide", session_ids: [sessionId] })}
+                  title="Asks the reference/candidate decision models the session's decision-tool questions when the machine is idle"
+                >
+                  Re-run redecide
+                </button>
+              )}
               <button
                 className="btn-secondary"
                 disabled={requeue.isPending}

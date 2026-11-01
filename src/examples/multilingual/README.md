@@ -94,7 +94,7 @@ The pipeline can match device commands, such as "Allume la lampe du salon," befo
 
 ### Decision tools
 
-The pipeline can let a small decision model, served by the Ollama System One API, call client tools after each LLM answer. The first entry makes a Reachy Mini robot play an emotion that fits the exchange while the agent speaks. The feature is off by default. Set `DECISION_MODEL_URL` in `.env` to turn it on. While it is on, the LLM does not see the decision tools, and explicit requests still reach them through the intent engine. For the setup and the tool catalog, refer to [Configure Decision Tools](../../../docs/how-to/configure-decision-tools.md).
+The pipeline can let a small decision model, served by the Ollama System One API, call client tools after each LLM answer. The first entry makes a Reachy Mini robot play an emotion that fits the exchange while the agent speaks. The feature is off by default. Set `DECISION_MODEL_URL` in `.env` to turn it on. While it is on, the LLM does not see the decision tools, and explicit requests still reach them through the intent engine. For the setup and the tool catalog, refer to [Configure Decision Tools](../../../docs/how-to/configure-decision-tools.md). When session recording is enabled, the review UI shows the decision latency and choices, and the `redecide` job of the dreamer measures how often the live decision model agrees with a reference model. Refer to [Re-Evaluate Decisions With Another Model](../../../docs/how-to/configure-decision-tools.md#re-evaluate-decisions-with-another-model).
 
 ### Client-executed tools
 

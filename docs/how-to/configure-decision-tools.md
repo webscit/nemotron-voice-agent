@@ -140,9 +140,88 @@ With `min_confidence` set to `0.0`, the robot plays an emotion on every answer w
 
 When [conversation recording](enable-conversation-recording.md) is enabled, the recorder stores the following data:
 
-- A `decision_tool` event for each decision with the `outcome` (`called`, `none`, `low_confidence`, or `error`), the `tool`, the `choice`, the `confidence`, the `probabilities` for each option, and the `latency_ms` of the decision call. A failed call records only the `error` and `latency_ms`.
-- A `function_result` event with the client's reply to each call. The `tool_call_id` of a decision call starts with `decision-`.
-- A `decision_tools` section in the session configuration snapshot with `enabled`, `model`, `timeout_secs`, and the active `tools`. The snapshot does not contain the URL or the API key.
+- A `decision_tool` event for each decision with the `outcome` (`called`, `none`, `low_confidence`, or `error`), the `tool`, the `choice`, the `confidence`, the `probabilities` for each option, the `latency_ms` of the decision call, and the `state` sent to the decision model. A called decision also records the `tool_call_id` of the call. A failed call records only the `error`, the `latency_ms`, and the `state`.
+- A `decision_secs` metric with the latency of each decision request. One request answers every active tool.
+- A `function_call_in_progress` event when the server sends a decision call, and a `function_result` event with the client's reply. The `tool_call_id` of a decision call starts with `decision-`.
+- A `decision_tools` section in the session configuration snapshot with `enabled`, `model`, `timeout_secs`, the active `tools`, and the `questions` asked to the decision model. The snapshot does not contain the URL or the API key.
+
+### Decision Metrics Per Turn
+
+Each decision call becomes a `tool_calls` row with the trigger `decision`. The call counts for the response latency when the client marks the tool as perceivable. A decision call does not make the turn a `tool` turn, and `n_tool_calls` does not count it, because the decision model runs after every answer.
+
+The decision is not a latency stage, because it runs alongside TTS. The following `turn_metrics` columns describe the decision for the first answer of each turn instead.
+
+| Column | Description |
+| --- | --- |
+| `decision_secs` | Latency of the decision model |
+| `decision_lag_secs` | Time when the decision call was sent, minus the time of the first bot audio. A negative value means that the robot moved before it spoke. |
+| `decision_outcome` | `called`, `none`, `low_confidence`, or `error` |
+| `decision_choice` | The value that the decision model chose |
+
+The recorder adds these columns to an existing database automatically. To fill them for sessions recorded earlier, run the backfill in [Per-Turn Metrics](enable-conversation-recording.md#per-turn-metrics).
+
+### Decisions in the Review UI
+
+The [review UI](enable-conversation-recording.md#review-in-the-web-ui) shows the decisions in the following places:
+
+- **Metrics** page: the **Decision model** section shows, for each variant, the number of turns, the decision latency p50 and p90, the **Sent after audio** p50, the called, none, low confidence, and error rates, the top choices, and the agreement of each source with the reference, after the `redecide` job has run. Select **Decision model** in **Compare by** to compare decision models. The tools table lists decision calls with the trigger **decision model**.
+- **Sessions** page: each turn shows a **decision model** badge with the choice and the latency, and when the call was sent relative to the first bot audio. A **Decision tools** table lists the choice of each source: the live model as `live:<model>`, and each `redecide` model. A choice that differs from the live choice is highlighted.
+- **Sessions** page header: a session that ran decision tools shows one **agrees** badge per source, with the share of turns that agree with the reference, and a **Re-run redecide** button.
+
+## Re-Evaluate Decisions With Another Model
+
+The `redecide` job of the [offline post-processing runner](enable-conversation-recording.md#offline-post-processing-dreamer) asks other decision models the questions of the live session. It then measures how often the live model agrees with a slower, more accurate reference model. Use it to check the live model on real conversations before you change `DECISION_MODEL`.
+
+### How Redecide Works
+
+For each turn where the live decision model ran, the job works as follows:
+
+1. The job replays the first decision of the turn, with the same `state` and the same `questions` from the session snapshot, on the `reference` model and on each enabled `candidates` model. It stores each answer as a `kind="decision"` annotation, with the endpoint `name` as the source.
+2. The job picks the reference choice of the turn. A human choice, stored as a `kind="decision"` annotation with the source `human:<name>`, takes precedence over the reference model. The review UI does not provide a way to enter human choices yet.
+3. The job compares the live choice, with the source `live:<decision model>`, and each candidate with the reference choice. A turn agrees when every compared tool has the reference choice.
+4. The job stores one `kind="decision_summary"` annotation per session and source, with `agreement`, `agreed`, `turns`, and `reference_sources`.
+
+Sessions without decision tools, or recorded before the snapshot included the `questions`, finish immediately.
+
+### Configure Redecide
+
+The `redecide` section of [`src/monitoring/jobs/dreamer.yaml`](../../src/monitoring/jobs/dreamer.yaml) defines the endpoints. The following example shows the shipped configuration.
+
+```yaml
+redecide:
+  reference:
+    name: nimble
+    model: nimble
+  candidates:
+    - name: d3-9b
+      model: d3:9b
+      enabled: false
+```
+
+Each endpoint accepts the following fields.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `name` | `model` | Annotation source name of the endpoint |
+| `model` | Required | Decision model name |
+| `url` | `DECISION_MODEL_URL` | Ollama System One URL, for example `http://host.docker.internal:11434/v1/systemone` |
+| `api_key_env` | `DECISION_MODEL_API_KEY` | Name of the environment variable that holds the Bearer key |
+| `service` | unset | On-demand `dreamer-models` container that the runner starts for the job, as for `reasr` |
+| `enabled` | `true` | Set to `false` to keep the endpoint configured without running it |
+
+The default reference is `nimble`, which chose correctly on all 32 exchanges in [Choose a Decision Model](#choose-a-decision-model). The `d3:9b` candidate is disabled. Pull each model on the Ollama server that the endpoint uses, for example `ollama pull nimble`.
+
+The `dreamer` container reads `.env`, so an endpoint without `url` uses the same server as the live decision model. The container maps `host.docker.internal` to the host, so it can reach an Ollama server on the host.
+
+### Run Redecide
+
+The default `auto_enqueue` list contains `redecide`, so the dreamer runs the job for every ended session. To run it again for a session, click **Re-run redecide** on the session page, or enqueue the job from the command line.
+
+```bash
+docker compose exec dreamer uv run python -m monitoring.jobs enqueue redecide <session_id>
+```
+
+A re-run asks only the turns and models that have no `decision` annotation yet, for example after you enable a candidate. It then computes the agreement again.
 
 ## Troubleshooting
 
@@ -156,4 +235,6 @@ The following table lists common symptoms and resolutions.
 | The log shows `decision model failed (HTTPStatusError ...)` | Verify the model name, that Ollama is v0.35.0 or later, and, for Ollama Cloud, the API key. |
 | The robot never plays an emotion, and the log shows `-> none` | The decision model found no fitting value. Review the `criteria` descriptions and the `instructions`. |
 | The log shows `low_confidence` | The choice is below `min_confidence`. Lower the threshold in the catalog. |
+| The `redecide` job fails with `ConnectError` or `HTTPStatusError` | Verify that the `dreamer` container can reach the endpoint URL, or `DECISION_MODEL_URL` when the endpoint has no `url`, and that the model is pulled on that Ollama server. |
+| The session shows no **agrees** badge | The `redecide` job has not run, the session was recorded before the snapshot included the `questions`, or no reference choice is available. Check the job on the **Dreamer** page. |
 | The LLM still calls `play_emotion` | `DECISION_MODEL_URL` is unset, or the client's `enum` accepts none of the catalog values. Check the `does not accept` and `left to the LLM` log lines. |

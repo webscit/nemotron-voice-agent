@@ -25,7 +25,7 @@ from sqlalchemy import func, select
 
 from monitoring import intents, memories, schema, voice_id
 from monitoring.config import MonitoringConfig
-from monitoring.jobs import JOB_REGISTRY
+from monitoring.jobs import JOB_REGISTRY, redecide
 from monitoring.jobs.reasr import live_source_name, reasr_endpoints, score_session
 from monitoring.jobs.runner import PAUSE_KEY, STATUS_KEY, declared_services, load_dreamer_config
 from monitoring.jobs.wer import error_rates, normalize
@@ -325,11 +325,24 @@ class ReviewService:
         transcripts = self._transcripts_by_turn(session_id)
         wer_by_turn: dict[int, dict[str, Any]] = defaultdict(dict)
         wer_summary = {}
+        # Decision tool choices per turn and source: live, then the ``redecide`` models.
+        decisions_by_turn: dict[int, dict[str, Any]] = defaultdict(dict)
+        for idx, decision in redecide.first_decisions(self.store, session_id).items():
+            if decision["choices"]:
+                decisions_by_turn[idx][redecide.live_source_name(session.get("config") or {})] = decision["choices"]
+        decision_summary = {}
         for annotation in self.store.annotations_for(session_id):
             if annotation["kind"] == "wer":
                 wer_by_turn[_split_target(annotation["target_id"])[1]][annotation["source"]] = annotation["value"]
             elif annotation["kind"] == "wer_summary":
                 wer_summary[annotation["source"]] = annotation["value"]
+            elif annotation["kind"] == redecide.DECISION_KIND:
+                answers = (annotation["value"] or {}).get("answers") or {}
+                decisions_by_turn[_split_target(annotation["target_id"])[1]][annotation["source"]] = {
+                    tool: answer.get("choice") for tool, answer in answers.items() if isinstance(answer, dict)
+                }
+            elif annotation["kind"] == redecide.SUMMARY_KIND:
+                decision_summary[annotation["source"]] = annotation["value"]
 
         out_turns = []
         for idx in sorted(turns):
@@ -344,6 +357,7 @@ class ReviewService:
                     "transcripts": {k: v["text"] for k, v in by_source.items()},
                     "human_reference": human,
                     "wer": wer_by_turn.get(idx, {}),
+                    "decisions": decisions_by_turn.get(idx, {}),
                     "user_bot_latency": latency.get(idx),
                     "metrics": turn_metrics.get(idx),
                     "tool_calls": tool_calls.get(idx, []),
@@ -363,6 +377,7 @@ class ReviewService:
             "turns": out_turns,
             "system_samples": self._system_samples(session),
             "wer_summary": wer_summary,
+            "decision_summary": decision_summary,
             "jobs": [{k: job[k] for k in ("kind", "status", "error", "attempts", "finished_at")} for job in jobs],
         }
 

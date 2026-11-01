@@ -53,8 +53,8 @@ characters. The recorder replaces any other value with a generated id.
 |-------|---------|
 | `sessions` | Start and end, `end_reason`, heartbeat, and a **config snapshot** (models, servers, language, voice, turn detection, client tools, git sha). The snapshot is the A/B key. |
 | `turns` | One row per exchange: user and bot text, timestamps, `interrupted`, and `barge_in`. Turn 0 is the greeting. Refer to [Turn Timestamps and Flags](#turn-timestamps-and-flags). |
-| `turn_metrics` | One row per user turn, written when the turn ends: turn kind, response and voice latency, the stage breakdown, token and call counts, and GPU load. Refer to [Per-Turn Metrics](#per-turn-metrics). |
-| `tool_calls` | One row per tool or intent call: name, trigger (`llm` or `intent`), target (`client` or `home_assistant`), send time, duration, outcome (`ok`, `error`, `timeout`, or `cancelled`), and the `perceivable` flag |
+| `turn_metrics` | One row per user turn, written when the turn ends: turn kind, response and voice latency, the stage breakdown, token and call counts, GPU load, and the decision model result. Refer to [Per-Turn Metrics](#per-turn-metrics). |
+| `tool_calls` | One row per tool or intent call: name, trigger (`llm`, `intent`, or `decision`), target (`client` or `home_assistant`), send time, duration, outcome (`ok`, `error`, `timeout`, or `cancelled`), and the `perceivable` flag |
 | `system_samples` | Host-wide samples, one per second while a session is live, with the number of live sessions |
 | `events` | Timeline: VAD and bot speaking, interruptions, final ASR, function calls (requested, sent, result, cancelled), [decision tool](configure-decision-tools.md#review-decisions) choices (`decision_tool`), latency breakdowns, errors |
 | `metrics` | Flat numeric samples: `ttfb`, `processing`, `llm_usage.*`, `tts_usage`, `user_bot_latency`, `first_bot_speech_latency`, `turn_duration`, … Zero-valued `ttfb` and `processing` samples, which Pipecat emits at startup, are not stored; plus the client's own `client.*` metrics (processor `client`) | |
@@ -137,9 +137,20 @@ The turn `kind` lets you compare like with like. The first matching rule wins:
 `intent` (the intent engine answered), `vision` (an LLM call of the turn had
 image input), `tool` (at least one tool or intent call), and `plain`.
 
+When the session runs [decision tools](configure-decision-tools.md), the
+`decision_secs`, `decision_lag_secs`, `decision_outcome`, and
+`decision_choice` columns describe the decision for the first answer of the
+turn. The decision is not a stage, because it runs alongside TTS. A decision
+call has the `decision` trigger in `tool_calls`. It counts for the response
+latency when it is perceivable, but it does not make the turn a `tool` turn and
+is not counted in `n_tool_calls`. Refer to
+[Decision Metrics Per Turn](configure-decision-tools.md#decision-metrics-per-turn).
+
 The recorder writes these rows when a turn ends and again when the session
 closes. To fill them for sessions recorded before this table existed, run the
-backfill. It is idempotent and uses the same code as the live recorder.
+backfill. It is idempotent and uses the same code as the live recorder. The
+recorder adds new `turn_metrics` columns to an existing database automatically;
+run the backfill to fill them for older sessions.
 
 ```bash
 PYTHONPATH=src uv run python -m monitoring.turn_metrics                 # every session
@@ -277,6 +288,9 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - the response and voice latency, the turn kind, a barge-in badge, and a
     timeline of the latency stages next to the GPU and CPU load during the turn;
   - the tool and intent calls with their duration and outcome;
+  - the decision model choice and latency, and a **Decision tools** table with
+    the choice of each source, when the session ran
+    [decision tools](configure-decision-tools.md#decisions-in-the-review-ui);
   - the user audio, every transcript diffed against the reference, and the human reference;
   - images, and the LLM calls (the full stored input on click);
   - the assistant reply, plus the whole-call stereo recording;
@@ -351,7 +365,7 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
 - **Metrics.** Compares pipeline variants over a time range (24 h, 7 days,
   30 days, all). A variant is the combination of the config fields you
   compare by: LLM, ASR, TTS, voice, language, turn detection, transport, git
-  revision, intent engine, prompt. Each variant keeps its color across filter
+  revision, intent engine, prompt, decision model. Each variant keeps its color across filter
   changes. A turn-kind filter (all, plain, tool, intent-handled, vision) applies
   to the latency views, and every view shows its sample count. The page shows:
   - response latency as the headline number, with voice latency next to it;
@@ -363,6 +377,10 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
     than 20% and 0.1 s above the previous one, with at least 5 turns in both;
   - tool and intent calls: count, duration, and failure, timeout, and
     cancellation rates;
+  - the decision model per variant: latency, when its call was sent relative
+    to the first bot audio, outcome rates, top choices, and agreement with the
+    `redecide` reference. Refer to
+    [Decisions in the Review UI](configure-decision-tools.md#decisions-in-the-review-ui);
   - time to first byte per service;
   - LLM time to first token, text-only vs with images;
   - ASR WER per transcript source;
@@ -392,7 +410,7 @@ docker compose exec dreamer uv run python -m monitoring.jobs status
 How the runner behaves:
 
 - **Scheduling.** Every ended session gets the jobs listed in
-  `auto_enqueue` (default `[reasr, dream]`). A job runs only when no session has a recent heartbeat and
+  `auto_enqueue` (default `[reasr, redecide, dream]`). A job runs only when no session has a recent heartbeat and
   the last activity is older than `idle_grace_secs`.
 - **On-demand models.** A job can require a compose service from the
   `dreamer-models` profile, for example `dreamer-asr-en`. The runner starts it
@@ -450,6 +468,18 @@ docker compose exec dreamer uv run python -m monitoring.transcripts_csv export /
 docker compose exec dreamer uv run python -m monitoring.transcripts_csv import /app/data/turns.csv --annotator alice
 docker compose exec dreamer uv run python -m monitoring.jobs enqueue reasr <session_id> ...
 ```
+
+### `redecide`: evaluate another decision model on real conversations
+
+For each turn of a session that ran [decision tools](configure-decision-tools.md),
+`redecide` asks the configured `reference` and `candidates` decision models the
+same question as the live decision model. It stores per-turn `kind="decision"`
+annotations, plus a session-level `kind="decision_summary"` per source with the
+share of turns that agree with the reference. A human choice (source
+`human:<name>`) takes precedence over the reference model. Sessions without
+decision tools finish immediately. For the configuration and the agreement
+rules, refer to
+[Re-Evaluate Decisions With Another Model](configure-decision-tools.md#re-evaluate-decisions-with-another-model).
 
 ### `dream`: extract memories and learn intent sentences
 

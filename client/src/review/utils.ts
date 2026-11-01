@@ -87,6 +87,13 @@ export function formatSecs(value: number | null | undefined): string {
   return value === null || value === undefined ? "–" : `${value.toFixed(2)} s`;
 }
 
+/** Who sent a tool call (``tool_calls.trigger``). */
+export function triggerLabel(trigger: string): string {
+  if (trigger === "intent") return "intent engine";
+  if (trigger === "decision") return "decision model";
+  return "LLM";
+}
+
 // ---- Word diff (LCS over normalized tokens) ----
 // Tokenization mirrors the server's WER normalization (src/monitoring/jobs/wer.py):
 // hyphens and punctuation separate words, so "Rappelle-moi" matches "rappelle moi".

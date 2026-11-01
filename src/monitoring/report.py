@@ -39,6 +39,9 @@ from monitoring.config import load_monitoring_config
 from monitoring.store import SessionStore
 from monitoring.turn_metrics import KINDS, STAGES, service_role
 
+# Session summary of the ``redecide`` job (monitoring.jobs.redecide).
+DECISION_SUMMARY_KIND = "decision_summary"
+
 # A trend bucket is flagged when its median response latency is clearly worse than
 # the previous bucket's: both ratio and absolute difference, on enough turns.
 REGRESSION_RATIO = 1.2
@@ -105,11 +108,13 @@ def collect_with_sessions(
         tool_calls = rows(schema.tool_calls, *(c.name for c in schema.tool_calls.columns)) if derived else []
         turns = rows(schema.turns, "session_id", "idx", "user_text", "interrupted")
         llm_calls = rows(schema.llm_calls, "session_id", "ttfb", "n_images", "prompt_tokens", "completion_tokens")
-        wers = [
+        summaries = [
             a
             for a in rows(schema.annotations, "session_id", "kind", "source", "value", "id")
-            if a["kind"] == "wer_summary"
+            if a["kind"] in ("wer_summary", DECISION_SUMMARY_KIND)
         ]
+        wers = [a for a in summaries if a["kind"] == "wer_summary"]
+        decision_summaries = [a for a in summaries if a["kind"] == DECISION_SUMMARY_KIND]
 
     group_of = {s["id"]: tuple(_dig(s["config"] or {}, g) for g in group_by) for s in sessions}
     groups: dict[tuple, dict[str, Any]] = defaultdict(
@@ -127,6 +132,8 @@ def collect_with_sessions(
             "ttft_vision": [],
             "prompt_tokens": [],
             "wer": defaultdict(lambda: [0, 0]),
+            # {source: [turns agreeing with the reference, turns compared]} (``redecide``)
+            "decision_agreement": defaultdict(lambda: [0, 0]),
             "client": defaultdict(list),
         }
     )
@@ -183,6 +190,13 @@ def collect_with_sessions(
         acc[0] += value.get("word_errors") or 0
         acc[1] += value.get("ref_words") or 0
         per_session[session_id]["wer"][source] = value.get("wer")
+    latest_decision: dict[tuple[str, str], dict] = {}
+    for annotation in sorted(decision_summaries, key=lambda a: a["id"]):
+        latest_decision[(annotation["session_id"], annotation["source"])] = annotation["value"] or {}
+    for (session_id, source), value in latest_decision.items():
+        acc = groups[group_of[session_id]]["decision_agreement"][source]
+        acc[0] += value.get("agreed") or 0
+        acc[1] += value.get("turns") or 0
     return groups, per_session
 
 
@@ -209,6 +223,40 @@ def _kind_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "completion_tokens_p50": _pct(_values(rows, "completion_tokens"), 50),
         "gpu_load_mean": statistics.fmean(loads) if loads else None,
         "gpu_load_peak": max(peaks) if peaks else None,
+    }
+
+
+DECISION_OUTCOMES = ("called", "none", "low_confidence", "error")
+_TOP_CHOICES = 8
+
+
+def _decision_stats(rows: list[dict[str, Any]], agreement: dict[str, list[int]]) -> dict[str, Any] | None:
+    """Decision model latency, outcome rates and choices over ``turn_metrics`` rows.
+
+    ``agreement`` is ``{source: [turns agreeing with the reference, turns compared]}``
+    from the ``redecide`` job. None when no turn ran the decision model.
+    """
+    decided = [row for row in rows if row.get("decision_outcome")]
+    if not decided and not agreement:
+        return None
+    choices: dict[str, int] = defaultdict(int)
+    for row in decided:
+        if row["decision_outcome"] == "called" and row.get("decision_choice"):
+            choices[row["decision_choice"]] += 1
+    top = sorted(choices.items(), key=lambda item: (-item[1], item[0]))[:_TOP_CHOICES]
+    return {
+        "turns": len(decided),
+        "latency": _dist(_values(decided, "decision_secs")),
+        "lag": _dist(_values(decided, "decision_lag_secs")),
+        "outcomes": {
+            outcome: sum(row["decision_outcome"] == outcome for row in decided) / len(decided) if decided else None
+            for outcome in DECISION_OUTCOMES
+        },
+        "choices": [{"choice": choice, "turns": n} for choice, n in top],
+        "agreement": {
+            source: {"agreement": agree / compared if compared else None, "turns": compared}
+            for source, (agree, compared) in sorted(agreement.items())
+        },
     }
 
 
@@ -325,6 +373,7 @@ def metrics_json(
                     source: {"wer": errors / words if words else None, "ref_words": words}
                     for source, (errors, words) in sorted(g["wer"].items())
                 },
+                "decisions": _decision_stats(g["turn_metrics"], dict(g["decision_agreement"])),
             }
         )
     all_latency = [v for g in groups.values() for v in g["latency"]]

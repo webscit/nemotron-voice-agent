@@ -4,9 +4,9 @@
 // Per-turn timeline of the session view: latency stages from the end of user
 // speech to the first response, tool calls, and the host load during the turn.
 
-import type { SystemSample, ToolCall, TurnDetail } from "./api";
+import type { SystemSample, ToolCall, TurnDetail, TurnMetrics } from "./api";
 import { INK, KIND_LABELS, SERIES, stageInfo } from "./chartTheme";
-import { formatSecs } from "./utils";
+import { formatSecs, triggerLabel } from "./utils";
 
 const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   ok: "rv-badge-muted",
@@ -14,6 +14,25 @@ const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   timeout: "rv-badge-bad",
   cancelled: "rv-badge-warn",
 };
+
+/** What the decision model decided for the turn's first answer, how long it took and when its call left. */
+function DecisionLine({ metrics }: Readonly<{ metrics: TurnMetrics }>) {
+  const lag = metrics.decision_lag_secs;
+  const timing =
+    lag === null ? null : `sent ${formatSecs(Math.abs(lag))} ${lag < 0 ? "before" : "after"} the first bot audio`;
+  return (
+    <div className="rv-stage-legend">
+      <span
+        className={`rv-badge ${metrics.decision_outcome === "error" ? "rv-badge-bad" : "rv-badge-muted"}`}
+        title={timing ?? "decision model of the turn's first answer"}
+      >
+        decision model · {metrics.decision_choice ?? metrics.decision_outcome} · {formatSecs(metrics.decision_secs)}
+        {metrics.decision_outcome !== "called" && metrics.decision_choice ? ` · ${metrics.decision_outcome}` : ""}
+      </span>
+      {timing && <span className="text-xs text-muted">{timing}</span>}
+    </div>
+  );
+}
 
 /** GPU and CPU load (both percent, one axis) over the turn; the band is the wait for the first response. */
 function LoadSparkline({
@@ -163,13 +182,14 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
             <span
               key={call.call_id}
               className={`rv-badge ${OUTCOME_TONE[call.outcome]}`}
-              title={`${call.trigger === "intent" ? "intent engine" : "LLM"} → ${call.target}${call.perceivable ? " · perceivable" : ""}`}
+              title={`${triggerLabel(call.trigger)} → ${call.target}${call.perceivable ? " · perceivable" : ""}`}
             >
               {call.name} · {formatSecs(call.duration_secs)} · {call.outcome}
             </span>
           ))}
         </div>
       )}
+      {turn.metrics?.decision_outcome && <DecisionLine metrics={turn.metrics} />}
     </div>
   );
 }

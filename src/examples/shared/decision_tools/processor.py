@@ -60,6 +60,8 @@ if TYPE_CHECKING:
 # Tool calls sent by this processor; their client results never reach the context.
 DECISION_CALL_PREFIX = "decision-"
 EVENT_KIND = "decision_tool"
+# Decision model latency of one answer, in seconds (all its tools are one request).
+METRIC_DECISION_SECS = "decision_secs"
 # Loading the model after an Ollama restart takes seconds (4-7 s on Jetson Thor, up to
 # 14 s when its file is not in the page cache): the warm-up decision at session start waits that long, a turn does not.
 WARM_UP_TIMEOUT_SECS = 120.0
@@ -162,15 +164,16 @@ class DecisionToolsProcessor(FrameProcessor):
 
     async def _decide(self, answer: str) -> None:
         """Ask the decision model about ``answer`` and send the chosen calls."""
+        state = build_state(last_user_text(self._context), answer)
         started = time.monotonic()
         try:
-            decisions = await self._client.decide(
-                build_state(last_user_text(self._context), answer), tuple(self._tools.values())
-            )
+            decisions = await self._client.decide(state, tuple(self._tools.values()))
         except DecisionError as exc:
             logger.warning(f"Decision tools: decision model failed ({exc}); skipping this answer")
-            self._record(outcome="error", error=str(exc), latency_ms=_ms_since(started))
+            self._metric(time.monotonic() - started)
+            self._record(outcome="error", error=str(exc), latency_ms=_ms_since(started), state=state)
             return
+        self._metric(time.monotonic() - started)
         latency_ms = _ms_since(started)
         for decision in decisions:
             tool = self._tools[decision.tool]
@@ -179,6 +182,8 @@ class DecisionToolsProcessor(FrameProcessor):
                 f"Decision tools: {tool.name} -> {decision.choice} "
                 f"(confidence {decision.confidence:.2f}, {latency_ms} ms, {outcome})"
             )
+            call_id = f"{DECISION_CALL_PREFIX}{uuid.uuid4().hex[:16]}" if outcome == "called" else None
+            # ``state`` lets the dreamer's ``redecide`` job ask other models the same question.
             self._record(
                 outcome=outcome,
                 tool=tool.name,
@@ -186,9 +191,11 @@ class DecisionToolsProcessor(FrameProcessor):
                 confidence=decision.confidence,
                 probabilities=decision.probabilities,
                 latency_ms=latency_ms,
+                state=state,
+                tool_call_id=call_id,
             )
-            if outcome == "called":
-                await self._call(tool, decision.choice)
+            if call_id:
+                await self._call(tool, decision.choice, call_id)
 
     @staticmethod
     def _outcome(tool: DecisionTool, decision: Decision) -> str:
@@ -198,18 +205,29 @@ class DecisionToolsProcessor(FrameProcessor):
             return "low_confidence"
         return "called"
 
-    async def _call(self, tool: DecisionTool, choice: str) -> None:
+    async def _call(self, tool: DecisionTool, choice: str, call_id: str) -> None:
         """Send one tool call to the client, outside the LLM's function-call flow."""
-        data = LLMFunctionCallInProgressMessageData(
-            tool_call_id=f"{DECISION_CALL_PREFIX}{uuid.uuid4().hex[:16]}",
-            function_name=tool.name,
-            arguments=tool.call_arguments(choice),
-        )
+        arguments = tool.call_arguments(choice)
+        data = LLMFunctionCallInProgressMessageData(tool_call_id=call_id, function_name=tool.name, arguments=arguments)
+        if self._recorder:
+            # The send time of the call, like the recorder notes for LLM calls: the turn
+            # metrics pair it with the client's ``function_result``.
+            self._recorder.event(
+                "function_call_in_progress",
+                processor=_PROCESSOR_NAME,
+                name=tool.name,
+                tool_call_id=call_id,
+                arguments=arguments,
+            )
         await self._send_message(LLMFunctionCallInProgressMessage(data=data))
 
     def _record(self, **data: Any) -> None:
         if self._recorder:
             self._recorder.event(EVENT_KIND, processor=_PROCESSOR_NAME, **data)
+
+    def _metric(self, secs: float) -> None:
+        if self._recorder:
+            self._recorder.metric(METRIC_DECISION_SECS, secs, processor=_PROCESSOR_NAME)
 
 
 def _ms_since(started: float) -> int:

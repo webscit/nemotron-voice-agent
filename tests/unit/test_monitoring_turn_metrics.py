@@ -360,6 +360,57 @@ def test_intent_engine_fallbacks_stay_llm_turns():
     assert derive(dry.build())[1] == []  # nothing was sent
 
 
+def test_decision_model_is_tracked_without_making_a_tool_turn():
+    # The answer is complete at 12.0; the decision takes 0.15 s; the emotion call leaves at
+    # 12.15, after the first audio (11.5), and the client answers at 12.4.
+    trace = _plain()
+    trace.session["config"] = {"client_tools_perceivable": ["play_emotion"]}
+    trace.event(
+        12.15, "decision_tool", outcome="called", tool="play_emotion", choice="happy", tool_call_id="decision-1"
+    )
+    trace.metric(12.15, "decision_secs", 0.15, "DecisionTools")
+    trace.tool("decision-1", "play_emotion", 12.15, 12.4)
+    (row,), calls, _ = derive(trace.build())
+    assert (row["kind"], row["n_tool_calls"]) == ("plain", 0)
+    assert row["decision_secs"] == pytest.approx(0.15)
+    assert row["decision_lag_secs"] == pytest.approx(0.65)
+    assert (row["decision_outcome"], row["decision_choice"]) == ("called", "happy")
+    # The robot's first reaction is still the audio: the emotion came later.
+    assert (row["response_via"], row["response_latency"]) == ("audio", pytest.approx(1.5))
+    (call,) = calls
+    assert (call["trigger"], call["name"], call["perceivable"]) == ("decision", "play_emotion", True)
+    assert call["duration_secs"] == pytest.approx(0.25)
+    assert call["outcome"] == "ok"
+
+
+def test_decision_without_a_call_records_its_outcome():
+    trace = _plain()
+    trace.event(12.2, "decision_tool", outcome="error", error="ReadTimeout")
+    (row,), calls, _ = derive(trace.build())
+    assert (row["decision_outcome"], row["decision_choice"], row["decision_lag_secs"]) == ("error", None, None)
+    assert calls == []
+    (plain,), _, _ = derive(_plain().build())
+    assert plain["decision_outcome"] is None
+
+
+def test_report_decision_stats():
+    from monitoring.report import _decision_stats
+
+    rows = [
+        {"decision_outcome": "called", "decision_choice": "happy", "decision_secs": 0.1, "decision_lag_secs": 0.5},
+        {"decision_outcome": "called", "decision_choice": "happy", "decision_secs": 0.2, "decision_lag_secs": 0.7},
+        {"decision_outcome": "none", "decision_choice": "none", "decision_secs": 0.3, "decision_lag_secs": None},
+        {"decision_outcome": None},
+    ]
+    stats = _decision_stats(rows, {"live:d3:2b": [2, 3]})
+    assert stats["turns"] == 3
+    assert stats["latency"]["p50"] == pytest.approx(0.2)
+    assert stats["outcomes"]["called"] == pytest.approx(2 / 3)
+    assert stats["choices"] == [{"choice": "happy", "turns": 2}]
+    assert stats["agreement"]["live:d3:2b"] == {"agreement": pytest.approx(2 / 3), "turns": 3}
+    assert _decision_stats([{"decision_outcome": None}], {}) is None
+
+
 def test_turn_kind_precedence():
     vision = _tool_turn()
     vision.llm_calls[0]["n_images"] = 1

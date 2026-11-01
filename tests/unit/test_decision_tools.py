@@ -246,9 +246,13 @@ class Tap(FrameProcessor):
 class FakeRecorder:
     def __init__(self):
         self.events: list[dict] = []
+        self.metrics: list[tuple[str, float]] = []
 
     def event(self, kind, *, processor=None, **data):
         self.events.append({"kind": kind, **data})
+
+    def metric(self, name, value, *, processor=None, model=None):
+        self.metrics.append((name, value))
 
 
 class Harness:
@@ -317,8 +321,20 @@ class DecisionToolsProcessorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.type, "llm-function-call-in-progress")
         self.assertEqual((message.data.function_name, message.data.arguments), ("play_emotion", {"emotion": "happy"}))
         self.assertTrue(message.data.tool_call_id.startswith(DECISION_CALL_PREFIX))
-        event = h.recorder.events[-1]
-        self.assertEqual((event["kind"], event["outcome"], event["choice"]), ("decision_tool", "called", "happy"))
+        decision, sent = h.recorder.events
+        self.assertEqual(
+            (decision["kind"], decision["outcome"], decision["choice"]), ("decision_tool", "called", "happy")
+        )
+        # The state is kept for the redecide job, and the call's send time for the tool-call metrics.
+        self.assertEqual(decision["state"], h.requests[0]["state"])
+        self.assertEqual(decision["tool_call_id"], message.data.tool_call_id)
+        self.assertEqual(
+            (sent["kind"], sent["name"], sent["tool_call_id"]),
+            ("function_call_in_progress", "play_emotion", message.data.tool_call_id),
+        )
+        ((name, secs),) = h.recorder.metrics
+        self.assertEqual(name, "decision_secs")
+        self.assertGreaterEqual(secs, 0.0)
         # The answer still reached TTS / the aggregator unchanged.
         self.assertIn(LLMFullResponseEndFrame, [type(frame) for frame in h.tap.frames])
 

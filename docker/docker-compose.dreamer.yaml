@@ -24,6 +24,9 @@ services:
       - ../src:/app/src:ro
       - ../data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
+    # Reach endpoints served on the host, such as an Ollama decision model (redecide).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     logging:
       driver: "json-file"
