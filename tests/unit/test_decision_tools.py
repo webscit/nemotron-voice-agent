@@ -182,7 +182,7 @@ class SystemOneClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((decision.tool, decision.choice, decision.confidence), ("play_emotion", "happy", 0.8))
         body = json.loads(seen[0].content)
-        self.assertEqual((body["model"], body["state"]), ("nimble", "User: hi"))
+        self.assertEqual((body["model"], body["state"]), ("d3:2b", "User: hi"))
         self.assertEqual(
             body["questions"]["play_emotion"]["criteria"], {"happy": "Joy", "sad": "Sadness", "none": "No emotion"}
         )

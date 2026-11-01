@@ -60,8 +60,8 @@ if TYPE_CHECKING:
 # Tool calls sent by this processor; their client results never reach the context.
 DECISION_CALL_PREFIX = "decision-"
 EVENT_KIND = "decision_tool"
-# Loading the model after an Ollama restart takes seconds (about 14 s for nimble on
-# Jetson Thor): the warm-up decision at session start waits that long, a turn does not.
+# Loading the model after an Ollama restart takes seconds (4-7 s on Jetson Thor, up to
+# 14 s when its file is not in the page cache): the warm-up decision at session start waits that long, a turn does not.
 WARM_UP_TIMEOUT_SECS = 120.0
 WARM_UP_STATE = "User: Hello\nAssistant: Hello!"
 _PROCESSOR_NAME = "DecisionTools"

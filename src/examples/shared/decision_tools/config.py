@@ -28,11 +28,13 @@ class DecisionModelConfig:
     """The decision model endpoint (Ollama System One); empty ``url`` turns the feature off."""
 
     url: str = ""
-    model: str = "nimble"
+    # On Jetson Thor, d3:2b matched nimble's choices on 30 of 32 test exchanges in
+    # ~0.15 s instead of ~0.67 s (3.2 GB).
+    model: str = "d3:2b"
     # Never log or snapshot the key; ``repr=False`` keeps it out of dataclass reprs.
     api_key: str = field(default="", repr=False)
-    # A 25-value question is ~900 prompt tokens: ~1.3 s for nimble on an idle Jetson
-    # Thor, more while the LLM and TTS share the GPU.
+    # Room for larger decision models (nimble takes ~0.7-1.3 s for a 25-value question)
+    # and for a GPU shared with the LLM and TTS.
     timeout_secs: float = 3.0
 
     @classmethod
@@ -40,7 +42,7 @@ class DecisionModelConfig:
         """Read the ``DECISION_MODEL_*`` variables."""
         return cls(
             url=(os.getenv("DECISION_MODEL_URL") or "").strip(),
-            model=(os.getenv("DECISION_MODEL") or "").strip() or "nimble",
+            model=(os.getenv("DECISION_MODEL") or "").strip() or cls.model,
             api_key=(os.getenv("DECISION_MODEL_API_KEY") or "").strip(),
             timeout_secs=parse_env_float("DECISION_MODEL_TIMEOUT_SECS", 3.0, min_value=0.1),
         )

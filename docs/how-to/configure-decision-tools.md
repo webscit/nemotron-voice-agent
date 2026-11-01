@@ -21,7 +21,7 @@ While the feature is configured, the LLM does not see the decision tools. The fo
 - Replies that the intent engine speaks do not trigger a decision.
 - When the decision model fails or does not answer within `DECISION_MODEL_TIMEOUT_SECS`, the pipeline skips the decision for that answer and logs a warning. The conversation continues normally.
 - An interruption cancels the pending decision.
-- At session start, the pipeline sends one warm-up decision so that Ollama loads the model before the first answer. Loading `nimble` after an Ollama restart takes about 14 seconds on Jetson Thor. The warm-up waits up to 120 seconds, and the log shows `Decision tools: decision model ready`.
+- At session start, the pipeline sends one warm-up decision so that Ollama loads the model before the first answer. After an Ollama restart, loading the model takes 4 to 7 seconds on Jetson Thor, and up to 14 seconds when the model file is not in the page cache. The warm-up waits up to 120 seconds, and the log shows `Decision tools: decision model ready`.
 
 When `DECISION_MODEL_URL` is unset, the decision tools are ordinary client tools that the LLM can call.
 
@@ -30,7 +30,7 @@ When `DECISION_MODEL_URL` is unset, the decision tools are ordinary client tools
 - Deploy the Multilingual Assistant example. Refer to the [Multilingual Assistant README](../../src/examples/multilingual/README.md).
 - Use a client that declares the tool at connect time, for example the Reachy Mini conversation app, which declares `play_emotion`. A decision tool is active only when the client declares it.
 - Provide a decision model through one of the following options:
-  - A local [Ollama](https://ollama.com/) v0.35.0 or later. The decision API supports the `nimble`, `tev1`, `clef`, and `clef-flash` models.
+  - A local [Ollama](https://ollama.com/) v0.35.0 or later. Pull the decision model first, for example `ollama pull d3:2b`.
   - Ollama Cloud at `https://ollama.com/v1/systemone` with an Ollama API key.
 
 ## Enable Decision Tools
@@ -39,7 +39,7 @@ When `DECISION_MODEL_URL` is unset, the decision tools are ordinary client tools
 
    ```bash
    DECISION_MODEL_URL=http://<ollama-host>:11434/v1/systemone
-   DECISION_MODEL=nimble
+   DECISION_MODEL=d3:2b
    ```
 
    With Docker Compose, the agent runs in a container, so `localhost` does not reach an Ollama server on the host. The application services map `host.docker.internal` to the host, so you can use `http://host.docker.internal:11434/v1/systemone`. Ollama must then listen on an address that the container can reach, for example with `OLLAMA_HOST=0.0.0.0`.
@@ -63,7 +63,7 @@ When `DECISION_MODEL_URL` is unset, the decision tools are ordinary client tools
    docker compose logs multilingual-assistant-single-gpu | grep "Decision tools"
    ```
 
-   The log shows a line such as `Decision tools: play_emotion (nimble)` at session start, and a line such as `Decision tools: play_emotion -> happy (confidence 0.82, 240 ms, called)` after each answer.
+   The log shows a line such as `Decision tools: play_emotion (d3:2b)` at session start, and a line such as `Decision tools: play_emotion -> happy (confidence 0.82, 240 ms, called)` after each answer.
 
 The API key stays on the server. The pipeline sends it only as a Bearer token to the decision model, and does not log it or store it with recorded sessions.
 
@@ -74,9 +74,25 @@ The following table lists the `.env` settings.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `DECISION_MODEL_URL` | unset | Full URL of the decision endpoint, for example `http://<ollama-host>:11434/v1/systemone`. The feature is on only when this is set. |
-| `DECISION_MODEL` | `nimble` | Decision model name, for example `nimble`, `tev1`, `clef`, or `clef-flash`. |
+| `DECISION_MODEL` | `d3:2b` | Decision model name. Refer to [Choose a Decision Model](#choose-a-decision-model). |
 | `DECISION_MODEL_API_KEY` | unset | Optional Bearer token. Required for Ollama Cloud. |
-| `DECISION_MODEL_TIMEOUT_SECS` | `3.0` | Time to wait for the decision model before the pipeline skips the decision. The minimum is `0.1`. With `nimble` on Jetson Thor, a decision takes about 1.3 seconds on an idle GPU and longer while the LLM and TTS run. |
+| `DECISION_MODEL_TIMEOUT_SECS` | `3.0` | Time to wait for the decision model before the pipeline skips the decision. The minimum is `0.1`. With `d3:2b` on Jetson Thor, a decision takes about 0.15 seconds on an idle GPU. Larger models take up to about 1.3 seconds, and every model takes longer while the LLM and TTS run. |
+
+## Choose a Decision Model
+
+The default model, `d3:2b`, is the best trade-off between speed and accuracy among the models measured on Jetson Thor. The measurements used the shipped `play_emotion` catalog on 32 exchanges, mostly in French: 23 that call for an emotion and 9 neutral ones. Each model ran alone on an idle GPU through a local Ollama 0.40.11.
+
+| Model | Size | Correct | Latency | Notes |
+| --- | --- | --- | --- | --- |
+| `d3:2b` (default) | 3.2 GB | 30 of 32 | 0.14 s | Misses only sarcasm and boredom. Confidence is low, so keep `min_confidence` at `0.0`. |
+| `d1` | 3.7 GB | 29 of 32 | 0.15 s | Can answer `none` to obvious cases, such as a greeting. |
+| `d3:4b` | 5.8 GB | 26 of 32 | 0.27 s | Often picks `helpful` instead of the emotion. |
+| `d3:9b` | 10.4 GB | 31 of 32 | 0.41 s | Most accurate `d3` model. |
+| `nimble` | 9.5 GB | 32 of 32 | 0.67 s | Most accurate, about five times slower than `d3:2b`. |
+| `nimble-v3:9b` | 9.5 GB | 28 of 32 | 0.68 s | Picks `helpful` on some neutral and emotional exchanges. |
+| `nimble-v3:9b-q4_K_M` | 5.6 GB | 29 of 32 | 0.77 s | Smaller than `nimble-v3:9b`, but slower. |
+
+The `d3` models need about half as many prompt tokens as `nimble` for the same question (462 compared with 852), which explains most of their speed. When accuracy matters more than latency, use `d3:9b` or `nimble`.
 
 ## Configure the Tool Catalog
 
