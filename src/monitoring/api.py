@@ -50,6 +50,22 @@ class ReferenceBatchIn(BaseModel):
     items: list[ReferenceIn] = Field(min_length=1, max_length=500)
 
 
+class DecisionReferenceIn(BaseModel):
+    """A human reference choice for one decision tool of one user turn."""
+
+    session_id: str
+    turn_idx: int
+    tool: str = Field(max_length=128)
+    choice: str = Field(max_length=128)
+
+
+class DecisionReferenceBatchIn(BaseModel):
+    """Human reference choices saved by one annotator."""
+
+    annotator: str
+    items: list[DecisionReferenceIn] = Field(min_length=1, max_length=500)
+
+
 class PauseIn(BaseModel):
     """Pause or resume the dreamer."""
 
@@ -325,22 +341,20 @@ class ReviewService:
         transcripts = self._transcripts_by_turn(session_id)
         wer_by_turn: dict[int, dict[str, Any]] = defaultdict(dict)
         wer_summary = {}
-        # Decision tool choices per turn and source: live, then the ``redecide`` models.
+        # Decision tool choices per turn and source: live, the ``redecide`` models, then reviewers.
         decisions_by_turn: dict[int, dict[str, Any]] = defaultdict(dict)
         for idx, decision in redecide.first_decisions(self.store, session_id).items():
             if decision["choices"]:
                 decisions_by_turn[idx][redecide.live_source_name(session.get("config") or {})] = decision["choices"]
+        for (idx, source), choices in redecide.turn_choices(self.store, session_id).items():
+            decisions_by_turn[idx][source] = choices
+        human_decisions = redecide.latest_human_sources(self.store, session_id)
         decision_summary = {}
         for annotation in self.store.annotations_for(session_id):
             if annotation["kind"] == "wer":
                 wer_by_turn[_split_target(annotation["target_id"])[1]][annotation["source"]] = annotation["value"]
             elif annotation["kind"] == "wer_summary":
                 wer_summary[annotation["source"]] = annotation["value"]
-            elif annotation["kind"] == redecide.DECISION_KIND:
-                answers = (annotation["value"] or {}).get("answers") or {}
-                decisions_by_turn[_split_target(annotation["target_id"])[1]][annotation["source"]] = {
-                    tool: answer.get("choice") for tool, answer in answers.items() if isinstance(answer, dict)
-                }
             elif annotation["kind"] == redecide.SUMMARY_KIND:
                 decision_summary[annotation["source"]] = annotation["value"]
 
@@ -358,6 +372,7 @@ class ReviewService:
                     "human_reference": human,
                     "wer": wer_by_turn.get(idx, {}),
                     "decisions": decisions_by_turn.get(idx, {}),
+                    "decision_reference": human_decisions.get(idx),
                     "user_bot_latency": latency.get(idx),
                     "metrics": turn_metrics.get(idx),
                     "tool_calls": tool_calls.get(idx, []),
@@ -511,6 +526,108 @@ class ReviewService:
             }
         return {"saved": len(rows), "wer_summary": summaries}
 
+    # --------------------------------------------------------- decision queue
+    def _decision_names(self) -> tuple[str | None, list[str]]:
+        return redecide.redecide_names(self.dreamer_config)
+
+    def decision_queue(
+        self, *, status: str, limit: int, session_id: str | None, sort: str = "recent", offset: int = 0
+    ) -> dict[str, Any]:
+        """Turns where the live decision model ran, most recent first (or live-vs-reference disagreement first)."""
+        reference, _ = self._decision_names()
+        session_ids = [session_id] if session_id else self.store.ended_session_ids()
+        items = []
+        for sid in session_ids:
+            session = self.store.get_session(sid)
+            config = (session or {}).get("config") or {}
+            questions = (config.get("decision_tools") or {}).get("questions") or {}
+            if not questions:
+                continue
+            live_source = redecide.live_source_name(config)
+            choices = redecide.turn_choices(self.store, sid)
+            humans = redecide.latest_human_sources(self.store, sid)
+            started = {turn["idx"]: turn["user_started_at"] for turn in self.store.rows("turns", sid)}
+            for idx, decision in sorted(redecide.first_decisions(self.store, sid).items()):
+                live = decision["choices"]
+                models = {src: c for (i, src), c in choices.items() if i == idx and not src.startswith("human:")}
+                human = humans.get(idx)
+                ref = models.get(reference) if reference else None
+                compared = [tool for tool in live if ref and tool in ref]
+                items.append(
+                    {
+                        "session_id": sid,
+                        "turn_idx": idx,
+                        "started_at": started.get(idx) or session["started_at"],
+                        "language": config.get("language"),
+                        "state": decision["state"],
+                        # Each tool's options, ``none`` included (the question the live model was asked).
+                        "options": {
+                            tool: question.get("criteria") or {}
+                            for tool, question in questions.items()
+                            if tool in live or not live
+                        },
+                        "live": {"source": live_source, "choices": live},
+                        "models": models,
+                        "reference_source": reference,
+                        "human_reference": {"source": human, "choices": choices.get((idx, human), {})}
+                        if human
+                        else None,
+                        "agree": bool(compared) and all(live[tool] == ref[tool] for tool in compared),
+                        "disagree": bool(compared) and any(live[tool] != ref[tool] for tool in compared),
+                    }
+                )
+        counts = {
+            "total": len(items),
+            "open": sum(1 for i in items if not i["human_reference"]),
+            "agreeing": sum(1 for i in items if i["agree"] and not i["human_reference"]),
+        }
+        if status == "open":
+            items = [i for i in items if not i["human_reference"]]
+        elif status == "reviewed":
+            items = [i for i in items if i["human_reference"]]
+        if sort == "disagreement":
+            # Known disagreement first, then turns still waiting for the reference model, then agreement.
+            items.sort(key=lambda i: (not i["disagree"], i["agree"], -i["started_at"]))
+        else:
+            items.sort(key=lambda i: (-i["started_at"], -i["turn_idx"]))
+        return {**counts, "matching": len(items), "items": items[offset : offset + limit]}
+
+    def save_decision_references(self, annotator: str, items: list[DecisionReferenceIn]) -> dict[str, Any]:
+        """Store human reference choices and rescore the affected sessions inline.
+
+        Raises ``ValueError`` for a session without that tool or a choice it does not offer.
+        """
+        answers: dict[tuple[str, int], dict[str, dict[str, str]]] = defaultdict(dict)
+        for item in items:
+            session = self.store.get_session(item.session_id)
+            questions = (((session or {}).get("config") or {}).get("decision_tools") or {}).get("questions") or {}
+            criteria = (questions.get(item.tool) or {}).get("criteria") or {}
+            if item.choice not in criteria:
+                raise ValueError(f"{item.choice!r} is not an option of {item.tool!r} in session {item.session_id}")
+            answers[(item.session_id, item.turn_idx)][item.tool] = {"choice": item.choice}
+        self.store.add_annotations(
+            [
+                {
+                    "session_id": sid,
+                    "target_type": "turn",
+                    "target_id": _turn_target(sid, idx),
+                    "source": f"human:{annotator}",
+                    "source_version": None,
+                    "kind": redecide.DECISION_KIND,
+                    "value": {"answers": turn_answers},
+                }
+                for (sid, idx), turn_answers in answers.items()
+            ]
+        )
+        reference, candidates = self._decision_names()
+        summaries = {}
+        for sid in sorted({sid for sid, _ in answers}):
+            summaries[sid] = {
+                s["source"]: s["value"]
+                for s in redecide.score_session(self.store, sid, reference_name=reference, candidate_names=candidates)
+            }
+        return {"saved": len(items), "decision_summary": summaries}
+
     # ------------------------------------------------------------- dreamer
     def dreamer_status(self) -> dict[str, Any]:
         """Idle/live state, job counts, running and failed jobs."""
@@ -585,6 +702,17 @@ class ReviewService:
     def activities(self) -> list[dict[str, Any]]:
         """Review activities available, with their open item counts."""
         queue = self.asr_queue(status="open", limit=0, session_id=None)
+        decisions = self.decision_queue(status="open", limit=0, session_id=None)
+        # Listed once a recorded session ran decision tools.
+        decision_activity = [
+            {
+                "id": "decisions",
+                "title": "Decision reference",
+                "job": "redecide",
+                "description": "Set the right decision-tool choice of turns (e.g. the emotion); rescored instantly.",
+                "open": decisions["open"],
+            }
+        ]
         return [
             {
                 "id": "asr",
@@ -593,6 +721,7 @@ class ReviewService:
                 "description": "Set the human reference transcript of user turns; rescored instantly.",
                 "open": queue["open"],
             },
+            *(decision_activity if decisions["total"] else []),
             {
                 "id": "memories",
                 "title": "Memories",
@@ -829,6 +958,26 @@ def create_review_router(
     async def save_references(payload: ReferenceBatchIn):
         annotator = check_annotator(payload.annotator)
         return await run(service.save_references, annotator, payload.items)
+
+    @router.get("/decisions/queue")
+    async def decision_queue(
+        status: str = Query("open", pattern="^(open|reviewed|all)$"),
+        limit: int = Query(50, ge=0, le=1000),
+        offset: int = Query(0, ge=0),
+        sort: str = Query("recent", pattern="^(recent|disagreement)$"),
+        session_id: str | None = None,
+    ):
+        return await run(
+            service.decision_queue, status=status, limit=limit, offset=offset, sort=sort, session_id=session_id
+        )
+
+    @router.post("/decisions/references")
+    async def save_decision_references(payload: DecisionReferenceBatchIn):
+        annotator = check_annotator(payload.annotator)
+        try:
+            return await run(service.save_decision_references, annotator, payload.items)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @router.get("/dreamer")
     async def dreamer():

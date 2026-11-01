@@ -167,6 +167,41 @@ The [review UI](enable-conversation-recording.md#review-in-the-web-ui) shows the
 - **Metrics** page: the **Decision model** section shows, for each variant, the number of turns, the decision latency p50 and p90, the **Sent after audio** p50, the called, none, low confidence, and error rates, the top choices, and the agreement of each source with the reference, after the `redecide` job has run. Select **Decision model** in **Compare by** to compare decision models. The tools table lists decision calls with the trigger **decision model**.
 - **Sessions** page: each turn shows a **decision model** badge with the choice and the latency, and when the call was sent relative to the first bot audio. A **Decision tools** table lists the choice of each source: the live model as `live:<model>`, and each `redecide` model. A choice that differs from the live choice is highlighted.
 - **Sessions** page header: a session that ran decision tools shows one **agrees** badge per source, with the share of turns that agree with the reference, and a **Re-run redecide** button.
+- **Decision reference** activity: a queue of the turns where the live decision model ran, where you set the reference choice. Refer to [Set the Reference Choice](#set-the-reference-choice).
+
+### Set the Reference Choice
+
+A human reference choice is the ground truth of the agreement scores, like the human reference transcript for the [ASR reference](enable-conversation-recording.md#review-in-the-web-ui). The review UI lists the **Decision reference** activity in the sidebar after a recorded session ran decision tools. Its counter shows the number of open turns, that is, turns without a human choice.
+
+The activity lists one item per turn where the live decision model ran, for the first answer of the turn. Filter the turns by **open**, **reviewed**, or **all**, and order them by **Most recent first** or **Disagreement first**. **Disagreement first** lists the turns where the live choice differs from the reference model first, then the turns that still wait for the reference model, and then the turns that agree.
+
+Each card shows the following information:
+
+- The judged exchange, with the **User** and **Assistant** lines that the decision model received.
+- The live choice (key `1`), the reference model choice (key `2`), and the choice of each candidate model.
+- One chip per option of each tool, `none` included. Hover over a chip to read the option description.
+
+The selected chips start from the human choice of the turn, else from the reference model choice, else from the live choice. Use the following shortcuts to review the turns:
+
+- Press `1` or `2` to take the live or the reference model choice.
+- Press `Enter` to save the reference.
+- Press `←` for the previous turn, and `→` or `s` for the next turn.
+
+In the **open** list, **Accept N turns where live = reference** saves the live choice for every listed turn where it agrees with the reference model.
+
+You can also set the choice on the **Sessions** page. Under the **Decision tools** table of a turn, click **Set reference choice**, or **Edit reference choice** for a reviewed turn, pick a value for each tool, and click **Save**. The source row of the human choice shows a **reference** badge.
+
+Saving works as follows:
+
+- Set your annotator name first. The review UI stores the choice as a `kind="decision"` annotation with the source `human:<annotator>`.
+- The review server rescores the `decision_summary` of the session immediately, so you do not need to run the dreamer. It uses the `name` of the `redecide` reference and candidates in [`src/monitoring/jobs/dreamer.yaml`](../../src/monitoring/jobs/dreamer.yaml), so the review server does not need their URL.
+- A choice that the session's question does not offer, or an unknown tool, is refused with HTTP `422`, and nothing is saved.
+- The choices of a reviewer for a turn merge across saves, tool by tool. The most recent human annotation of a turn is the reference.
+
+The API provides the same operations:
+
+- `GET /api/review/decisions/queue` lists the turns. It accepts `status=open|reviewed|all`, `sort=recent|disagreement`, `limit`, `offset`, and `session_id`.
+- `POST /api/review/decisions/references` saves choices with `{"annotator", "items": [{"session_id", "turn_idx", "tool", "choice"}]}`.
 
 ## Re-Evaluate Decisions With Another Model
 
@@ -177,7 +212,7 @@ The `redecide` job of the [offline post-processing runner](enable-conversation-r
 For each turn where the live decision model ran, the job works as follows:
 
 1. The job replays the first decision of the turn, with the same `state` and the same `questions` from the session snapshot, on the `reference` model and on each enabled `candidates` model. It stores each answer as a `kind="decision"` annotation, with the endpoint `name` as the source.
-2. The job picks the reference choice of the turn. A human choice, stored as a `kind="decision"` annotation with the source `human:<name>`, takes precedence over the reference model. The review UI does not provide a way to enter human choices yet.
+2. The job picks the reference choice of the turn. A human choice, stored as a `kind="decision"` annotation with the source `human:<name>`, takes precedence over the reference model. Set it in the review UI, as described in [Set the Reference Choice](#set-the-reference-choice).
 3. The job compares the live choice, with the source `live:<decision model>`, and each candidate with the reference choice. A turn agrees when every compared tool has the reference choice.
 4. The job stores one `kind="decision_summary"` annotation per session and source, with `agreement`, `agreed`, `turns`, and `reference_sources`.
 
@@ -237,4 +272,6 @@ The following table lists common symptoms and resolutions.
 | The log shows `low_confidence` | The choice is below `min_confidence`. Lower the threshold in the catalog. |
 | The `redecide` job fails with `ConnectError` or `HTTPStatusError` | Verify that the `dreamer` container can reach the endpoint URL, or `DECISION_MODEL_URL` when the endpoint has no `url`, and that the model is pulled on that Ollama server. |
 | The session shows no **agrees** badge | The `redecide` job has not run, the session was recorded before the snapshot included the `questions`, or no reference choice is available. Check the job on the **Dreamer** page. |
+| The review UI has no **Decision reference** activity | No ended recorded session ran decision tools, or the session was recorded before the snapshot included the `questions`. |
+| Saving a reference choice returns HTTP `422` | The choice is not an option of the session's question, or the tool is unknown for that session. Pick one of the listed chips. |
 | The LLM still calls `play_emotion` | `DECISION_MODEL_URL` is unset, or the client's `enum` accepts none of the catalog values. Check the `does not accept` and `left to the LLM` log lines. |

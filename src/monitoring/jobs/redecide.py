@@ -91,6 +91,22 @@ def redecide_endpoints(config: dict[str, Any]) -> tuple[DecisionEndpoint | None,
     return usable[0], [e for e in usable[1:] if e]
 
 
+def redecide_names(config: dict[str, Any]) -> tuple[str | None, list[str]]:
+    """Names of the enabled reference and candidates, whether or not their URL is known here.
+
+    The review server scores human choices with them; it does not call the models.
+    """
+    section = config.get("redecide") or {}
+
+    def name(raw: dict[str, Any] | None) -> str | None:
+        if not raw or not raw.get("enabled", True):
+            return None
+        return str(raw.get("name") or raw.get("model") or "") or None
+
+    candidates = [name(raw) for raw in section.get("candidates") or []]
+    return name(section.get("reference")), [c for c in candidates if c]
+
+
 def live_source_name(session_config: dict[str, Any]) -> str:
     """Annotation source name of the decisions made during the live session."""
     return f"live:{(session_config.get('decision_tools') or {}).get('model') or 'decision'}"
@@ -181,6 +197,34 @@ class RedecideJob(Job):
             logger.info(f"redecide {session_id}: {summary['source']} agrees on {value['agreed']}/{value['turns']}")
 
 
+def turn_choices(store, session_id: str) -> dict[tuple[int, str], dict[str, str]]:
+    """``{(turn idx, source): {tool: choice}}`` from the ``decision`` annotations.
+
+    Later annotations of a source override its earlier choices tool by tool, so a
+    reviewer who sets one tool, then another, keeps both.
+    """
+    choices: dict[tuple[int, str], dict[str, str]] = defaultdict(dict)
+    for row in store.annotations_for(session_id, kind=DECISION_KIND):
+        answers = (row["value"] or {}).get("answers") or {}
+        choices[(int(row["target_id"].rsplit(":", 1)[1]), row["source"])].update(
+            {
+                tool: answer["choice"]
+                for tool, answer in answers.items()
+                if isinstance(answer, dict) and answer.get("choice")
+            }
+        )
+    return dict(choices)
+
+
+def latest_human_sources(store, session_id: str) -> dict[int, str]:
+    """``{turn idx: human source}`` of the most recent human choice per turn."""
+    latest: dict[int, str] = {}
+    for row in store.annotations_for(session_id, kind=DECISION_KIND):
+        if row["source"].startswith("human:"):
+            latest[int(row["target_id"].rsplit(":", 1)[1])] = row["source"]
+    return latest
+
+
 def score_session(
     store, session_id: str, *, reference_name: str | None, candidate_names: list[str]
 ) -> list[dict[str, Any]]:
@@ -190,21 +234,15 @@ def score_session(
     """
     session = store.get_session(session_id) or {}
     live_source = live_source_name(session.get("config") or {})
-    # Latest choices per (turn, source).
-    choices: dict[tuple[int, str], dict[str, str]] = {}
-    for row in store.annotations_for(session_id, kind=DECISION_KIND):
-        answers = (row["value"] or {}).get("answers") or {}
-        choices[(int(row["target_id"].rsplit(":", 1)[1]), row["source"])] = {
-            tool: answer.get("choice") for tool, answer in answers.items() if isinstance(answer, dict)
-        }
+    choices = turn_choices(store, session_id)
     for turn_idx, turn in first_decisions(store, session_id).items():
         if turn["choices"]:
             choices[(turn_idx, live_source)] = turn["choices"]
+    latest_human = latest_human_sources(store, session_id)
 
     totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"agreed": 0, "turns": 0, "refs": set()})
     for turn_idx in sorted({idx for idx, _ in choices}):
-        humans = [src for (idx, src) in choices if idx == turn_idx and src.startswith("human:")]
-        ref_source = humans[-1] if humans else reference_name
+        ref_source = latest_human.get(turn_idx) or reference_name
         reference = choices.get((turn_idx, ref_source)) if ref_source else None
         if not reference:
             continue

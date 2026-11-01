@@ -8,6 +8,7 @@ import {
   useLlmCall,
   usePeople,
   useRequeueJob,
+  useSaveDecisionReferences,
   useSaveReferences,
   useSessionDetail,
   useSessions,
@@ -235,10 +236,12 @@ function TurnCard({
   people,
   sessionSpeaker,
   samples,
+  decisionOptions,
 }: Readonly<{
   sessionId: string;
   liveSource: string;
   turn: TurnDetail;
+  decisionOptions: Record<string, Record<string, string>>;
   samples: SystemSample[];
   people: Person[];
   sessionSpeaker: string | null;
@@ -298,13 +301,18 @@ function TurnCard({
           <p className="text-sm">{turn.bot_text}</p>
         </div>
       )}
-      <DecisionChoices decisions={turn.decisions} />
+      <DecisionChoices sessionId={sessionId} turn={turn} options={decisionOptions} />
     </div>
   );
 }
 
-/** Decision tool choices of a turn by source: the live model, then the ``redecide`` models. */
-function DecisionChoices({ decisions }: Readonly<{ decisions: Record<string, Record<string, string>> }>) {
+/** Decision tool choices of a turn by source: the live model, the ``redecide`` models, then reviewers. */
+function DecisionChoices({
+  sessionId,
+  turn,
+  options,
+}: Readonly<{ sessionId: string; turn: TurnDetail; options: Record<string, Record<string, string>> }>) {
+  const decisions = turn.decisions;
   const sources = Object.keys(decisions);
   if (!sources.length) return null;
   const live = sources.find((source) => source.startsWith("live:"));
@@ -315,7 +323,10 @@ function DecisionChoices({ decisions }: Readonly<{ decisions: Record<string, Rec
         <tbody>
           {sources.map((source) => (
             <tr key={source}>
-              <td className="rv-mono">{source}</td>
+              <td className="rv-mono">
+                {source}
+                {source === turn.decision_reference && <span className="rv-badge rv-badge-good">reference</span>}
+              </td>
               <td>
                 {Object.entries(decisions[source]).map(([tool, choice]) => {
                   const differs = live !== undefined && source !== live && decisions[live]?.[tool] !== choice;
@@ -334,7 +345,97 @@ function DecisionChoices({ decisions }: Readonly<{ decisions: Record<string, Rec
           ))}
         </tbody>
       </table>
+      {live && Object.keys(options).length > 0 && (
+        <DecisionReferenceEditor
+          key={turn.decision_reference ?? ""}
+          sessionId={sessionId}
+          turnIdx={turn.idx}
+          initial={{ ...decisions[live], ...(turn.decision_reference ? decisions[turn.decision_reference] : {}) }}
+          options={Object.fromEntries(Object.entries(options).filter(([tool]) => tool in decisions[live]))}
+          reviewed={Boolean(turn.decision_reference)}
+        />
+      )}
     </div>
+  );
+}
+
+/** Set the human reference choice of each decision tool of a turn (the ``redecide`` ground truth). */
+function DecisionReferenceEditor({
+  sessionId,
+  turnIdx,
+  initial,
+  options,
+  reviewed,
+}: Readonly<{
+  sessionId: string;
+  turnIdx: number;
+  initial: Record<string, string>;
+  options: Record<string, Record<string, string>>;
+  reviewed: boolean;
+}>) {
+  const [annotator] = useAnnotator();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(initial);
+  const save = useSaveDecisionReferences();
+  if (!editing) {
+    return (
+      <button className="btn-ghost text-xs" onClick={() => setEditing(true)}>
+        {reviewed ? "Edit reference choice" : "Set reference choice"}
+      </button>
+    );
+  }
+  return (
+    <div className="rv-inline-edit">
+      {Object.entries(options).map(([tool, criteria]) => (
+        <label key={tool} className="text-xs text-muted">
+          {tool}{" "}
+          <select
+            className="input rv-select"
+            value={draft[tool] ?? ""}
+            onChange={(e) => setDraft({ ...draft, [tool]: e.target.value })}
+          >
+            {Object.entries(criteria).map(([choice, description]) => (
+              <option key={choice} value={choice} title={description}>
+                {choice}
+              </option>
+            ))}
+          </select>
+        </label>
+      ))}
+      <button
+        className="btn-primary"
+        disabled={!annotator || save.isPending || Object.keys(options).some((tool) => !draft[tool])}
+        onClick={() =>
+          save.mutate(
+            {
+              annotator,
+              items: Object.keys(options).map((tool) => ({
+                session_id: sessionId,
+                turn_idx: turnIdx,
+                tool,
+                choice: draft[tool],
+              })),
+            },
+            { onSuccess: () => setEditing(false) }
+          )
+        }
+      >
+        Save
+      </button>
+      <button className="btn-ghost" onClick={() => setEditing(false)}>
+        Cancel
+      </button>
+      {!annotator && <span className="text-xs rv-error">set your annotator name first</span>}
+      {save.error && <span className="text-xs rv-error">{save.error.message}</span>}
+    </div>
+  );
+}
+
+/** ``{tool: {choice: description}}`` of the decision tools a session ran (its snapshot's questions). */
+function decisionOptionsOf(config: Record<string, unknown> | undefined): Record<string, Record<string, string>> {
+  const tools = config?.decision_tools as { questions?: Record<string, { criteria?: Record<string, string> }> };
+  return Object.fromEntries(
+    Object.entries(tools?.questions ?? {}).map(([tool, question]) => [tool, question.criteria ?? {}])
   );
 }
 
@@ -344,6 +445,7 @@ export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>
   const requeue = useRequeueJob();
   const data = detail.data;
   const peopleList = people.data?.people ?? [];
+  const decisionOptions = decisionOptionsOf(data?.session.config);
   return (
     <section className="rv-page">
       <a className="text-sm" href={reviewHref("sessions")}>
@@ -428,6 +530,7 @@ export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>
               people={peopleList}
               sessionSpeaker={data.speakers.session}
               samples={data.system_samples ?? []}
+              decisionOptions={decisionOptions}
             />
           ))}
         </>

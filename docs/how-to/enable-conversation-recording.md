@@ -290,7 +290,8 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - the tool and intent calls with their duration and outcome;
   - the decision model choice and latency, and a **Decision tools** table with
     the choice of each source, when the session ran
-    [decision tools](configure-decision-tools.md#decisions-in-the-review-ui);
+    [decision tools](configure-decision-tools.md#decisions-in-the-review-ui),
+    and **Set reference choice** to save the human choice;
   - the user audio, every transcript diffed against the reference, and the human reference;
   - images, and the LLM calls (the full stored input on click);
   - the assistant reply, plus the whole-call stereo recording;
@@ -362,6 +363,12 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - Turns where both agree can be accepted in bulk.
   - Your annotator name is kept in the browser and stored as
     `source="human:<name>"`.
+- **Decision reference.** Listed after a recorded session ran decision tools.
+  Every turn where the live decision model ran, with the live choice, the
+  `redecide` reference choice, and one chip per option. Take the live (`1`) or
+  reference (`2`) choice, or pick another, and save (`Enter`). Saving rescores
+  the decision agreement immediately. Refer to
+  [Set the Reference Choice](configure-decision-tools.md#set-the-reference-choice).
 - **Metrics.** Compares pipeline variants over a time range (24 h, 7 days,
   30 days, all). A variant is the combination of the config fields you
   compare by: LLM, ASR, TTS, voice, language, turn detection, transport, git
@@ -476,7 +483,8 @@ For each turn of a session that ran [decision tools](configure-decision-tools.md
 same question as the live decision model. It stores per-turn `kind="decision"`
 annotations, plus a session-level `kind="decision_summary"` per source with the
 share of turns that agree with the reference. A human choice (source
-`human:<name>`) takes precedence over the reference model. Sessions without
+`human:<name>`), set in the **Decision reference** activity, takes precedence
+over the reference model. Sessions without
 decision tools finish immediately. For the configuration and the agreement
 rules, refer to
 [Re-Evaluate Decisions With Another Model](configure-decision-tools.md#re-evaluate-decisions-with-another-model).

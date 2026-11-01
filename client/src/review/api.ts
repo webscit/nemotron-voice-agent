@@ -158,6 +158,8 @@ export interface TurnDetail {
   wer: Record<string, WerValue>;
   /** Decision tool choices by source (``live:<model>``, then the ``redecide`` models): ``{tool: choice}``. */
   decisions: Record<string, Record<string, string>>;
+  /** Source (``human:<name>``) of the latest human reference choice, if any. */
+  decision_reference: string | null;
   user_bot_latency: number | null;
   /** Explicit per-turn speaker override (the session speaker applies otherwise). */
   speaker?: string | null;
@@ -334,6 +336,42 @@ export interface AsrQueue {
 }
 
 export type AsrQueueSort = "recent" | "disagreement";
+
+/** ``{tool: choice}`` of one decision source. */
+export type DecisionChoicesMap = Record<string, string>;
+
+/** A turn where the live decision model ran (src/monitoring/api.py ``decision_queue``). */
+export interface DecisionQueueItem {
+  session_id: string;
+  turn_idx: number;
+  started_at: number;
+  language: string | null;
+  /** What the decision model judged: the user's last message and the answer. */
+  state: string;
+  /** Each tool's options and their descriptions, ``none`` included. */
+  options: Record<string, Record<string, string>>;
+  live: { source: string; choices: DecisionChoicesMap };
+  models: Record<string, DecisionChoicesMap>;
+  reference_source: string | null;
+  human_reference: { source: string; choices: DecisionChoicesMap } | null;
+  agree: boolean;
+  disagree: boolean;
+}
+
+export interface DecisionQueue {
+  total: number;
+  open: number;
+  agreeing: number;
+  matching: number;
+  items: DecisionQueueItem[];
+}
+
+export interface DecisionReferenceItem {
+  session_id: string;
+  turn_idx: number;
+  tool: string;
+  choice: string;
+}
 
 export interface Activity {
   id: string;
@@ -563,6 +601,14 @@ export function useAsrQueue(status: "open" | "reviewed" | "all", sort: AsrQueueS
   });
 }
 
+export function useDecisionQueue(status: "open" | "reviewed" | "all", sort: AsrQueueSort, limit = 200) {
+  return useQuery({
+    queryKey: ["review", "decision-queue", status, sort, limit],
+    queryFn: () => request<DecisionQueue>(`/decisions/queue?status=${status}&sort=${sort}&limit=${limit}`),
+    ...live,
+  });
+}
+
 export function useDreamerStatus() {
   return useQuery({
     queryKey: ["review", "dreamer"],
@@ -667,6 +713,18 @@ export function useSaveReferences() {
     mutationFn: (payload: { annotator: string; items: ReferenceItem[] }) =>
       postJson<{ saved: number; wer_summary: Record<string, Record<string, unknown>> }>(
         "/asr/references",
+        payload
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["review"] }),
+  });
+}
+
+export function useSaveDecisionReferences() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { annotator: string; items: DecisionReferenceItem[] }) =>
+      postJson<{ saved: number; decision_summary: Record<string, Record<string, unknown>> }>(
+        "/decisions/references",
         payload
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["review"] }),
