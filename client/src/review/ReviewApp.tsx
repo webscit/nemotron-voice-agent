@@ -6,6 +6,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "../api";
 import { useActivities } from "./api";
 import { AsrReview } from "./AsrReview";
+import { DecisionReview } from "./DecisionReview";
 import { DreamerStatusView } from "./Dreamer";
 import { IntentsView } from "./Intents";
 import { MemoriesView } from "./Memories";
@@ -71,6 +72,8 @@ function Content({ view, arg }: Readonly<{ view: string; arg: string }>) {
       return <SessionDetailView sessionId={arg} />;
     case "asr":
       return <AsrReview />;
+    case "decisions":
+      return <DecisionReview />;
     case "memories":
       return <MemoriesView />;
     case "intents":

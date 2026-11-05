@@ -83,8 +83,20 @@ export function formatPct(value: number | null | undefined): string {
   return value === null || value === undefined ? "–" : `${(value * 100).toFixed(1)}%`;
 }
 
+/** A decision model's confidence as a whole percentage; empty when the source has none (human choices). */
+export function formatConfidence(value: number | null | undefined): string {
+  return value === null || value === undefined ? "" : `${Math.round(value * 100)}%`;
+}
+
 export function formatSecs(value: number | null | undefined): string {
   return value === null || value === undefined ? "–" : `${value.toFixed(2)} s`;
+}
+
+/** Who sent a tool call (``tool_calls.trigger``). */
+export function triggerLabel(trigger: string): string {
+  if (trigger === "intent") return "intent engine";
+  if (trigger === "decision") return "decision model";
+  return "LLM";
 }
 
 // ---- Word diff (LCS over normalized tokens) ----

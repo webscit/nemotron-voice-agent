@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Per-turn latency breakdown views of the Metrics page: stages per variant,
-// trend per day / git revision, and the tool and intent call table.
+// trend per day / git revision, the tool and intent call table, and the decision model table.
 
 import { useState } from "react";
 import { Bar, BarChart, CartesianGrid, ErrorBar, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { KindStats, MetricsResponse, MetricsVariant, ToolStats, TurnKind } from "./api";
 import { INK, KIND_LABELS, SERIES, STAGES, axisTick, secondsTick, short, tooltipStyle, variantColor } from "./chartTheme";
 import { ChartCard, Empty } from "./components";
-import { formatPct, formatSecs } from "./utils";
+import { formatPct, formatSecs, triggerLabel } from "./utils";
 
 type StageRow = { name: string; title: string; stats: KindStats | undefined };
 
@@ -316,7 +316,7 @@ export function ToolsTable({ tools }: Readonly<{ tools: ToolStats[] }>) {
           {tools.map((tool) => (
             <tr key={`${tool.name}-${tool.trigger}-${tool.target}`}>
               <td className="rv-mono">{tool.name}</td>
-              <td>{tool.trigger === "intent" ? "intent engine" : "LLM"}</td>
+              <td>{triggerLabel(tool.trigger)}</td>
               <td>{tool.target === "home_assistant" ? "Home Assistant" : "client"}</td>
               <td>{tool.perceivable ? "yes" : "–"}</td>
               <td>{tool.calls}</td>
@@ -334,6 +334,75 @@ export function ToolsTable({ tools }: Readonly<{ tools: ToolStats[] }>) {
               <td>{formatPct(tool.cancelled_rate)}</td>
             </tr>
           ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Decision model per variant: latency, when its call left relative to the first bot audio, outcomes, choices. */
+export function DecisionTable({ variants }: Readonly<{ variants: MetricsVariant[] }>) {
+  const rows = variants.map((variant, i) => ({ variant, i })).filter(({ variant }) => variant.decisions);
+  if (!rows.length) return <p className="text-sm text-muted">No session in this range ran decision tools.</p>;
+  const sources = [...new Set(rows.flatMap(({ variant }) => Object.keys(variant.decisions!.agreement)))].sort();
+  return (
+    <div className="rv-table-scroll">
+      <table className="rv-table rv-table-static rv-num">
+        <thead>
+          <tr>
+            <th>Variant</th>
+            <th>Turns</th>
+            <th title="median / p90">Decision p50 / p90</th>
+            <th title="decision call sent - first bot audio; negative: before the robot spoke">Sent after audio p50</th>
+            <th title="median confidence of the live decision model's choices">Confidence p50</th>
+            <th>Called</th>
+            <th>None</th>
+            <th>Low confidence</th>
+            <th>Errors</th>
+            <th>Top choices</th>
+            {sources.map((source) => (
+              <th key={source} title="share of turns agreeing with the reference model (redecide)">
+                {source} agreement
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ variant, i }) => {
+            const stats = variant.decisions!;
+            return (
+              <tr key={variant.label}>
+                <td title={variant.label}>
+                  <span className="rv-swatch" style={{ background: variantColor(variant.label) }} /> {short(i)}
+                </td>
+                <td>{stats.turns}</td>
+                <td>
+                  {formatSecs(stats.latency.p50)} / {formatSecs(stats.latency.p90)}
+                </td>
+                <td>{formatSecs(stats.lag.p50)}</td>
+                <td>{formatPct(stats.confidence.p50)}</td>
+                <td>{formatPct(stats.outcomes.called)}</td>
+                <td>{formatPct(stats.outcomes.none)}</td>
+                <td>{formatPct(stats.outcomes.low_confidence)}</td>
+                <td>
+                  {(stats.outcomes.error ?? 0) > 0 ? (
+                    <span className="rv-badge rv-badge-warn">{formatPct(stats.outcomes.error)}</span>
+                  ) : (
+                    formatPct(stats.outcomes.error)
+                  )}
+                </td>
+                <td className="text-xs">{stats.choices.map((c) => `${c.choice} ${c.turns}`).join(" · ") || "–"}</td>
+                {sources.map((source) => {
+                  const agreement = stats.agreement[source];
+                  return (
+                    <td key={source} title={agreement ? `${agreement.turns} turns compared` : undefined}>
+                      {formatPct(agreement?.agreement)}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

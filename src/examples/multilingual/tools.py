@@ -130,3 +130,16 @@ def build_client_tools(raw_tools: object) -> tuple[ToolsSchema | None, tuple[str
         return None, ()
 
     return ToolsSchema(standard_tools=[], custom_tools={AdapterType.OPENAI: schemas}), tuple(names)
+
+
+def without_tools(schema: ToolsSchema | None, names: set[str]) -> ToolsSchema | None:
+    """Return the client tool ``schema`` without the tools in ``names`` (None when nothing is left).
+
+    The tools stay declared and registered: only the LLM stops seeing them.
+    """
+    if schema is None:
+        return None
+    kept = [tool for tool in schema.custom_tools.get(AdapterType.OPENAI, []) if tool["function"]["name"] not in names]
+    if not kept:
+        return None
+    return ToolsSchema(standard_tools=[], custom_tools={AdapterType.OPENAI: kept})

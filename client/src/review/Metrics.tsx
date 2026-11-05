@@ -29,7 +29,7 @@ import {
   variantColor,
 } from "./chartTheme";
 import { ChartCard, Empty, StatusLine } from "./components";
-import { KindTable, StageBars, ToolsTable, TrendSection } from "./MetricsBreakdown";
+import { DecisionTable, KindTable, StageBars, ToolsTable, TrendSection } from "./MetricsBreakdown";
 import { formatDate, formatPct, formatSecs, reviewHref } from "./utils";
 
 const RANGES: { label: string; days: number | null }[] = [
@@ -49,6 +49,7 @@ const GROUP_FIELDS: { field: string; label: string }[] = [
   { field: "transport", label: "Transport" },
   { field: "git_sha", label: "Git revision" },
   { field: "intent_engine.enabled", label: "Intent engine" },
+  { field: "decision_tools.model", label: "Decision model" },
   { field: "prompt_key", label: "Prompt" },
 ];
 const DEFAULT_GROUP = ["llm.model", "asr.model", "tts.model", "language"];
@@ -576,6 +577,13 @@ export function MetricsView() {
 
           <h3 className="text-sm font-semibold rv-section-head">Tools and intents</h3>
           <ToolsTable tools={data.tools} />
+
+          <h3 className="text-sm font-semibold rv-section-head">Decision model</h3>
+          <p className="text-xs text-muted">
+            Decision tools of the turn&apos;s first answer. The decision runs alongside TTS, so it is not a latency stage;
+            agreement comes from the dreamer&apos;s redecide job.
+          </p>
+          <DecisionTable variants={variants} />
 
           <h3 className="text-sm font-semibold rv-section-head">All numbers</h3>
           <SummaryTable variants={variants} />

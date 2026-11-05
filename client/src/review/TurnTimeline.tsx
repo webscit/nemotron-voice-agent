@@ -4,9 +4,9 @@
 // Per-turn timeline of the session view: latency stages from the end of user
 // speech to the first response, tool calls, and the host load during the turn.
 
-import type { SystemSample, ToolCall, TurnDetail } from "./api";
+import type { SystemSample, ToolCall, TurnDetail, TurnMetrics } from "./api";
 import { INK, KIND_LABELS, SERIES, stageInfo } from "./chartTheme";
-import { formatSecs } from "./utils";
+import { formatSecs, triggerLabel } from "./utils";
 
 const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   ok: "rv-badge-muted",
@@ -14,6 +14,30 @@ const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   timeout: "rv-badge-bad",
   cancelled: "rv-badge-warn",
 };
+
+/** Legend entry of the decision model for the turn's first answer: latency and when its call left. */
+function DecisionLegend({ metrics }: Readonly<{ metrics: TurnMetrics }>) {
+  if (!metrics.decision_outcome) return null;
+  const lag = metrics.decision_lag_secs;
+  return (
+    <>
+      <span className="rv-stage-legend-item" title="Runs alongside TTS, so it is not a stage of the bar">
+        <span className="rv-swatch rv-swatch-hollow" />
+        Decision model {formatSecs(metrics.decision_secs)}
+      </span>
+      {lag !== null && (
+        <span className="rv-stage-legend-item">
+          sent {formatSecs(Math.abs(lag))} {lag < 0 ? "before" : "after"} the first bot audio
+        </span>
+      )}
+      {metrics.decision_outcome !== "called" && (
+        <span className={`rv-badge ${metrics.decision_outcome === "error" ? "rv-badge-bad" : "rv-badge-muted"}`}>
+          {metrics.decision_outcome}
+        </span>
+      )}
+    </>
+  );
+}
 
 /** GPU and CPU load (both percent, one axis) over the turn; the band is the wait for the first response. */
 function LoadSparkline({
@@ -131,7 +155,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
           )}
         </div>
       )}
-      {parts.length > 0 && (
+      {(parts.length > 0 || metrics.decision_outcome) && (
         <div className="rv-stage-legend">
           {stageKeys.map((key) => {
             const info = stageInfo(key);
@@ -155,6 +179,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
               </span>
             </>
           )}
+          <DecisionLegend metrics={metrics} />
         </div>
       )}
       {turn.tool_calls.length > 0 && (
@@ -163,7 +188,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
             <span
               key={call.call_id}
               className={`rv-badge ${OUTCOME_TONE[call.outcome]}`}
-              title={`${call.trigger === "intent" ? "intent engine" : "LLM"} → ${call.target}${call.perceivable ? " · perceivable" : ""}`}
+              title={`${triggerLabel(call.trigger)} → ${call.target}${call.perceivable ? " · perceivable" : ""}`}
             >
               {call.name} · {formatSecs(call.duration_secs)} · {call.outcome}
             </span>

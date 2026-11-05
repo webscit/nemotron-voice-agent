@@ -208,6 +208,25 @@
   }
 }
 
+.rv-decision-pick {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin-right: var(--space-3);
+
+  .rv-decision-choice,
+  .rv-diff-ins {
+    padding: 0 var(--space-1);
+    border-radius: 3px;
+    font-weight: var(--font-medium);
+  }
+
+  .rv-decision-choice {
+    color: var(--text-primary);
+    background: rgba(118, 185, 0, 0.12);
+  }
+}
+
 .rv-diff-del {
   color: #f87171;
   text-decoration: line-through;
@@ -495,6 +514,10 @@
   height: 10px;
   border-radius: 2px;
   flex-shrink: 0;
+}
+
+.rv-swatch-hollow {
+  border: 1px solid currentColor;
 }
 
 .rv-chart-grid {

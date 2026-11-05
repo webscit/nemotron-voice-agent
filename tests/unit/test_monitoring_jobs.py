@@ -3,6 +3,8 @@
 
 # ruff: noqa: D100, D101, D102, D103, D107
 
+import json
+
 import pytest
 
 from monitoring.jobs import JOB_REGISTRY, Job, register
@@ -226,6 +228,161 @@ def test_reasr_scores_live_and_candidates(stores, monkeypatch):
 
 def test_registry_contains_reasr():
     assert "reasr" in JOB_REGISTRY
+
+
+EMOTION_QUESTION = {
+    "type": "choice",
+    "instructions": "Which emotion?",
+    "criteria": {"happy": "Joy", "sad": "Sadness", "none": "No emotion"},
+}
+
+
+def _decision_session(store, sid, *, started, ended, turns):
+    """A session that ran ``play_emotion`` as a decision tool; ``turns`` is ``{idx: (state, live choice)}``."""
+    store.create_session(
+        {
+            "id": sid,
+            "example": "multilingual-assistant",
+            "started_at": started,
+            "last_seen_at": ended,
+            "ended_at": ended,
+            "config": {
+                "language": "fr-FR",
+                "decision_tools": {
+                    "model": "d3:2b",
+                    "tools": ["play_emotion"],
+                    "questions": {"play_emotion": EMOTION_QUESTION},
+                },
+            },
+            "artifact_prefix": f"sessions/{sid}/",
+        }
+    )
+    rows = []
+    for idx, (state, choice) in turns.items():
+        data = {"outcome": "called", "tool": "play_emotion", "choice": choice, "state": state}
+        rows.append(
+            ("events", {"session_id": sid, "turn_idx": idx, "ts": started + idx, "kind": "decision_tool", "data": data})
+        )
+        # A later answer of the same turn is not replayed.
+        later = {**data, "state": f"{state} (later)", "choice": "sad"}
+        rows.append(
+            (
+                "events",
+                {"session_id": sid, "turn_idx": idx, "ts": started + idx + 0.5, "kind": "decision_tool", "data": later},
+            )
+        )
+    store.write_batch(rows)
+
+
+def test_redecide_scores_live_and_candidates(stores, monkeypatch):
+    import httpx
+
+    from monitoring.jobs import redecide as redecide_module
+
+    store, _ = stores
+    clock = FakeClock()
+    _decision_session(
+        store,
+        "s1",
+        started=clock.now - 500,
+        ended=clock.now - 400,
+        turns={
+            1: ("User: J'ai réussi !\nAssistant: Bravo !", "happy"),
+            2: ("User: Mon chat est mort.\nAssistant: Désolé.", "happy"),
+        },
+    )
+    _session(store, "s2", started=clock.now - 300, ended=clock.now - 200)  # no decision tools
+    asked: list[dict] = []
+    picks = {"nimble": {"J'ai": "happy", "chat": "sad"}, "d3:9b": {"J'ai": "happy", "chat": "happy"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        asked.append(body)
+        word = "chat" if "chat" in body["state"] else "J'ai"
+        choice = picks[body["model"]][word]
+        answer = {"type": "choice", "choice": choice, "confidence": 0.9, "probabilities": {choice: 0.9}}
+        return httpx.Response(200, json={"answers": {"play_emotion": answer}})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        redecide_module.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw)
+    )
+    monkeypatch.setenv("DECISION_MODEL_URL", "http://ollama.test:11434/v1/systemone")
+    config = {
+        "auto_enqueue": ["redecide"],
+        "redecide": {
+            "reference": {"name": "nimble", "model": "nimble"},
+            "candidates": [{"name": "d3-9b", "model": "d3:9b"}, {"name": "off", "model": "x", "enabled": False}],
+        },
+    }
+    dreamer = _dreamer(stores, clock, **config)
+    clock.now += 1000
+    while dreamer.run_once():
+        pass
+
+    # Two turns x two models, each with the session's question and the first answer's state only.
+    assert len(asked) == 4
+    assert all(body["questions"] == {"play_emotion": EMOTION_QUESTION} for body in asked)
+    assert not any("(later)" in body["state"] for body in asked)
+    summaries = {a["source"]: a["value"] for a in store.annotations_for("s1", kind="decision_summary")}
+    assert summaries["live:d3:2b"] == {"agreement": 0.5, "agreed": 1, "turns": 2, "reference_sources": ["nimble"]}
+    assert summaries["d3-9b"]["agreed"] == 1
+    assert store.annotations_for("s2", kind="decision") == []
+
+    # A re-run only fills gaps; a human choice becomes the reference.
+    store.add_annotations(
+        [
+            {
+                "session_id": "s1",
+                "target_type": "turn",
+                "target_id": "s1:2",
+                "source": "human:qa",
+                "kind": "decision",
+                "value": {"answers": {"play_emotion": {"choice": "happy"}}},
+            }
+        ]
+    )
+    store.reset_job("redecide", "s1")
+    while dreamer.run_once():
+        pass
+    assert len(asked) == 4
+    latest = {a["source"]: a["value"] for a in store.annotations_for("s1", kind="decision_summary")}
+    assert latest["live:d3:2b"]["agreed"] == 2
+    assert latest["live:d3:2b"]["reference_sources"] == ["human:qa", "nimble"]
+
+
+def test_redecide_endpoints_need_a_url(monkeypatch):
+    from monitoring.jobs.redecide import redecide_endpoints
+
+    config = {"redecide": {"reference": {"name": "nimble", "model": "nimble"}}}
+    monkeypatch.delenv("DECISION_MODEL_URL", raising=False)
+    assert redecide_endpoints(config) == (None, [])
+    config["redecide"]["reference"]["url"] = "http://other:11434/v1/systemone"
+    reference, _ = redecide_endpoints(config)
+    assert (reference.name, reference.url) == ("nimble", "http://other:11434/v1/systemone")
+    assert "redecide" in JOB_REGISTRY
+
+
+def test_redecide_warns_about_an_endpoint_without_url(stores, monkeypatch):
+    from loguru import logger
+
+    store, _ = stores
+    clock = FakeClock()
+    _decision_session(
+        store, "s1", started=clock.now - 500, ended=clock.now - 400, turns={1: ("User: Hi\nAssistant: Hi", "happy")}
+    )
+    monkeypatch.delenv("DECISION_MODEL_URL", raising=False)
+    config = {"auto_enqueue": ["redecide"], "redecide": {"reference": {"name": "nimble", "model": "nimble"}}}
+    dreamer = _dreamer(stores, clock, **config)
+    clock.now += 1000
+    warnings: list[str] = []
+    sink = logger.add(warnings.append, level="WARNING")
+    try:
+        while dreamer.run_once():
+            pass
+    finally:
+        logger.remove(sink)
+    assert any("skipping nimble: no URL" in warning for warning in warnings)
 
 
 def test_openai_transcriber_sends_iso_language(tmp_path):
