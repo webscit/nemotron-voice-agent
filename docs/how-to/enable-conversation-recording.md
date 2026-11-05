@@ -288,8 +288,8 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - the response and voice latency, the turn kind, a barge-in badge, and a
     timeline of the latency stages next to the GPU and CPU load during the turn;
   - the tool and intent calls with their duration and outcome;
-  - the decision model latency, choice, and confidence in the timeline legend,
-    and a **Decision tools** table with the choice and confidence of each source,
+  - the decision model latency in the timeline legend, and a **Decision tools**
+    table with the choice and confidence of each source,
     when the session ran
     [decision tools](configure-decision-tools.md#decisions-in-the-review-ui),
     and **Set reference choice** to save the human choice;

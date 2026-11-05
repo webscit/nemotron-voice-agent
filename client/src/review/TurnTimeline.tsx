@@ -4,9 +4,9 @@
 // Per-turn timeline of the session view: latency stages from the end of user
 // speech to the first response, tool calls, and the host load during the turn.
 
-import type { SystemSample, ToolCall, TurnDetail } from "./api";
+import type { SystemSample, ToolCall, TurnDetail, TurnMetrics } from "./api";
 import { INK, KIND_LABELS, SERIES, stageInfo } from "./chartTheme";
-import { formatConfidence, formatSecs, triggerLabel } from "./utils";
+import { formatSecs, triggerLabel } from "./utils";
 
 const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   ok: "rv-badge-muted",
@@ -15,19 +15,15 @@ const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   cancelled: "rv-badge-warn",
 };
 
-/** Legend entry of the decision model for the turn's first answer: latency, choices, confidence, when its call left. */
-function DecisionLegend({ turn }: Readonly<{ turn: TurnDetail }>) {
-  const metrics = turn.metrics;
-  if (!metrics?.decision_outcome) return null;
+/** Legend entry of the decision model for the turn's first answer: latency and when its call left. */
+function DecisionLegend({ metrics }: Readonly<{ metrics: TurnMetrics }>) {
+  if (!metrics.decision_outcome) return null;
   const lag = metrics.decision_lag_secs;
-  const live = Object.keys(turn.decisions).find((source) => source.startsWith("live:"));
-  const picks = live ? Object.entries(turn.decisions[live]) : [];
   return (
     <>
       <span className="rv-stage-legend-item" title="Runs alongside TTS, so it is not a stage of the bar">
         <span className="rv-swatch rv-swatch-hollow" />
         Decision model {formatSecs(metrics.decision_secs)}
-        {picks.map(([tool, choice]) => ` · ${choice} ${formatConfidence(turn.decision_confidences[live!]?.[tool])}`)}
       </span>
       {lag !== null && (
         <span className="rv-stage-legend-item">
@@ -183,7 +179,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
               </span>
             </>
           )}
-          <DecisionLegend turn={turn} />
+          <DecisionLegend metrics={metrics} />
         </div>
       )}
       {turn.tool_calls.length > 0 && (
