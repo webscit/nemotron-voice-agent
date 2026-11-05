@@ -39,8 +39,8 @@ the remainder always add up to ``total_secs``:
 Decision tools
 --------------
 The decision model runs after the LLM answer, alongside TTS, so it is not a stage:
-``decision_secs`` is its latency for the turn's first answer, ``decision_outcome``
-and ``decision_choice`` what it decided, and ``decision_lag_secs`` when its call
+``decision_secs`` is its latency for the turn's first answer, ``decision_outcome``,
+``decision_choice`` and ``decision_confidence`` what it decided, and ``decision_lag_secs`` when its call
 was sent relative to the first bot audio (negative: before the robot spoke). Its
 calls are ``tool_calls`` rows with the ``decision`` trigger; they count for the
 response latency when perceivable, but not for the turn kind or ``n_tool_calls``.
@@ -453,6 +453,7 @@ def _turn_row(
         "decision_lag_secs": decision_lag,
         "decision_outcome": data(decision).get("outcome") if decision else None,
         "decision_choice": data(decision).get("choice") if decision else None,
+        "decision_confidence": data(decision).get("confidence") if decision else None,
         "computed_at": time.time(),
     }
     updates: dict[str, Any] = {}

@@ -354,6 +354,7 @@ export function DecisionTable({ variants }: Readonly<{ variants: MetricsVariant[
             <th>Turns</th>
             <th title="median / p90">Decision p50 / p90</th>
             <th title="decision call sent - first bot audio; negative: before the robot spoke">Sent after audio p50</th>
+            <th title="median confidence of the live decision model's choices">Confidence p50</th>
             <th>Called</th>
             <th>None</th>
             <th>Low confidence</th>
@@ -379,6 +380,7 @@ export function DecisionTable({ variants }: Readonly<{ variants: MetricsVariant[
                   {formatSecs(stats.latency.p50)} / {formatSecs(stats.latency.p90)}
                 </td>
                 <td>{formatSecs(stats.lag.p50)}</td>
+                <td>{formatPct(stats.confidence.p50)}</td>
                 <td>{formatPct(stats.outcomes.called)}</td>
                 <td>{formatPct(stats.outcomes.none)}</td>
                 <td>{formatPct(stats.outcomes.low_confidence)}</td>

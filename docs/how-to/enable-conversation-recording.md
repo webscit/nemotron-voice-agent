@@ -138,9 +138,9 @@ The turn `kind` lets you compare like with like. The first matching rule wins:
 image input), `tool` (at least one tool or intent call), and `plain`.
 
 When the session runs [decision tools](configure-decision-tools.md), the
-`decision_secs`, `decision_lag_secs`, `decision_outcome`, and
-`decision_choice` columns describe the decision for the first answer of the
-turn. The decision is not a stage, because it runs alongside TTS. A decision
+`decision_secs`, `decision_lag_secs`, `decision_outcome`, `decision_choice`,
+and `decision_confidence` columns describe the decision for the first answer of
+the turn. The decision is not a stage, because it runs alongside TTS. A decision
 call has the `decision` trigger in `tool_calls`. It counts for the response
 latency when it is perceivable, but it does not make the turn a `tool` turn and
 is not counted in `n_tool_calls`. Refer to
@@ -288,8 +288,9 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - the response and voice latency, the turn kind, a barge-in badge, and a
     timeline of the latency stages next to the GPU and CPU load during the turn;
   - the tool and intent calls with their duration and outcome;
-  - the decision model choice and latency, and a **Decision tools** table with
-    the choice of each source, when the session ran
+  - the decision model latency, choice, and confidence in the timeline legend,
+    and a **Decision tools** table with the choice and confidence of each source,
+    when the session ran
     [decision tools](configure-decision-tools.md#decisions-in-the-review-ui),
     and **Set reference choice** to save the human choice;
   - the user audio, every transcript diffed against the reference, and the human reference;
@@ -385,8 +386,8 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - tool and intent calls: count, duration, and failure, timeout, and
     cancellation rates;
   - the decision model per variant: latency, when its call was sent relative
-    to the first bot audio, outcome rates, top choices, and agreement with the
-    `redecide` reference. Refer to
+    to the first bot audio, median confidence, outcome rates, top choices, and
+    agreement with the `redecide` reference. Refer to
     [Decisions in the Review UI](configure-decision-tools.md#decisions-in-the-review-ui);
   - time to first byte per service;
   - LLM time to first token, text-only vs with images;

@@ -184,7 +184,13 @@ def _decision_session(store, now):
                     "turn_idx": idx,
                     "ts": now - 30 + idx,
                     "kind": "decision_tool",
-                    "data": {"outcome": "called", "tool": "play_emotion", "choice": choice, "state": state},
+                    "data": {
+                        "outcome": "called",
+                        "tool": "play_emotion",
+                        "choice": choice,
+                        "confidence": 0.4,
+                        "state": state,
+                    },
                 },
             ),
         ]
@@ -197,7 +203,7 @@ def _decision_session(store, now):
                 "target_id": f"s2:{idx}",
                 "source": "nimble",
                 "kind": "decision",
-                "value": {"answers": {"play_emotion": {"choice": choice}}},
+                "value": {"answers": {"play_emotion": {"choice": choice, "confidence": 0.9}}},
             }
             for idx, choice in ((1, "happy"), (2, "sad"))
         ]
@@ -239,6 +245,11 @@ def test_decision_queue_and_human_reference(env):
     turn = next(t for t in detail["turns"] if t["idx"] == 2)
     assert turn["decision_reference"] == "human:fred"
     assert turn["decisions"]["human:fred"] == {"play_emotion": "happy"}
+    assert turn["decision_confidences"] == {
+        "live:d3:2b": {"play_emotion": 0.4},
+        "nimble": {"play_emotion": 0.9},
+        "human:fred": {},
+    }
     assert detail["decision_summary"]["live:d3:2b"]["agreed"] == 2
 
     # A choice the question does not offer, or an unknown tool, is refused and nothing is saved.

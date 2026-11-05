@@ -113,17 +113,19 @@ def live_source_name(session_config: dict[str, Any]) -> str:
 
 
 def first_decisions(store, session_id: str) -> dict[int, dict[str, Any]]:
-    """``{turn idx: {"state": ..., "choices": {tool: live choice}}}`` for each turn's first answer."""
+    """``{turn idx: {"state", "choices": {tool: choice}, "confidences": {tool: confidence}}}`` of each first answer."""
     turns: dict[int, dict[str, Any]] = {}
     for event in store.rows("events", session_id, kind=DECISION_EVENT):
         data = event.get("data") or {}
         if event["turn_idx"] is None or not data.get("state"):
             continue
-        turn = turns.setdefault(event["turn_idx"], {"state": data["state"], "choices": {}})
+        turn = turns.setdefault(event["turn_idx"], {"state": data["state"], "choices": {}, "confidences": {}})
         if data["state"] != turn["state"]:
             continue  # a later answer of the same turn
         if data.get("tool") and data.get("choice"):
             turn["choices"].setdefault(data["tool"], data["choice"])
+            if data.get("confidence") is not None:
+                turn["confidences"].setdefault(data["tool"], data["confidence"])
     return turns
 
 
@@ -153,6 +155,14 @@ class RedecideJob(Job):
             logger.info(f"redecide {session_id}: the session ran no decision tools")
             return
         reference, candidates = redecide_endpoints(ctx.config)
+        reference_name, candidate_names = redecide_names(ctx.config)
+        usable = {e.name for e in [reference, *candidates] if e}
+        skipped = [name for name in [reference_name, *candidate_names] if name and name not in usable]
+        if skipped:
+            logger.warning(
+                f"redecide {session_id}: skipping {', '.join(skipped)}: no URL. Set the endpoint's `url`, or "
+                "DECISION_MODEL_URL in the dreamer's environment (recreate the container after changing .env)"
+            )
         turns = first_decisions(ctx.store, session_id)
 
         # Skip (endpoint, turn) pairs already asked, by this run (checkpoint) or an earlier one.
@@ -191,29 +201,35 @@ class RedecideJob(Job):
             candidate_names=[c.name for c in candidates],
         )
         if not summaries:
-            logger.info(f"redecide {session_id}: no reference decision available (configure redecide.reference)")
+            logger.info(
+                f"redecide {session_id}: no reference decision available (no reference answer, no human choice)"
+            )
         for summary in summaries:
             value = summary["value"]
             logger.info(f"redecide {session_id}: {summary['source']} agrees on {value['agreed']}/{value['turns']}")
 
 
-def turn_choices(store, session_id: str) -> dict[tuple[int, str], dict[str, str]]:
-    """``{(turn idx, source): {tool: choice}}`` from the ``decision`` annotations.
+def turn_answers(store, session_id: str) -> dict[tuple[int, str], dict[str, dict[str, Any]]]:
+    """``{(turn idx, source): {tool: answer}}`` from the ``decision`` annotations.
 
-    Later annotations of a source override its earlier choices tool by tool, so a
+    Later annotations of a source override its earlier answers tool by tool, so a
     reviewer who sets one tool, then another, keeps both.
     """
-    choices: dict[tuple[int, str], dict[str, str]] = defaultdict(dict)
+    merged: dict[tuple[int, str], dict[str, dict[str, Any]]] = defaultdict(dict)
     for row in store.annotations_for(session_id, kind=DECISION_KIND):
         answers = (row["value"] or {}).get("answers") or {}
-        choices[(int(row["target_id"].rsplit(":", 1)[1]), row["source"])].update(
-            {
-                tool: answer["choice"]
-                for tool, answer in answers.items()
-                if isinstance(answer, dict) and answer.get("choice")
-            }
+        merged[(int(row["target_id"].rsplit(":", 1)[1]), row["source"])].update(
+            {tool: answer for tool, answer in answers.items() if isinstance(answer, dict) and answer.get("choice")}
         )
-    return dict(choices)
+    return dict(merged)
+
+
+def turn_choices(store, session_id: str) -> dict[tuple[int, str], dict[str, str]]:
+    """``{(turn idx, source): {tool: choice}}`` from the ``decision`` annotations."""
+    return {
+        key: {tool: answer["choice"] for tool, answer in answers.items()}
+        for key, answers in turn_answers(store, session_id).items()
+    }
 
 
 def latest_human_sources(store, session_id: str) -> dict[int, str]:

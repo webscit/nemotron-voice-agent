@@ -248,6 +248,7 @@ def _decision_stats(rows: list[dict[str, Any]], agreement: dict[str, list[int]])
         "turns": len(decided),
         "latency": _dist(_values(decided, "decision_secs")),
         "lag": _dist(_values(decided, "decision_lag_secs")),
+        "confidence": _dist(_values(decided, "decision_confidence")),
         "outcomes": {
             outcome: sum(row["decision_outcome"] == outcome for row in decided) / len(decided) if decided else None
             for outcome in DECISION_OUTCOMES

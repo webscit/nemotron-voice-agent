@@ -363,6 +363,28 @@ def test_redecide_endpoints_need_a_url(monkeypatch):
     assert "redecide" in JOB_REGISTRY
 
 
+def test_redecide_warns_about_an_endpoint_without_url(stores, monkeypatch):
+    from loguru import logger
+
+    store, _ = stores
+    clock = FakeClock()
+    _decision_session(
+        store, "s1", started=clock.now - 500, ended=clock.now - 400, turns={1: ("User: Hi\nAssistant: Hi", "happy")}
+    )
+    monkeypatch.delenv("DECISION_MODEL_URL", raising=False)
+    config = {"auto_enqueue": ["redecide"], "redecide": {"reference": {"name": "nimble", "model": "nimble"}}}
+    dreamer = _dreamer(stores, clock, **config)
+    clock.now += 1000
+    warnings: list[str] = []
+    sink = logger.add(warnings.append, level="WARNING")
+    try:
+        while dreamer.run_once():
+            pass
+    finally:
+        logger.remove(sink)
+    assert any("skipping nimble: no URL" in warning for warning in warnings)
+
+
 def test_openai_transcriber_sends_iso_language(tmp_path):
     import json
     import threading

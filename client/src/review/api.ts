@@ -97,6 +97,7 @@ export interface TurnMetrics {
   decision_lag_secs: number | null;
   decision_outcome: DecisionOutcome | null;
   decision_choice: string | null;
+  decision_confidence: number | null;
   [stageSecs: `${string}_secs`]: number | null;
 }
 
@@ -158,6 +159,8 @@ export interface TurnDetail {
   wer: Record<string, WerValue>;
   /** Decision tool choices by source (``live:<model>``, then the ``redecide`` models): ``{tool: choice}``. */
   decisions: Record<string, Record<string, string>>;
+  /** Confidence of those choices, ``{source: {tool: 0-1}}``; human choices have none. */
+  decision_confidences: Record<string, Record<string, number>>;
   /** Source (``human:<name>``) of the latest human reference choice, if any. */
   decision_reference: string | null;
   user_bot_latency: number | null;
@@ -497,6 +500,8 @@ export interface DecisionStats {
   turns: number;
   latency: Distribution;
   lag: Distribution;
+  /** Confidence of the live model's choices, 0-1; empty for turns not yet backfilled. */
+  confidence: Distribution;
   outcomes: Record<DecisionOutcome, number | null>;
   choices: { choice: string; turns: number }[];
   /** ``redecide``: share of turns agreeing with the reference model, by source. */

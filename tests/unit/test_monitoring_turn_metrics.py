@@ -366,7 +366,13 @@ def test_decision_model_is_tracked_without_making_a_tool_turn():
     trace = _plain()
     trace.session["config"] = {"client_tools_perceivable": ["play_emotion"]}
     trace.event(
-        12.15, "decision_tool", outcome="called", tool="play_emotion", choice="happy", tool_call_id="decision-1"
+        12.15,
+        "decision_tool",
+        outcome="called",
+        tool="play_emotion",
+        choice="happy",
+        confidence=0.8,
+        tool_call_id="decision-1",
     )
     trace.metric(12.15, "decision_secs", 0.15, "DecisionTools")
     trace.tool("decision-1", "play_emotion", 12.15, 12.4)
@@ -375,6 +381,7 @@ def test_decision_model_is_tracked_without_making_a_tool_turn():
     assert row["decision_secs"] == pytest.approx(0.15)
     assert row["decision_lag_secs"] == pytest.approx(0.65)
     assert (row["decision_outcome"], row["decision_choice"]) == ("called", "happy")
+    assert row["decision_confidence"] == pytest.approx(0.8)
     # The robot's first reaction is still the audio: the emotion came later.
     assert (row["response_via"], row["response_latency"]) == ("audio", pytest.approx(1.5))
     (call,) = calls
@@ -397,14 +404,33 @@ def test_report_decision_stats():
     from monitoring.report import _decision_stats
 
     rows = [
-        {"decision_outcome": "called", "decision_choice": "happy", "decision_secs": 0.1, "decision_lag_secs": 0.5},
-        {"decision_outcome": "called", "decision_choice": "happy", "decision_secs": 0.2, "decision_lag_secs": 0.7},
-        {"decision_outcome": "none", "decision_choice": "none", "decision_secs": 0.3, "decision_lag_secs": None},
+        {
+            "decision_outcome": "called",
+            "decision_choice": "happy",
+            "decision_secs": 0.1,
+            "decision_lag_secs": 0.5,
+            "decision_confidence": 0.4,
+        },
+        {
+            "decision_outcome": "called",
+            "decision_choice": "happy",
+            "decision_secs": 0.2,
+            "decision_lag_secs": 0.7,
+            "decision_confidence": 0.6,
+        },
+        {
+            "decision_outcome": "none",
+            "decision_choice": "none",
+            "decision_secs": 0.3,
+            "decision_lag_secs": None,
+            "decision_confidence": 0.8,
+        },
         {"decision_outcome": None},
     ]
     stats = _decision_stats(rows, {"live:d3:2b": [2, 3]})
     assert stats["turns"] == 3
     assert stats["latency"]["p50"] == pytest.approx(0.2)
+    assert stats["confidence"]["p50"] == pytest.approx(0.6)
     assert stats["outcomes"]["called"] == pytest.approx(2 / 3)
     assert stats["choices"] == [{"choice": "happy", "turns": 2}]
     assert stats["agreement"]["live:d3:2b"] == {"agreement": pytest.approx(2 / 3), "turns": 3}

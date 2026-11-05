@@ -157,6 +157,7 @@ The decision is not a latency stage, because it runs alongside TTS. The followin
 | `decision_lag_secs` | Time when the decision call was sent, minus the time of the first bot audio. A negative value means that the robot moved before it spoke. |
 | `decision_outcome` | `called`, `none`, `low_confidence`, or `error` |
 | `decision_choice` | The value that the decision model chose |
+| `decision_confidence` | Confidence of the decision that `decision_choice` reports |
 
 The recorder adds these columns to an existing database automatically. To fill them for sessions recorded earlier, run the backfill in [Per-Turn Metrics](enable-conversation-recording.md#per-turn-metrics).
 
@@ -164,8 +165,9 @@ The recorder adds these columns to an existing database automatically. To fill t
 
 The [review UI](enable-conversation-recording.md#review-in-the-web-ui) shows the decisions in the following places:
 
-- **Metrics** page: the **Decision model** section shows, for each variant, the number of turns, the decision latency p50 and p90, the **Sent after audio** p50, the called, none, low confidence, and error rates, the top choices, and the agreement of each source with the reference, after the `redecide` job has run. Select **Decision model** in **Compare by** to compare decision models. The tools table lists decision calls with the trigger **decision model**.
-- **Sessions** page: each turn shows a **decision model** badge with the choice and the latency, and when the call was sent relative to the first bot audio. A **Decision tools** table lists the choice of each source: the live model as `live:<model>`, and each `redecide` model. A choice that differs from the live choice is highlighted.
+- **Metrics** page: the **Decision model** section shows, for each variant, the number of turns, the decision latency p50 and p90, the **Sent after audio** p50, the **Confidence p50**, the called, none, low confidence, and error rates, the top choices, and the agreement of each source with the reference, after the `redecide` job has run. Select **Decision model** in **Compare by** to compare decision models. The tools table lists decision calls with the trigger **decision model**. **Confidence p50** covers the live decision model only. It reads `decision_confidence`, so a variant with only earlier sessions shows `–` until you run the backfill in [Per-Turn Metrics](enable-conversation-recording.md#per-turn-metrics). The **Sessions** page does not need this backfill.
+- **Sessions** page, turn timeline: the stage legend below the latency bar lists the decision model with a hollow swatch, for example `Decision model 0.15 s · happy 41%`. The item shows the latency, and then the choice of each tool with its confidence. The decision model is not a segment of the bar, because it runs alongside TTS. Next to the item, the legend shows when the call was sent relative to the first bot audio, and a badge when the outcome is `none`, `low_confidence`, or `error`.
+- **Sessions** page, **Decision tools** table: each row shows the source name on the left and the picked choice on the right, followed by the confidence of that source as a percentage, like the ASR transcripts table. The sources are the live model as `live:<model>`, each `redecide` model, and each human reviewer. A choice that differs from the live choice is highlighted in amber. Human reference choices have no confidence. The tool name appears only when the session has several decision tools. Sessions that are already recorded show the confidence too, so you do not need a backfill.
 - **Sessions** page header: a session that ran decision tools shows one **agrees** badge per source, with the share of turns that agree with the reference, and a **Re-run redecide** button.
 - **Decision reference** activity: a queue of the turns where the live decision model ran, where you set the reference choice. Refer to [Set the Reference Choice](#set-the-reference-choice).
 
@@ -246,7 +248,15 @@ Each endpoint accepts the following fields.
 
 The default reference is `nimble`, which chose correctly on all 32 exchanges in [Choose a Decision Model](#choose-a-decision-model). The `d3:9b` candidate is disabled. Pull each model on the Ollama server that the endpoint uses, for example `ollama pull nimble`.
 
-The `dreamer` container reads `.env`, so an endpoint without `url` uses the same server as the live decision model. The container maps `host.docker.internal` to the host, so it can reach an Ollama server on the host.
+The `dreamer` container reads `.env` when it is created, so an endpoint without `url` uses the same `DECISION_MODEL_URL` as the live decision model. The container maps `host.docker.internal` to the host, so it can reach an Ollama server on the host.
+
+After you add `DECISION_MODEL_URL` to `.env`, recreate the container so it reads the new value.
+
+```bash
+docker compose --profile dreamer up -d dreamer
+```
+
+The job skips an enabled endpoint that has no URL and logs a warning that names the endpoint, `skipping <endpoint>: no URL`. Sessions that already ended do not run again on their own, so re-run the job for them as described in [Run Redecide](#run-redecide).
 
 ### Run Redecide
 
@@ -271,6 +281,8 @@ The following table lists common symptoms and resolutions.
 | The robot never plays an emotion, and the log shows `-> none` | The decision model found no fitting value. Review the `criteria` descriptions and the `instructions`. |
 | The log shows `low_confidence` | The choice is below `min_confidence`. Lower the threshold in the catalog. |
 | The `redecide` job fails with `ConnectError` or `HTTPStatusError` | Verify that the `dreamer` container can reach the endpoint URL, or `DECISION_MODEL_URL` when the endpoint has no `url`, and that the model is pulled on that Ollama server. |
+| The `dreamer` log shows the warning `skipping <endpoint>: no URL`, usually with `no reference decision available` | The endpoint has no `url`, and `DECISION_MODEL_URL` is missing from the `dreamer` environment. Add it to `.env`, recreate the container with `docker compose --profile dreamer up -d dreamer`, and then [re-run the job](#run-redecide) for the sessions that already ended. |
+| The `dreamer` log shows `no reference decision available` without that warning | The reference model has no answer for the session, and the session has no human choice. Verify that `redecide.reference` is enabled in [`src/monitoring/jobs/dreamer.yaml`](../../src/monitoring/jobs/dreamer.yaml), or [set the reference choice](#set-the-reference-choice). |
 | The session shows no **agrees** badge | The `redecide` job has not run, the session was recorded before the snapshot included the `questions`, or no reference choice is available. Check the job on the **Dreamer** page. |
 | The review UI has no **Decision reference** activity | No ended recorded session ran decision tools, or the session was recorded before the snapshot included the `questions`. |
 | Saving a reference choice returns HTTP `422` | The choice is not an option of the session's question, or the tool is unknown for that session. Pick one of the listed chips. |

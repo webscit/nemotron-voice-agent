@@ -22,7 +22,7 @@ import { powerLabel } from "./chartTheme";
 import { TurnTimeline } from "./TurnTimeline";
 import { MemoryStatusBadge } from "./Memories";
 import { AudioClips, ImageStrip, StatusLine, TranscriptTable, WerBadge } from "./components";
-import { formatDate, formatDuration, formatPct, formatSecs, reviewHref, useAnnotator } from "./utils";
+import { formatConfidence, formatDate, formatDuration, formatPct, formatSecs, reviewHref, useAnnotator } from "./utils";
 
 export function SessionsList() {
   const sessions = useSessions();
@@ -319,30 +319,34 @@ function DecisionChoices({
   return (
     <div className="rv-side">
       <span className="rv-label">Decision tools</span>
-      <table className="rv-table rv-table-static text-sm">
+      <table className="rv-transcripts">
         <tbody>
-          {sources.map((source) => (
-            <tr key={source}>
-              <td className="rv-mono">
-                {source}
-                {source === turn.decision_reference && <span className="rv-badge rv-badge-good">reference</span>}
-              </td>
-              <td>
-                {Object.entries(decisions[source]).map(([tool, choice]) => {
-                  const differs = live !== undefined && source !== live && decisions[live]?.[tool] !== choice;
-                  return (
-                    <span
-                      key={tool}
-                      className={`rv-badge ${differs ? "rv-badge-warn" : "rv-badge-muted"}`}
-                      title={differs ? `differs from ${live}` : tool}
-                    >
-                      {tool}: {choice}
-                    </span>
-                  );
-                })}
-              </td>
-            </tr>
-          ))}
+          {sources.map((source) => {
+            const picks = Object.entries(decisions[source]);
+            return (
+              <tr key={source}>
+                <th>
+                  {source}
+                  {source === turn.decision_reference && <span className="rv-badge rv-badge-good">reference</span>}
+                </th>
+                <td>
+                  {picks.map(([tool, choice]) => {
+                    const differs = live !== undefined && source !== live && decisions[live]?.[tool] !== choice;
+                    const description = options[tool]?.[choice];
+                    return (
+                      <span key={tool} className="rv-decision-pick" title={differs ? `differs from ${live}` : description}>
+                        {picks.length > 1 && <span className="text-xs text-muted">{tool}</span>}
+                        <span className={differs ? "rv-diff-ins" : "rv-decision-choice"}>{choice}</span>
+                        <span className="text-xs text-muted" title="Confidence of this source">
+                          {formatConfidence(turn.decision_confidences[source]?.[tool])}
+                        </span>
+                      </span>
+                    );
+                  })}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       {live && Object.keys(options).length > 0 && (

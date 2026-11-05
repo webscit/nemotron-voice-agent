@@ -4,9 +4,9 @@
 // Per-turn timeline of the session view: latency stages from the end of user
 // speech to the first response, tool calls, and the host load during the turn.
 
-import type { SystemSample, ToolCall, TurnDetail, TurnMetrics } from "./api";
+import type { SystemSample, ToolCall, TurnDetail } from "./api";
 import { INK, KIND_LABELS, SERIES, stageInfo } from "./chartTheme";
-import { formatSecs, triggerLabel } from "./utils";
+import { formatConfidence, formatSecs, triggerLabel } from "./utils";
 
 const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   ok: "rv-badge-muted",
@@ -15,22 +15,31 @@ const OUTCOME_TONE: Record<ToolCall["outcome"], string> = {
   cancelled: "rv-badge-warn",
 };
 
-/** What the decision model decided for the turn's first answer, how long it took and when its call left. */
-function DecisionLine({ metrics }: Readonly<{ metrics: TurnMetrics }>) {
+/** Legend entry of the decision model for the turn's first answer: latency, choices, confidence, when its call left. */
+function DecisionLegend({ turn }: Readonly<{ turn: TurnDetail }>) {
+  const metrics = turn.metrics;
+  if (!metrics?.decision_outcome) return null;
   const lag = metrics.decision_lag_secs;
-  const timing =
-    lag === null ? null : `sent ${formatSecs(Math.abs(lag))} ${lag < 0 ? "before" : "after"} the first bot audio`;
+  const live = Object.keys(turn.decisions).find((source) => source.startsWith("live:"));
+  const picks = live ? Object.entries(turn.decisions[live]) : [];
   return (
-    <div className="rv-stage-legend">
-      <span
-        className={`rv-badge ${metrics.decision_outcome === "error" ? "rv-badge-bad" : "rv-badge-muted"}`}
-        title={timing ?? "decision model of the turn's first answer"}
-      >
-        decision model · {metrics.decision_choice ?? metrics.decision_outcome} · {formatSecs(metrics.decision_secs)}
-        {metrics.decision_outcome !== "called" && metrics.decision_choice ? ` · ${metrics.decision_outcome}` : ""}
+    <>
+      <span className="rv-stage-legend-item" title="Runs alongside TTS, so it is not a stage of the bar">
+        <span className="rv-swatch rv-swatch-hollow" />
+        Decision model {formatSecs(metrics.decision_secs)}
+        {picks.map(([tool, choice]) => ` · ${choice} ${formatConfidence(turn.decision_confidences[live!]?.[tool])}`)}
       </span>
-      {timing && <span className="text-xs text-muted">{timing}</span>}
-    </div>
+      {lag !== null && (
+        <span className="rv-stage-legend-item">
+          sent {formatSecs(Math.abs(lag))} {lag < 0 ? "before" : "after"} the first bot audio
+        </span>
+      )}
+      {metrics.decision_outcome !== "called" && (
+        <span className={`rv-badge ${metrics.decision_outcome === "error" ? "rv-badge-bad" : "rv-badge-muted"}`}>
+          {metrics.decision_outcome}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -150,7 +159,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
           )}
         </div>
       )}
-      {parts.length > 0 && (
+      {(parts.length > 0 || metrics.decision_outcome) && (
         <div className="rv-stage-legend">
           {stageKeys.map((key) => {
             const info = stageInfo(key);
@@ -174,6 +183,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
               </span>
             </>
           )}
+          <DecisionLegend turn={turn} />
         </div>
       )}
       {turn.tool_calls.length > 0 && (
@@ -189,7 +199,6 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
           ))}
         </div>
       )}
-      {turn.metrics?.decision_outcome && <DecisionLine metrics={turn.metrics} />}
     </div>
   );
 }

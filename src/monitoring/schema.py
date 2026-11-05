@@ -121,6 +121,7 @@ turn_metrics = Table(
     # called | none | low_confidence | error
     Column("decision_outcome", String(16)),
     Column("decision_choice", String(64)),
+    Column("decision_confidence", Float),
     Column("computed_at", Float, nullable=False),
 )
 

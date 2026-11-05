@@ -343,11 +343,17 @@ class ReviewService:
         wer_summary = {}
         # Decision tool choices per turn and source: live, the ``redecide`` models, then reviewers.
         decisions_by_turn: dict[int, dict[str, Any]] = defaultdict(dict)
+        confidences_by_turn: dict[int, dict[str, Any]] = defaultdict(dict)
+        live_decision_source = redecide.live_source_name(session.get("config") or {})
         for idx, decision in redecide.first_decisions(self.store, session_id).items():
             if decision["choices"]:
-                decisions_by_turn[idx][redecide.live_source_name(session.get("config") or {})] = decision["choices"]
-        for (idx, source), choices in redecide.turn_choices(self.store, session_id).items():
-            decisions_by_turn[idx][source] = choices
+                decisions_by_turn[idx][live_decision_source] = decision["choices"]
+                confidences_by_turn[idx][live_decision_source] = decision["confidences"]
+        for (idx, source), answers in redecide.turn_answers(self.store, session_id).items():
+            decisions_by_turn[idx][source] = {tool: answer["choice"] for tool, answer in answers.items()}
+            confidences_by_turn[idx][source] = {
+                tool: answer["confidence"] for tool, answer in answers.items() if answer.get("confidence") is not None
+            }
         human_decisions = redecide.latest_human_sources(self.store, session_id)
         decision_summary = {}
         for annotation in self.store.annotations_for(session_id):
@@ -372,6 +378,7 @@ class ReviewService:
                     "human_reference": human,
                     "wer": wer_by_turn.get(idx, {}),
                     "decisions": decisions_by_turn.get(idx, {}),
+                    "decision_confidences": confidences_by_turn.get(idx, {}),
                     "decision_reference": human_decisions.get(idx),
                     "user_bot_latency": latency.get(idx),
                     "metrics": turn_metrics.get(idx),
