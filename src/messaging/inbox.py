@@ -27,12 +27,15 @@ CREATE TABLE IF NOT EXISTS messages (
     media_url TEXT,
     mimetype TEXT,
     duration_ms INTEGER,
+    media_key TEXT,
     sent_at REAL NOT NULL,
     received_at REAL NOT NULL,
     read_at REAL
 );
 CREATE INDEX IF NOT EXISTS messages_sender ON messages (sender, sent_at);
 """
+# Columns added after the first release: (name, SQL type), added to older databases.
+_ADDED_COLUMNS = (("media_key", "TEXT"),)
 
 SYNC_TOKEN_KEY = "sync_token"
 KIND_TEXT = "text"
@@ -53,6 +56,8 @@ class InboxMessage:
     mimetype: str | None = None
     duration_ms: int | None = None
     read_at: float | None = None
+    # Decryption key of an encrypted attachment (JSON: k, iv, sha256).
+    media_key: str | None = None
 
 
 class Inbox:
@@ -66,6 +71,10 @@ class Inbox:
         self._lock = threading.Lock()
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(messages)")}
+            for name, kind in _ADDED_COLUMNS:
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE messages ADD COLUMN {name} {kind}")
 
     def close(self) -> None:
         """Close the database."""
@@ -105,7 +114,7 @@ class Inbox:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "INSERT OR IGNORE INTO messages (event_id, room_id, sender, kind, body, media_url, mimetype, "
-                "duration_ms, sent_at, received_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "duration_ms, media_key, sent_at, received_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     message.event_id,
                     message.room_id,
@@ -115,6 +124,7 @@ class Inbox:
                     message.media_url,
                     message.mimetype,
                     message.duration_ms,
+                    message.media_key,
                     message.sent_at,
                     time.time(),
                     message.read_at,
@@ -190,4 +200,5 @@ def _message(row: sqlite3.Row) -> InboxMessage:
         mimetype=row["mimetype"],
         duration_ms=row["duration_ms"],
         read_at=row["read_at"],
+        media_key=row["media_key"],
     )

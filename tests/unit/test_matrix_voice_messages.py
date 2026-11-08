@@ -116,7 +116,7 @@ class MediaClient:
         self.uploads = []
         self.sent = []
 
-    async def upload(self, data_provider, content_type, filename=None, filesize=None):
+    async def upload(self, data_provider, content_type, filename=None, filesize=None, encrypt=False):
         self.uploads.append((data_provider(0, 0).read(), content_type, filename, filesize))
         return UploadResponse("mxc://matrix.org/voice1"), None
 
@@ -125,7 +125,7 @@ class MediaClient:
             return DownloadError("not found", "M_NOT_FOUND")
         return MemoryDownloadResponse(self.media, "audio/ogg", "voice.ogg")
 
-    async def room_send(self, room_id, message_type, content):
+    async def room_send(self, room_id, message_type, content, ignore_unverified_devices=False):
         self.sent.append((room_id, content))
         return RoomSendResponse("$v1", room_id)
 
