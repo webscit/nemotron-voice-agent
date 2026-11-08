@@ -802,6 +802,8 @@ async def bot(runner_args: RunnerArguments) -> None:
         else:
             for audio_processor in audio_processors:
                 await audio_processor.start_recording()
+        if messaging_announcer:
+            await messaging_announcer.announce_waiting(welcome=welcome_enabled)
 
     register_session_start_handlers(
         transport=transport,

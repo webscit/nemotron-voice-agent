@@ -13,9 +13,10 @@ in the next turn through the engine's follow-up:
 - "Send a message to Bob" -> "What should I tell Bob?" -> <the user's words> -> read back,
   "Shall I send it?" -> yes -> sent / no -> dropped / "change it" -> dictation again.
 - "Tell Bob that <message>" goes straight to the read-back.
-- A message that arrives during the conversation is announced once nobody talks
-  (``announcement``, said by ``MessagingAnnouncer``): "You have a new message from
-  Bob. Shall I read it?" -> yes -> read. Any other answer is a turn like any other.
+- A message that arrives during the conversation, or was waiting when it started,
+  is announced once nobody talks (``announcement``, said by ``MessagingAnnouncer``):
+  "You just got a new message from Bob. Shall I read it?" -> yes -> read. Any
+  other answer is a turn like any other.
 - Voice messages: received ones play inside "read my messages", or with "play the
   voice message from Bob". "Send a voice message to Bob" -> "I'm listening" -> the
   next turn's audio is the message -> "Shall I send it?" -> yes / no / "play it" /
@@ -431,7 +432,9 @@ class MessagingIntents:
 
     # ------------------------------------------------------ announcements
     def announcement(self, unread: list[tuple[Contact, int]], arrived: int) -> IntentResponse:
-        """Announce ``arrived`` new messages from these contacts, with their ``unread`` counts; a yes reads them.
+        """Announce the ``unread`` messages of these contacts, ``arrived`` of them just now; a yes reads them.
+
+        With nothing just arrived, the messages were waiting when the session started.
 
         Said without being asked, so its question is not asked again: an answer
         that is not yes or no is an ordinary turn. The person talking is named

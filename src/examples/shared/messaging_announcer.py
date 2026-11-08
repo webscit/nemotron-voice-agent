@@ -6,10 +6,12 @@
 When a contact writes while a session runs, the agent waits until nobody talks
 and no question is pending, then says "You just got a new message from Bob.
 Shall I read it?" through the intent engine (``MessagingIntents.announcement``):
-a yes reads them, any other answer is a turn like any other.
+a yes reads them, any other answer is a turn like any other. The unread messages
+already waiting when the session starts are announced the same way, after the
+welcome ("You have 2 unread messages from Bob").
 
-- Only messages that arrive during the session are announced, each one once.
-  Messages read meanwhile (by this or another session) are not.
+- Each message is announced once per session. Messages read meanwhile (by this
+  or another session) are not.
 - A message is announced to whoever may read it: a contact with an ``owner`` is
   only announced while that person is known for sure, and waits until then.
 - Nothing is said over a pending question (a draft read back, a recording), over
@@ -48,6 +50,8 @@ from messaging.gateway import MatrixGateway
 from messaging.inbox import InboxMessage
 
 POLL_SECS = 0.25
+# At most this many waiting messages are looked at when the session starts.
+MAX_WAITING = 100
 # Messages only the owner may hear wait for them; checked this often meanwhile.
 OWNER_WAIT_SECS = 2.0
 
@@ -77,6 +81,8 @@ class MessagingAnnouncer(FrameProcessor):
         self._arrivals: dict[str, InboxMessage] = {}
         # Being announced: back to the arrivals when the user talks over it.
         self._announcing: dict[str, InboxMessage] = {}
+        # Unread when the session started: announced as waiting, not as just arrived.
+        self._waiting: set[str] = set()
         self._task: asyncio.Task | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -117,6 +123,17 @@ class MessagingAnnouncer(FrameProcessor):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         self._task = None
+
+    async def announce_waiting(self, *, welcome: bool) -> None:
+        """Announce the unread messages waiting when the session starts; after the ``welcome``, if any."""
+        if welcome:
+            # The welcome is queued right after the session start: it is said first.
+            self._activity.expect_reply()
+        senders = [contact.matrix_id for contact in self._gateway.contacts.all()]
+        waiting = await asyncio.to_thread(self._gateway.inbox.messages, senders, unread_only=True, limit=MAX_WAITING)
+        for message in waiting:
+            self._waiting.add(message.event_id)
+            self._arrived(message)
 
     # --------------------------------------------------------------- arrivals
     def _on_message(self, message: InboxMessage, contact: Contact) -> None:
@@ -161,7 +178,8 @@ class MessagingAnnouncer(FrameProcessor):
         if not self._can_speak():
             return True
         try:
-            response = self._intents.announcement(unread_counts, len(due))
+            arrived = sum(1 for message in due if message.event_id not in self._waiting)
+            response = self._intents.announcement(unread_counts, arrived)
         except TargetUnavailable as exc:
             logger.warning(f"Matrix: cannot announce new messages ({exc})")
             self._arrivals.clear()

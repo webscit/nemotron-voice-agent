@@ -331,9 +331,10 @@ when you interrupt the agent is still sent.
 
 ### New Message Announcements
 
-When a contact writes while a session runs, the voice dialog announces the
-message after nobody talks. A yes reads the messages, the same way as after a
-check. The following English exchange starts when a message arrives during a
+The voice dialog announces unread messages when a session starts, and new
+messages when a contact writes while the session runs. It speaks only after
+nobody talks. A yes reads the messages, the same way as after a check. The
+following English exchange starts when a message arrives during a
 conversation:
 
 ```text
@@ -345,10 +346,15 @@ Agent: At 18:05, Bob wrote: Are you coming tonight? Do you want to reply to Bob?
 In French, the agent says "Tu viens de recevoir un nouveau message de Bob. Je
 te le lis ?" Announcements follow these rules:
 
-- **New messages only.** The agent announces only the messages that arrive
-  during the session, each one once. Unread messages that were waiting when the
-  session started are not announced. It skips a message that somebody read in
-  the meantime, in this session or another one.
+- **Waiting messages.** When the session starts, the agent announces the
+  unread messages that are already waiting, after the welcome message. When
+  the welcome message is off, it announces them as soon as the conversation is
+  idle. For example, it says "You have 2 unread messages from Bob. Shall I
+  read them?" or "Tu as 2 messages non lus de Bob. Je te les lis ?"
+- **Once per session.** The agent announces each message once per session. It
+  skips a message that somebody read in the meantime, in this session or
+  another one. A message that you leave unread is announced again in the next
+  session.
 - **Grouped arrivals.** Messages that arrive close together are announced
   together. When older messages from the same senders are still unread, the
   agent also says how many a yes reads, for example "You just got a new
@@ -389,7 +395,7 @@ defines the following intents:
   recording that waits for confirmation.
 
 The `responses.intents.Messaging` section holds the replies as Jinja templates.
-The `announce` key holds the announcement of new messages.
+The `announce` key holds the announcement of waiting and new messages.
 Keep every response key when you edit a file. A missing reply makes the turn
 fall through to the LLM. Restart the server after you change a file.
 
@@ -423,7 +429,7 @@ This first version has the following limitations:
   records voice messages, in French and English. The LLM tools handle text
   messages only.
 - **Announcements need the voice dialog.** Only the intent engine announces
-  messages that arrive during a session, in French and English.
+  unread and new messages, in French and English.
 - **One turn per recording.** A voice message is the audio of one user turn.
   When you pause long enough for turn detection to end the turn, the
   recording stops there.

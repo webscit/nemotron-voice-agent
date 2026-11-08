@@ -123,7 +123,7 @@ class Harness:
         self.tap = Tap()
         _, assistant_aggregator = LLMContextAggregatorPair(self.context)
         self.activity = ConversationActivity(quiet_secs=0.0)
-        announcer = MessagingAnnouncer(
+        self.announcer = announcer = MessagingAnnouncer(
             gateway=gateway, tools=self.tools, intents=intents, engine=self.engine, activity=self.activity
         )
         self.worker = PipelineWorker(
@@ -573,7 +573,7 @@ def test_new_message_is_announced_once_idle_and_yes_reads_it(gateway, fast_annou
         async with Harness(gateway, announce=True) as h:
             await h.heard()
             _arrive(gateway, "$1", BOB, "Tu rentres quand ?")
-            # What just arrived, and what a yes reads: the backlog too.
+            # What just arrived, and what a yes reads: the waiting message too.
             answer = await h.announced(0)
             assert answer == "Tu viens de recevoir un nouveau message de Bob, et tu en as 2 non lus. Je te les lis ?"
             answer = await h.says("Oui")
@@ -587,14 +587,35 @@ def test_new_message_is_announced_once_idle_and_yes_reads_it(gateway, fast_annou
     run(scenario())
 
 
-def test_backlog_alone_is_not_announced(gateway, fast_announcer):
-    _receive(gateway, "$old", BOB, "Avant la session", sent_at=time.time() - 600)
+def test_waiting_messages_are_announced_after_the_welcome(gateway, fast_announcer):
+    _receive(gateway, "$1", BOB, "Avant la session", sent_at=time.time() - 600)
+    _receive(gateway, "$2", BOB, "Tu es là ?", sent_at=time.time() - 300)
+    _receive(gateway, "$3", ELODIE, "Secret", sent_at=time.time() - 300)
 
     async def scenario():
         async with Harness(gateway, announce=True) as h:
-            await h.heard()
+            await h.announcer.announce_waiting(welcome=True)
             await asyncio.sleep(0.1)
+            # The welcome is said first.
             assert h.tap.spoken == []
+            await h.heard()
+            # Élodie's message waits for Alice.
+            assert await h.announced(0) == "Tu as 2 messages non lus de Bob. Je te les lis ?"
+            assert await h.says("Non") == "D'accord."
+            h.person = ALICE
+            await h.heard()
+            assert await h.announced(2) == "Alice, tu as un message non lu d'Élodie. Je te le lis ?"
+
+    run(scenario())
+
+
+def test_waiting_messages_are_announced_at_once_without_a_welcome(gateway, fast_announcer):
+    _receive(gateway, "$1", BOB, "Avant la session", sent_at=time.time() - 600)
+
+    async def scenario():
+        async with Harness(gateway, language="en-US", announce=True) as h:
+            await h.announcer.announce_waiting(welcome=False)
+            assert await h.announced(0) == "You have an unread message from Bob. Shall I read it?"
 
     run(scenario())
 
