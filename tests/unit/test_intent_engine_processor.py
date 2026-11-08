@@ -36,7 +36,7 @@ from examples.multilingual.tool_handlers import ClientToolResultBridge, build_cl
 from examples.shared.intent_engine import targets
 from examples.shared.intent_engine.config import IntentEngineConfig
 from examples.shared.intent_engine.matcher import IntentMatcher, build_slot_lists
-from examples.shared.intent_engine.processor import IntentEngineProcessor, build_intent_engine
+from examples.shared.intent_engine.processor import INTENT_REPLY_METADATA, IntentEngineProcessor, build_intent_engine
 from examples.shared.intent_engine.targets import ClientToolMap, ClientToolTarget, HomeAssistantTarget
 
 REMINDER = "Reminder: reply only in French."
@@ -251,6 +251,9 @@ class IntentEngineProcessorTests(unittest.IsolatedAsyncioTestCase):
                 type(f) for f in h.tap.frames if isinstance(f, (LLMFullResponseStartFrame, LLMFullResponseEndFrame))
             ]
             self.assertEqual(kinds, [LLMFullResponseStartFrame, LLMFullResponseEndFrame])
+            # Marked so the decision tools can tell it from an LLM answer.
+            (start,) = [f for f in h.tap.frames if isinstance(f, LLMFullResponseStartFrame)]
+            self.assertTrue(start.metadata.get(INTENT_REPLY_METADATA))
             self.assertEqual(h.context.get_messages()[-1], {"role": "assistant", "content": "Allumé"})
             self.assertEqual(h.context.get_messages()[-2]["content"], "Bonjour Richie, allume Ceiling Lights")
             event = h.recorder.events[-1]

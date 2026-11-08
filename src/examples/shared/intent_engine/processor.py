@@ -74,6 +74,9 @@ if TYPE_CHECKING:
 EVENT_KIND = "intent_engine"
 METRIC_MATCH_SECS = "intent_match_secs"
 METRIC_TARGET_SECS = "intent_target_secs"
+# Set on the ``LLMFullResponseStartFrame`` of a reply the engine speaks, so later
+# processors can tell it from an LLM answer.
+INTENT_REPLY_METADATA = "intent_engine_reply"
 _PROCESSOR_NAME = "IntentEngine"
 _SYNC_RETRY_SECS = 30.0
 # Longest leading answer looked for in a longer turn ("non ne l'envoie pas").
@@ -335,7 +338,9 @@ class IntentEngineProcessor(FrameProcessor):
 
     async def _speak(self, speech: str) -> None:
         """Speak ``speech`` the way an LLM reply would be spoken."""
-        await self.push_frame(LLMFullResponseStartFrame())
+        start = LLMFullResponseStartFrame()
+        start.metadata[INTENT_REPLY_METADATA] = True
+        await self.push_frame(start)
         await self.push_frame(LLMTextFrame(speech))
         await self.push_frame(LLMFullResponseEndFrame())
 

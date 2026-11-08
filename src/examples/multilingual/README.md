@@ -82,6 +82,7 @@ TTS voices and supported language codes are discovered at runtime by prewarming 
 | `tool_handlers.py` | server-side RTVI forwarding handler for those client-executed tools |
 | `../shared/intent_engine/` | optional intent engine: hassil matching, Home Assistant, client-tool, and server targets, multi-turn follow-ups, and custom sentences |
 | `../shared/messaging_intents.py` | Matrix messaging as an intent-engine dialog (server target) |
+| `../shared/decision_tools/` | optional decision tools: a decision model calls client tools, such as `play_emotion`, after each LLM answer |
 
 ### TTS text normalization
 
@@ -90,6 +91,10 @@ Before synthesis, the pipeline rewrites numbers, currency, percentages, units, d
 ### Intent engine
 
 The pipeline can match device commands, such as "Allume la lampe du salon," before the LLM and execute them directly through the Home Assistant intent API or a client-declared tool. A matched turn skips both LLM calls. Every other turn reaches the LLM unchanged. The engine is off by default. Set `INTENT_ENGINE_ENABLED=true` in `.env` to turn it on, and add `HOME_ASSISTANT_URL` and `HOME_ASSISTANT_TOKEN` to control Home Assistant. Locks and alarm control panels are blocked by default. For the setup, the allowed intents, custom sentences, and the Reachy Mini tool mapping, refer to [Configure the Intent Engine](../../../docs/how-to/configure-intent-engine.md). When session recording is enabled (`MONITORING_ENABLED=true`), the `dream` job of the dreamer learns new sentences and client-tool intents from the turns that the engine missed. After you approve them in the **Intents** review activity, new sessions load them at start. Refer to [Learn Sentences From Conversations](../../../docs/how-to/configure-intent-engine.md#learn-sentences-from-conversations).
+
+### Decision tools
+
+The pipeline can let a small decision model, served by the Ollama System One API, call client tools after each LLM answer. The first entry makes a Reachy Mini robot play an emotion that fits the exchange while the agent speaks. The feature is off by default. Set `DECISION_MODEL_URL` in `.env` to turn it on. While it is on, the LLM does not see the decision tools, and explicit requests still reach them through the intent engine. For the setup and the tool catalog, refer to [Configure Decision Tools](../../../docs/how-to/configure-decision-tools.md). When session recording is enabled, the review UI shows the decision latency and choices, and the `redecide` job of the dreamer measures how often the live decision model agrees with a reference model. Refer to [Re-Evaluate Decisions With Another Model](../../../docs/how-to/configure-decision-tools.md#re-evaluate-decisions-with-another-model).
 
 ### Client-executed tools
 

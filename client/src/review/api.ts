@@ -92,14 +92,24 @@ export interface TurnMetrics {
   completion_tokens: number | null;
   gpu_load_mean: number | null;
   gpu_load_peak: number | null;
+  /** Decision model of the turn's first answer: latency, call send time - first bot audio, what it decided. */
+  decision_secs: number | null;
+  decision_lag_secs: number | null;
+  decision_outcome: DecisionOutcome | null;
+  decision_choice: string | null;
+  decision_confidence: number | null;
   [stageSecs: `${string}_secs`]: number | null;
 }
+
+export type DecisionOutcome = "called" | "none" | "low_confidence" | "error";
+/** Who sent a tool call: the LLM, the intent engine, or the decision model (decision tools). */
+export type ToolTrigger = "llm" | "intent" | "decision";
 
 export interface ToolCall {
   call_id: string;
   turn_idx: number | null;
   name: string;
-  trigger: "llm" | "intent";
+  trigger: ToolTrigger;
   target: "client" | "home_assistant";
   sent_at: number;
   duration_secs: number | null;
@@ -147,6 +157,12 @@ export interface TurnDetail {
   transcripts: Record<string, string>;
   human_reference: HumanReference | null;
   wer: Record<string, WerValue>;
+  /** Decision tool choices by source (``live:<model>``, then the ``redecide`` models): ``{tool: choice}``. */
+  decisions: Record<string, Record<string, string>>;
+  /** Confidence of those choices, ``{source: {tool: 0-1}}``; human choices have none. */
+  decision_confidences: Record<string, Record<string, number>>;
+  /** Source (``human:<name>``) of the latest human reference choice, if any. */
+  decision_reference: string | null;
   user_bot_latency: number | null;
   /** Explicit per-turn speaker override (the session speaker applies otherwise). */
   speaker?: string | null;
@@ -168,6 +184,11 @@ export interface SessionDetail {
   turns: TurnDetail[];
   system_samples: SystemSample[];
   wer_summary: Record<string, { wer: number | null; turns: number; reference_sources: string[] }>;
+  /** ``redecide`` agreement with the reference decision model, by source. */
+  decision_summary: Record<
+    string,
+    { agreement: number | null; agreed: number; turns: number; reference_sources: string[] }
+  >;
   jobs: JobBrief[];
   speakers: { session: string | null };
   memories_used: { used: MemoryRow[]; extracted: MemoryRow[] };
@@ -319,6 +340,42 @@ export interface AsrQueue {
 
 export type AsrQueueSort = "recent" | "disagreement";
 
+/** ``{tool: choice}`` of one decision source. */
+export type DecisionChoicesMap = Record<string, string>;
+
+/** A turn where the live decision model ran (src/monitoring/api.py ``decision_queue``). */
+export interface DecisionQueueItem {
+  session_id: string;
+  turn_idx: number;
+  started_at: number;
+  language: string | null;
+  /** What the decision model judged: the user's last message and the answer. */
+  state: string;
+  /** Each tool's options and their descriptions, ``none`` included. */
+  options: Record<string, Record<string, string>>;
+  live: { source: string; choices: DecisionChoicesMap };
+  models: Record<string, DecisionChoicesMap>;
+  reference_source: string | null;
+  human_reference: { source: string; choices: DecisionChoicesMap } | null;
+  agree: boolean;
+  disagree: boolean;
+}
+
+export interface DecisionQueue {
+  total: number;
+  open: number;
+  agreeing: number;
+  matching: number;
+  items: DecisionQueueItem[];
+}
+
+export interface DecisionReferenceItem {
+  session_id: string;
+  turn_idx: number;
+  tool: string;
+  choice: string;
+}
+
 export interface Activity {
   id: string;
   title: string;
@@ -408,7 +465,7 @@ export interface TrendBucket {
 
 export interface ToolStats {
   name: string;
-  trigger: "llm" | "intent";
+  trigger: ToolTrigger;
   target: "client" | "home_assistant";
   perceivable: boolean;
   calls: number;
@@ -434,6 +491,21 @@ export interface MetricsVariant {
   // Robot client metrics ("client.*"), each distributed over its reporting windows.
   client: Record<string, Distribution>;
   wer: Record<string, { wer: number | null; ref_words: number }>;
+  /** Null when no session of the variant ran decision tools. */
+  decisions: DecisionStats | null;
+}
+
+/** Decision model over a variant's turns (src/monitoring/report.py ``_decision_stats``). */
+export interface DecisionStats {
+  turns: number;
+  latency: Distribution;
+  lag: Distribution;
+  /** Confidence of the live model's choices, 0-1; empty for turns not yet backfilled. */
+  confidence: Distribution;
+  outcomes: Record<DecisionOutcome, number | null>;
+  choices: { choice: string; turns: number }[];
+  /** ``redecide``: share of turns agreeing with the reference model, by source. */
+  agreement: Record<string, { agreement: number | null; turns: number }>;
 }
 
 export interface MetricsResponse {
@@ -530,6 +602,14 @@ export function useAsrQueue(status: "open" | "reviewed" | "all", sort: AsrQueueS
   return useQuery({
     queryKey: ["review", "asr-queue", status, sort, limit],
     queryFn: () => request<AsrQueue>(`/asr/queue?status=${status}&sort=${sort}&limit=${limit}`),
+    ...live,
+  });
+}
+
+export function useDecisionQueue(status: "open" | "reviewed" | "all", sort: AsrQueueSort, limit = 200) {
+  return useQuery({
+    queryKey: ["review", "decision-queue", status, sort, limit],
+    queryFn: () => request<DecisionQueue>(`/decisions/queue?status=${status}&sort=${sort}&limit=${limit}`),
     ...live,
   });
 }
@@ -638,6 +718,18 @@ export function useSaveReferences() {
     mutationFn: (payload: { annotator: string; items: ReferenceItem[] }) =>
       postJson<{ saved: number; wer_summary: Record<string, Record<string, unknown>> }>(
         "/asr/references",
+        payload
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["review"] }),
+  });
+}
+
+export function useSaveDecisionReferences() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { annotator: string; items: DecisionReferenceItem[] }) =>
+      postJson<{ saved: number; decision_summary: Record<string, Record<string, unknown>> }>(
+        "/decisions/references",
         payload
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["review"] }),

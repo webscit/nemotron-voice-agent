@@ -15,6 +15,7 @@ from PIL import Image
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    EndFrame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     InterruptionFrame,
@@ -22,6 +23,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMTextFrame,
     MetricsFrame,
+    OutputAudioRawFrame,
     UserImageRawFrame,
     UserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
@@ -33,8 +35,11 @@ from pipecat.metrics.metrics import (
     TTFBMetricsData,
 )
 from pipecat.observers.base_observer import FramePushed
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.workers.runner import WorkerRunner
 
 from monitoring.config import MonitoringConfig
 from monitoring.media import extract_inline_media
@@ -424,3 +429,45 @@ def test_turn_opened_by_a_transcript_is_recorded(tmp_path):
     events = [(e["turn_idx"], e["data"]) for e in store.rows("events", "s3") if e["kind"] == "transcript_turn_started"]
     assert len(events) == 1
     assert events[0][0] == 2
+
+
+def test_conversation_audio_is_dated_by_its_first_sample(tmp_path):
+    # conversation.wav starts with the first audio frame, not when the recorder was created.
+    settings = _settings(tmp_path)
+    store = SessionStore(settings.db_url)
+    store.create_schema()
+    artifacts = LocalArtifactStore(settings.artifacts_dir)
+
+    async def scenario():
+        recorder = SessionRecorder(
+            session_id="s1",
+            example="multilingual-assistant",
+            config={},
+            settings=settings,
+            store=store,
+            artifacts=artifacts,
+            llm=FakeProcessor("NvidiaLLMService#0"),
+            language="fr-FR",
+        )
+        await recorder.start()
+        (buffer,) = recorder.processors()
+        worker = PipelineWorker(Pipeline([buffer]), cancel_on_idle_timeout=False, enable_rtvi=False)
+        runner = WorkerRunner(handle_sigint=False)
+        await runner.add_workers(worker)
+        task = asyncio.create_task(runner.run())
+        await asyncio.sleep(0.05)
+        await recorder.on_session_started()
+        await asyncio.sleep(0.3)
+        # 100 ms of greeting, arriving 0.3 s after the recording started.
+        await worker.queue_frame(OutputAudioRawFrame(audio=b"\x01\x00" * 1600, sample_rate=16000, num_channels=1))
+        await asyncio.sleep(0.05)
+        await recorder.stop_audio()
+        await worker.queue_frame(EndFrame())
+        await asyncio.wait_for(task, timeout=5)
+        await recorder.close()
+        return recorder
+
+    recorder = asyncio.run(scenario())
+    conversation = next(m for m in store.rows("media", "s1") if m["modality"] == "audio_conversation")
+    # The frame arrived at least 0.35 s after the recorder was created and holds 0.1 s of audio.
+    assert 0.25 <= conversation["ts"] - recorder.started_at < time.time() - recorder.started_at

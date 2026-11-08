@@ -11,7 +11,7 @@ live_stale_secs: 60
 orphan_after_secs: 120
 max_attempts: 3
 # Jobs queued automatically for every ended session.
-auto_enqueue: [reasr, dream]
+auto_enqueue: [reasr, redecide, dream]
 # Compose project name used to find on-demand containers (default: any project).
 compose_project: null
 
@@ -43,6 +43,24 @@ reasr:
       server: dreamer-asr-en:50051
       service: dreamer-asr-en
       languages: [en]
+
+redecide:
+  # Re-ask the questions of the decision tools (DECISION_MODEL_URL, e.g. the robot's
+  # emotion) to other decision models, for sessions that ran them, and score how often
+  # the live model agrees with the reference. Endpoints are Ollama System One URLs;
+  # without `url`, an endpoint uses DECISION_MODEL_URL (pull the model there first,
+  # e.g. `ollama pull nimble`). `api_key_env` names the variable holding a Bearer key
+  # (default DECISION_MODEL_API_KEY). `service` is an on-demand compose container, as
+  # for reasr. Set `enabled: false` to keep an endpoint configured without running it.
+  # nimble got 32/32 on the 32 hand-labelled exchanges of the model comparison
+  # (docs/how-to/configure-decision-tools.md).
+  reference:
+    name: nimble
+    model: nimble
+  candidates:
+    - name: d3-9b
+      model: d3:9b
+      enabled: false
 
 dream:
   # Extract long-term memories about the people attributed to a session.

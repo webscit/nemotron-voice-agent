@@ -34,6 +34,7 @@ from loguru import logger
 from monitoring import intents
 from monitoring.jobs.base import JOB_REGISTRY, JobContext, Preempted
 from monitoring.jobs.reasr import reasr_endpoints
+from monitoring.jobs.redecide import redecide_endpoints
 from monitoring.jobs.services import DockerServiceManager
 from monitoring.store import ArtifactStore, SessionStore
 
@@ -48,7 +49,7 @@ _DEFAULTS: dict[str, Any] = {
     "live_stale_secs": 60.0,
     "orphan_after_secs": 120.0,
     "max_attempts": 3,
-    "auto_enqueue": ["reasr", "dream"],
+    "auto_enqueue": ["reasr", "redecide", "dream"],
     "compose_project": None,
 }
 
@@ -57,6 +58,8 @@ def declared_services(config: dict[str, Any]) -> list[str]:
     """On-demand compose services referenced by the job configuration."""
     reference, candidates = reasr_endpoints(config)
     services = [e.service for e in [reference, *candidates] if e]
+    decision_reference, decision_candidates = redecide_endpoints(config)
+    services.extend(e.service for e in [decision_reference, *decision_candidates] if e)
     services.append((config.get("dream") or {}).get("service"))
     return sorted({s for s in services if s})
 

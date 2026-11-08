@@ -15,7 +15,12 @@ from monitoring.jobs.runner import _DEFAULTS
 from monitoring.media import pcm16_to_wav
 from monitoring.store import LocalArtifactStore, SessionStore
 
-DREAMER = {**_DEFAULTS, "reasr": {"reference": {"name": "voxtral", "protocol": "openai"}, "candidates": []}}
+DREAMER = {
+    **_DEFAULTS,
+    "reasr": {"reference": {"name": "voxtral", "protocol": "openai"}, "candidates": []},
+    # No URL here: the review server only needs the names to score human choices.
+    "redecide": {"reference": {"name": "nimble", "model": "nimble"}, "candidates": []},
+}
 
 
 @pytest.fixture
@@ -140,6 +145,126 @@ def test_asr_queue_orders_by_disagreement_and_reference_rescoring(env):
     )
     assert len(store.annotations_for("s1", kind="wer_summary")) == 1  # one live summary, not one per save
     assert client.get("/api/review/activities").json()["activities"][0]["open"] == 0
+
+
+EMOTIONS = {"happy": "Joy", "sad": "Sadness", "none": "No emotion"}
+
+
+def _decision_session(store, now):
+    """``s2`` ran ``play_emotion`` on two turns; nimble (redecide) agrees on turn 1 only."""
+    store.create_session(
+        {
+            "id": "s2",
+            "example": "multilingual-assistant",
+            "started_at": now - 40,
+            "last_seen_at": now - 10,
+            "ended_at": now - 10,
+            "config": {
+                "language": "fr-FR",
+                "decision_tools": {
+                    "model": "d3:2b",
+                    "tools": ["play_emotion"],
+                    "questions": {"play_emotion": {"type": "choice", "instructions": "?", "criteria": EMOTIONS}},
+                },
+            },
+            "artifact_prefix": "sessions/s2/",
+        }
+    )
+    rows = []
+    for idx, (state, choice) in {
+        1: ("User: Bravo\nAssistant: Merci", "happy"),
+        2: ("User: Zut\nAssistant: Oh", "happy"),
+    }.items():
+        rows += [
+            ("turns", {"session_id": "s2", "idx": idx, "user_text": state, "user_started_at": now - 30 + idx}),
+            (
+                "events",
+                {
+                    "session_id": "s2",
+                    "turn_idx": idx,
+                    "ts": now - 30 + idx,
+                    "kind": "decision_tool",
+                    "data": {
+                        "outcome": "called",
+                        "tool": "play_emotion",
+                        "choice": choice,
+                        "confidence": 0.4,
+                        "state": state,
+                    },
+                },
+            ),
+        ]
+    store.write_batch(rows)
+    store.add_annotations(
+        [
+            {
+                "session_id": "s2",
+                "target_type": "turn",
+                "target_id": f"s2:{idx}",
+                "source": "nimble",
+                "kind": "decision",
+                "value": {"answers": {"play_emotion": {"choice": choice, "confidence": 0.9}}},
+            }
+            for idx, choice in ((1, "happy"), (2, "sad"))
+        ]
+    )
+
+
+def test_decision_queue_and_human_reference(env):
+    client, store = env
+    _decision_session(store, time.time())
+
+    queue = client.get("/api/review/decisions/queue", params={"sort": "disagreement"}).json()
+    assert (queue["total"], queue["open"], queue["agreeing"]) == (2, 2, 1)
+    first, second = queue["items"]
+    assert (first["turn_idx"], first["disagree"]) == (2, True)  # disagreement first
+    assert first["state"] == "User: Zut\nAssistant: Oh"
+    assert first["live"] == {"source": "live:d3:2b", "choices": {"play_emotion": "happy"}}
+    assert first["models"] == {"nimble": {"play_emotion": "sad"}}
+    assert first["options"] == {"play_emotion": EMOTIONS}
+    assert second["agree"] and second["human_reference"] is None
+    activity = next(a for a in client.get("/api/review/activities").json()["activities"] if a["id"] == "decisions")
+    assert activity["open"] == 2
+
+    # The reviewer says the live model was right on turn 2: live now agrees on both turns.
+    saved = client.post(
+        "/api/review/decisions/references",
+        json={
+            "annotator": "fred",
+            "items": [{"session_id": "s2", "turn_idx": 2, "tool": "play_emotion", "choice": "happy"}],
+        },
+    ).json()
+    live = saved["decision_summary"]["s2"]["live:d3:2b"]
+    assert (live["agreed"], live["turns"]) == (2, 2)
+    assert live["reference_sources"] == ["human:fred", "nimble"]
+    reviewed = client.get("/api/review/decisions/queue", params={"status": "reviewed"}).json()
+    assert reviewed["items"][0]["human_reference"] == {"source": "human:fred", "choices": {"play_emotion": "happy"}}
+    assert client.get("/api/review/decisions/queue").json()["open"] == 1
+
+    detail = client.get("/api/review/sessions/s2").json()
+    turn = next(t for t in detail["turns"] if t["idx"] == 2)
+    assert turn["decision_reference"] == "human:fred"
+    assert turn["decisions"]["human:fred"] == {"play_emotion": "happy"}
+    assert turn["decision_confidences"] == {
+        "live:d3:2b": {"play_emotion": 0.4},
+        "nimble": {"play_emotion": 0.9},
+        "human:fred": {},
+    }
+    assert detail["decision_summary"]["live:d3:2b"]["agreed"] == 2
+
+    # A choice the question does not offer, or an unknown tool, is refused and nothing is saved.
+    for item in ({"tool": "play_emotion", "choice": "angry"}, {"tool": "dance", "choice": "happy"}):
+        response = client.post(
+            "/api/review/decisions/references",
+            json={"annotator": "fred", "items": [{"session_id": "s2", "turn_idx": 1, **item}]},
+        )
+        assert response.status_code == 422
+    assert len(store.annotations_for("s2", kind="decision")) == 3
+
+
+def test_decision_activity_hidden_without_decision_sessions(env):
+    client, _ = env
+    assert "decisions" not in {a["id"] for a in client.get("/api/review/activities").json()["activities"]}
 
 
 def test_validation_and_dreamer(env):

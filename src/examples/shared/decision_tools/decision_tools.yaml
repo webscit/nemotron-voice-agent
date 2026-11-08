@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Client tools run by the decision model instead of the LLM.
+#
+# After each LLM answer, the decision model (DECISION_MODEL_URL) reads the user's
+# last message and the answer, picks one value per tool below, and the server
+# calls the client tool with it. While DECISION_MODEL_URL is set, these tools are
+# hidden from the LLM; the tool is active only when the client declared it.
+#
+#   argument:        the tool argument the decision model chooses
+#   instructions:    the question asked to the decision model
+#   none:            description of the "no value fits" option (the tool is not called)
+#   min_confidence:  play the choice only at or above this confidence (0 to 1)
+#   arguments:       optional fixed arguments sent with every call
+#   criteria:        value -> description. At most 25 values: with "none", the
+#                    decision model accepts 26 options. Values the client tool's
+#                    enum does not list are dropped when the session starts.
+#
+# play_emotion follows the Reachy Mini conversation app tool schema
+# (reachy_mini_conversation_app/tools/play_emotion.py). It declares 42 emotions;
+# these are the 25 that read best from a conversation.
+tools:
+  play_emotion:
+    argument: emotion
+    instructions: >-
+      A robot reacts to a conversation with a short body-language emotion. Which emotion
+      best expresses the user's last message or the robot's answer?
+    none: "None of these emotions fits the exchange."
+    min_confidence: 0.0
+    criteria:
+      happy: "Joy or pleasure, good news, something fun"
+      excited: "Enthusiasm or eagerness about something coming"
+      loving: "Affection, tenderness, warm compliments"
+      grateful: "Thanks given or received"
+      success: "Something worked, a task is done, a goal is reached"
+      thinking: "Pondering a question, reflecting before answering"
+      attentive: "Listening carefully, waiting for more details"
+      confused: "Not understanding, a request that makes no sense"
+      uncertain: "Hesitation, not knowing, an answer given with doubt"
+      sad: "Sadness, bad news, loss or disappointment"
+      lonely: "Missing someone, feeling alone"
+      angry: "Anger or outrage"
+      irritated: "Mild annoyance, frustration"
+      disgusted: "Disgust at something gross or repulsive"
+      scared: "Fear, danger, something frightening"
+      anxious: "Worry or nervousness about what may happen"
+      surprised: "Something unexpected or astonishing"
+      amazed: "Wonder or admiration at something impressive"
+      relief: "Relief after worry, a problem that went away"
+      embarrassed: "Shyness, embarrassment, an awkward moment, an apology"
+      bored: "Boredom, something dull or repetitive"
+      tired: "Tiredness, fatigue, being exhausted or sleepy"
+      greeting: "Saying hello, someone arriving"
+      goodbye: "Saying goodbye, someone leaving, the end of the conversation"
+      helpful: "Offering help, giving advice or an explanation"

@@ -201,6 +201,8 @@ Note the following behavior:
 - The `dance` and `play_emotion` mappings omit the move or the emotion when the sentence names none, and the client then picks one at random. To ask for a dance move by name, use other words so that the LLM handles the request.
 - The engine waits for the tool result before it speaks. A tool that answers after `CLIENT_FUNCTION_TIMEOUT_SECS` makes the turn fall through to the LLM.
 
+A decision model can also call `play_emotion` after each LLM answer, so the robot emotes without an explicit request. The `play_emotion` sentences keep working when this feature is on. Refer to [Configure Decision Tools](configure-decision-tools.md).
+
 ## Review Engine Decisions
 
 When [conversation recording](enable-conversation-recording.md) is enabled, the engine stores the following data for each user turn:
