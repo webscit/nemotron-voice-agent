@@ -14,6 +14,15 @@ in the next turn through the engine's follow-up:
   "Shall I send it?" -> yes -> sent / no -> dropped / "change it" -> dictation again.
 - "Tell Bob that <message>" goes straight to the read-back.
 
+A yes/no answer may open a longer turn ("Oui. Lis-les."): the leading answer
+counts. Words said over the read-back of a draft, before "Shall I send it?" was
+heard, are the rest of the message: it is read back again, whole.
+
+When the LLM runs a send step through its tools instead (``send_message``,
+``confirm_send_message``), the outcome is still spoken from these templates
+(``announce``), and the read-back question is answered by the engine: what the
+agent says about a message being sent is always the gateway's result.
+
 The checks of ``MessagingTools`` (contact owners, the person known for sure,
 the draft) apply unchanged: the engine and the LLM tools share one instance, so
 a draft made by either one is the same draft.
@@ -38,7 +47,7 @@ from examples.shared.intent_engine.targets import (
     SpeechTemplates,
     TargetUnavailable,
 )
-from examples.shared.messaging_tools import MessagingTools
+from examples.shared.messaging_tools import CONFIRM_TOOL_NAME, SEND_TOOL_NAME, MessagingTools
 from messaging.contacts import Contact
 from messaging.inbox import KIND_AUDIO, InboxMessage
 
@@ -49,10 +58,21 @@ REPLY_INTENT = "MessagingReply"
 YES_INTENT = "MessagingYes"
 NO_INTENT = "MessagingNo"
 CHANGE_INTENT = "MessagingChange"
-# Not in the sentence files: the engine routes dictated words here.
+# Not in the sentence files: the engine routes dictated words here, and words said over a read-back.
 DICTATE_INTENT = "MessagingDictate"
+CONTINUE_INTENT = "MessagingContinue"
 MESSAGING_INTENTS = frozenset(
-    {CHECK_INTENT, READ_INTENT, SEND_INTENT, REPLY_INTENT, YES_INTENT, NO_INTENT, CHANGE_INTENT, DICTATE_INTENT}
+    {
+        CHECK_INTENT,
+        READ_INTENT,
+        SEND_INTENT,
+        REPLY_INTENT,
+        YES_INTENT,
+        NO_INTENT,
+        CHANGE_INTENT,
+        DICTATE_INTENT,
+        CONTINUE_INTENT,
+    }
 )
 
 # Hassil intent context of a pending messaging question (``requires_context: {dialog: messaging}``).
@@ -124,6 +144,7 @@ class MessagingIntents:
         self._tools = tools
         self._contacts = contacts
         self._templates: SpeechTemplates | None = None
+        self._open_dialog: Callable[[FollowUp], None] | None = None
         self._lists_key: tuple[Contact, ...] | None = None
         self._lists: dict[str, SlotList] = {}
         # The pending question and what it is about.
@@ -132,6 +153,7 @@ class MessagingIntents:
         self._read_contacts: list[Contact] = []
         # Who wrote the messages just read (one sender): "reply to them".
         self._reply_to: Contact | None = None
+        tools.announcer = self.announce
 
     # ------------------------------------------------------- ServerTarget
     @property
@@ -142,6 +164,10 @@ class MessagingIntents:
     def bind_templates(self, templates: SpeechTemplates) -> None:
         """Use ``templates`` (the session's matcher) for the replies."""
         self._templates = templates
+
+    def bind_dialog(self, open_dialog: Callable[[FollowUp], None]) -> None:
+        """Use ``open_dialog`` to ask the read-back question after an LLM send step."""
+        self._open_dialog = open_dialog
 
     def slot_lists(self) -> dict[str, SlotList]:
         """Return the ``contact`` list, rebuilt when the contacts file changed."""
@@ -181,6 +207,11 @@ class MessagingIntents:
             if state != DICTATION or self._contact is None:
                 raise TargetUnavailable("no dictation pending")
             return self._draft(self._contact, str(slots.get(MESSAGE_SLOT) or ""))
+        if request.name == CONTINUE_INTENT:
+            draft = self._tools.draft
+            if state != CONFIRM or draft is None:
+                raise TargetUnavailable("no draft to continue")
+            return self._draft(draft.contact, f"{draft.text} {slots.get(MESSAGE_SLOT) or ''}")
         if request.name == YES_INTENT:
             return await self._yes(state)
         if request.name == NO_INTENT:
@@ -263,6 +294,36 @@ class MessagingIntents:
             return self._reply("sent", {CONTACT_SLOT: draft.contact.name if draft else result.get("to")})
         raise TargetUnavailable("no messaging question pending")
 
+    # ------------------------------------------------------ LLM send steps
+    def announce(self, tool: str, result: dict[str, Any]) -> str | None:
+        """What to say about the result of the LLM tool ``tool``, or None to let the LLM say it.
+
+        A draft is read back and its question left to the engine; a send says what
+        the gateway answered. Other tools and drafting errors stay with the LLM.
+        """
+        if self._templates is None or self._open_dialog is None:
+            return None
+        draft = self._tools.draft
+        try:
+            if tool == SEND_TOOL_NAME and "error" not in result:
+                response = self._reply(
+                    "confirm", {CONTACT_SLOT: result["to"], MESSAGE_SLOT: result["text"]}, ask=CONFIRM
+                )
+            elif tool == CONFIRM_TOOL_NAME and result.get("code") == "not_confirmed" and draft is not None:
+                response = self._reply("reprompt_confirm", {CONTACT_SLOT: draft.contact.name}, ask=CONFIRM)
+            elif tool == CONFIRM_TOOL_NAME and "error" in result:
+                response = self._error(result)
+            elif tool == CONFIRM_TOOL_NAME:
+                response = self._reply("sent", {CONTACT_SLOT: result.get("to")})
+            else:
+                return None
+        except TargetUnavailable as exc:
+            logger.warning(f"Matrix: no spoken reply for {tool} ({exc}); the LLM answers")
+            return None
+        if response.follow_up is not None:
+            self._open_dialog(response.follow_up)
+        return response.speech
+
     # ----------------------------------------------------------- replies
     def _error(self, result: dict[str, Any]) -> IntentResponse:
         return self._reply(_ERROR_KEYS.get(str(result.get("code")), "failed"), response_type="error")
@@ -304,5 +365,9 @@ class MessagingIntents:
                 context=DIALOG_CONTEXT,
                 accept=frozenset({YES_INTENT, NO_INTENT, CHANGE_INTENT}),
                 reprompt=self._render(f"reprompt_{ask}", slots),
+                leading=frozenset({YES_INTENT, NO_INTENT}),
+                # Said over the read-back: the message goes on.
+                continue_intent=CONTINUE_INTENT if ask == CONFIRM else None,
+                continue_slot=MESSAGE_SLOT if ask == CONFIRM else None,
             )
         return IntentResponse(speech=speech, response_type=response_type, speech_slots=slots, follow_up=follow_up)

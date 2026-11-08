@@ -7,7 +7,8 @@
 # {contact} is filled by the server from the contacts file. MessagingYes, MessagingNo and
 # MessagingChange only match right after the agent asked a messaging question
 # (requires_context: dialog: messaging). After "What should I tell Bob?", the next turn
-# is taken as the message itself (except "cancel").
+# is taken as the message itself (except "cancel"). A longer turn that starts with a yes or no
+# ("Yes. Read them.") is answered by that yes or no.
 language: en
 intents:
   MessagingCheck:
@@ -43,6 +44,7 @@ intents:
       - sentences:
           - "(yes|yeah|yep|sure|ok|okay|go ahead|please|of course|send it|read them|read it|continue|go on)"
           - "yes (please|go ahead|send it|read them|read it)"
+          - "[yes ](i confirm|confirm|that's right|exactly|send the message)"
         requires_context:
           dialog: messaging
   MessagingNo:

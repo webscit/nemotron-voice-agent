@@ -7,7 +7,8 @@
 # {contact} is filled by the server from the contacts file. MessagingYes, MessagingNo and
 # MessagingChange only match right after the agent asked a messaging question
 # (requires_context: dialog: messaging). After "Qu'est-ce que je dis à Bob ?", the next
-# turn is taken as the message itself (except "annule").
+# turn is taken as the message itself (except "annule"). A longer turn that starts with a yes or
+# no ("Oui. Lis-les.") is answered by that yes or no.
 #
 # Leading "dis", "ok", "merci"... are stripped before matching, so sentences make them optional.
 language: fr
@@ -47,6 +48,7 @@ intents:
           - "(oui|ouais|ok|d'accord|vas-y|volontiers|bien sûr|parfait|c'est bon|je veux bien|continue)"
           - "oui (vas-y|s'il te plaît|merci|je veux bien|envoie[-le]|lis-les|lis-le)"
           - "(envoie|envoie-le|envoie-la|lis-les|lis-le|lis-moi les|lis-les-moi)"
+          - "[oui ](je confirme|confirme|c'est ça|exactement|tout à fait|envoie le message|envoie-le message)"
         requires_context:
           dialog: messaging
   MessagingNo:
