@@ -112,6 +112,7 @@ from examples.shared.voice_id import (
     VoiceIdSession,
     voice_id_available,
 )
+from examples.shared.voice_transcriber import SessionTranscriber
 from messaging.gateway import get_gateway
 from monitoring.recorder import CLIENT_METRICS_MESSAGE, SessionRecorder
 from tracing import IS_TRACING_ENABLED
@@ -561,6 +562,14 @@ async def bot(runner_args: RunnerArguments) -> None:
             gateway=matrix_gateway,
             current_person=voice_id_session.confirmed_person if voice_id_session else lambda: person_context,
             user_turn=lambda: user_turns,
+            # Received voice messages are transcribed with the session's own ASR.
+            transcribe=SessionTranscriber(
+                server=asr_server,
+                use_ssl=asr_ssl,
+                language=fixed_session_language,
+                model=asr_model,
+                function_id=asr_function_id,
+            ),
         )
         for tool_name, handler in (
             (CHECK_TOOL_NAME, messaging_tools.check_messages),

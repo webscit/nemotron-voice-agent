@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS messages (
     mimetype TEXT,
     duration_ms INTEGER,
     media_key TEXT,
+    transcript TEXT,
     sent_at REAL NOT NULL,
     received_at REAL NOT NULL,
     read_at REAL
@@ -35,7 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_sender ON messages (sender, sent_at);
 """
 # Columns added after the first release: (name, SQL type), added to older databases.
-_ADDED_COLUMNS = (("media_key", "TEXT"),)
+_ADDED_COLUMNS = (("media_key", "TEXT"), ("transcript", "TEXT"))
 
 SYNC_TOKEN_KEY = "sync_token"
 KIND_TEXT = "text"
@@ -58,6 +59,8 @@ class InboxMessage:
     read_at: float | None = None
     # Decryption key of an encrypted attachment (JSON: k, iv, sha256).
     media_key: str | None = None
+    # What the ASR heard in a voice message ("" when it heard nothing), once transcribed.
+    transcript: str | None = None
 
 
 class Inbox:
@@ -176,6 +179,11 @@ class Inbox:
             ).fetchall()
         return {row["event_id"] for row in rows}
 
+    def set_transcript(self, event_id: str, transcript: str) -> None:
+        """Store what the ASR heard in a voice message."""
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE messages SET transcript = ? WHERE event_id = ?", (transcript, event_id))
+
     def mark_read(self, event_ids: list[str]) -> None:
         """Mark messages as read."""
         if not event_ids:
@@ -201,4 +209,5 @@ def _message(row: sqlite3.Row) -> InboxMessage:
         duration_ms=row["duration_ms"],
         read_at=row["read_at"],
         media_key=row["media_key"],
+        transcript=row["transcript"],
     )

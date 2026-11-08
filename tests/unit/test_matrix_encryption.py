@@ -226,6 +226,8 @@ def test_inbox_from_before_encryption_gets_the_key_column(tmp_path):
     assert [m.body for m in inbox.messages([BOB])] == ["hi"]
     inbox.add(InboxMessage("$2", "!dm", BOB, KIND_AUDIO, "v", 2, media_url="mxc://x/y", media_key='{"k": 1}'))
     assert inbox.messages([BOB])[-1].media_key == '{"k": 1}'
+    inbox.set_transcript("$2", "salut")
+    assert inbox.messages([BOB])[-1].transcript == "salut"
     inbox.close()
     # Opening it again does not add the column twice.
     Inbox(path).close()
