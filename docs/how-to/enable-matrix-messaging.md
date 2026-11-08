@@ -346,10 +346,15 @@ In French, the agent says "Tu viens de recevoir un nouveau message de Bob. Je
 te le lis ?" Announcements follow these rules:
 
 - **New messages only.** The agent announces only the messages that arrive
-  during the session, each one once. It skips a message that somebody read in
+  during the session, each one once. Unread messages that were waiting when the
+  session started are not announced. It skips a message that somebody read in
   the meantime, in this session or another one.
 - **Grouped arrivals.** Messages that arrive close together are announced
-  together, with the number of unread messages from those senders.
+  together. When older messages from the same senders are still unread, the
+  agent also says how many a yes reads, for example "You just got a new
+  message from Bob, and have 3 unread."
+- **Heard once.** When you speak over an announcement before it ends, the
+  agent answers you and says the announcement again at the next pause.
 - **Owned contacts.** A message from a contact with an `owner` waits until that
   person is known for sure: picked in **Who's talking**, or recognized by the
   voice ID at a trusted tier. The agent then names the person, for example

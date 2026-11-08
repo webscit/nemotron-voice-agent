@@ -573,8 +573,9 @@ def test_new_message_is_announced_once_idle_and_yes_reads_it(gateway, fast_annou
         async with Harness(gateway, announce=True) as h:
             await h.heard()
             _arrive(gateway, "$1", BOB, "Tu rentres quand ?")
-            # The unread count covers what a yes reads: the backlog too.
-            assert await h.announced(0) == "Tu viens de recevoir 2 nouveaux messages de Bob. Je te les lis ?"
+            # What just arrived, and what a yes reads: the backlog too.
+            answer = await h.announced(0)
+            assert answer == "Tu viens de recevoir un nouveau message de Bob, et tu en as 2 non lus. Je te les lis ?"
             answer = await h.says("Oui")
             assert "Bob a écrit : Tu rentres quand ?" in answer
             assert h.llm.requests == 0
@@ -659,7 +660,7 @@ def test_owned_contact_is_announced_to_its_owner_only(gateway, fast_announcer):
             assert h.tap.spoken == []
             h.person = ALICE
             answer = await h.announced(0)
-            assert answer == "Alice, tu viens de recevoir un nouveau message de Élodie. Je te le lis ?"
+            assert answer == "Alice, tu viens de recevoir un nouveau message d'Élodie. Je te le lis ?"
             assert "Élodie a écrit : Secret." in await h.says("Oui")
 
     run(scenario())
@@ -671,5 +672,23 @@ def test_english_announcement(gateway, fast_announcer):
             await h.heard()
             _arrive(gateway, "$1", BOB, "Call me")
             assert await h.announced(0) == "You just got a new message from Bob. Shall I read it?"
+
+    run(scenario())
+
+
+def test_announcement_talked_over_is_said_again(gateway, fast_announcer):
+    async def scenario():
+        async with Harness(gateway, announce=True) as h:
+            await h.heard()
+            _arrive(gateway, "$1", BOB)
+            await h.announced(0)
+            # The user speaks over it before it was heard: another turn, then the announcement again.
+            assert await h.says("Quel temps fait-il ?", heard=False) == LLM_REPLY
+            await h.heard()
+            assert await h.announced(2) == "Tu viens de recevoir un nouveau message de Bob. Je te le lis ?"
+            # Heard this time: not said a third time.
+            await h.heard()
+            await asyncio.sleep(0.1)
+            assert len(h.tap.spoken) == 3
 
     run(scenario())

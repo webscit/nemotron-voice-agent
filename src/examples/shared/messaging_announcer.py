@@ -14,7 +14,8 @@ a yes reads them, any other answer is a turn like any other.
   only announced while that person is known for sure, and waits until then.
 - Nothing is said over a pending question (a draft read back, a recording), over
   the user or the bot, or while a reply is on its way. Messages that arrive
-  close together are announced together.
+  close together are announced together, and an announcement the user talks
+  over is said again later: a message counts as announced once it was heard.
 
 The processor sits right before the intent engine; it also feeds the session's
 ``ConversationActivity`` with the frames it sees.
@@ -27,7 +28,14 @@ import contextlib
 from collections.abc import Callable
 
 from loguru import logger
-from pipecat.frames.frames import CancelFrame, EndFrame, Frame, StartFrame
+from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
+    CancelFrame,
+    EndFrame,
+    Frame,
+    InterruptionFrame,
+    StartFrame,
+)
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from examples.shared.conversation_activity import ConversationActivity
@@ -67,6 +75,8 @@ class MessagingAnnouncer(FrameProcessor):
         self._remove_listener: Callable[[], None] | None = None
         # Arrived during the session and not announced yet, by event id.
         self._arrivals: dict[str, InboxMessage] = {}
+        # Being announced: back to the arrivals when the user talks over it.
+        self._announcing: dict[str, InboxMessage] = {}
         self._task: asyncio.Task | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -77,6 +87,12 @@ class MessagingAnnouncer(FrameProcessor):
             self._start()
         elif isinstance(frame, EndFrame | CancelFrame):
             await self.close()
+        elif isinstance(frame, InterruptionFrame) and self._announcing:
+            for message in self._announcing.values():
+                self._arrived(message)
+            self._announcing.clear()
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._announcing.clear()
         await self.push_frame(frame, direction)
 
     async def cleanup(self) -> None:
@@ -95,6 +111,7 @@ class MessagingAnnouncer(FrameProcessor):
             self._remove_listener()
             self._remove_listener = None
         self._arrivals.clear()
+        self._announcing.clear()
         if self._task is not None and not self._task.done():
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -144,7 +161,7 @@ class MessagingAnnouncer(FrameProcessor):
         if not self._can_speak():
             return True
         try:
-            response = self._intents.announcement(unread_counts)
+            response = self._intents.announcement(unread_counts, len(due))
         except TargetUnavailable as exc:
             logger.warning(f"Matrix: cannot announce new messages ({exc})")
             self._arrivals.clear()
@@ -153,6 +170,6 @@ class MessagingAnnouncer(FrameProcessor):
             return True
         self._activity.expect_reply()
         for message in due:
-            self._arrivals.pop(message.event_id, None)
+            self._announcing[message.event_id] = self._arrivals.pop(message.event_id)
         logger.info(f"Matrix: announced new messages from {', '.join(c.name for c, _ in unread_counts)}")
         return True

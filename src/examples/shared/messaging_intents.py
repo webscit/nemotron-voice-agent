@@ -430,8 +430,8 @@ class MessagingIntents:
         raise TargetUnavailable("no messaging question pending")
 
     # ------------------------------------------------------ announcements
-    def announcement(self, unread: list[tuple[Contact, int]]) -> IntentResponse:
-        """Announce the unread messages of these contacts; a yes reads them.
+    def announcement(self, unread: list[tuple[Contact, int]], arrived: int) -> IntentResponse:
+        """Announce ``arrived`` new messages from these contacts, with their ``unread`` counts; a yes reads them.
 
         Said without being asked, so its question is not asked again: an answer
         that is not yes or no is an ordinary turn. The person talking is named
@@ -441,7 +441,12 @@ class MessagingIntents:
         person = self._tools.current_person_name() if any(c.owner for c in senders) else None
         response = self._reply(
             "announce",
-            {"count": sum(n for _, n in unread), "senders": [c.name for c in senders], "person": person},
+            {
+                "count": sum(n for _, n in unread),
+                "new": arrived,
+                "senders": [c.name for c in senders],
+                "person": person,
+            },
             ask=OFFER_READ,
         )
         self._read_contacts = senders
