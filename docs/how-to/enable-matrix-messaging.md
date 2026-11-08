@@ -73,8 +73,10 @@ for the agent only.
 
 Do not use the access token of an Element session (**Settings > Help & About >
 Advanced**) while encryption is on. That token belongs to Element's own device,
-which already published its keys, and the homeserver refuses the agent's keys
-for it. With `MATRIX_ENCRYPTION=false`, an Element token works, as long as you
+which already has encryption keys that the agent does not hold. When the agent
+finds keys on the server for its device but none in its `crypto` directory, it
+does not replace them: it runs unencrypted and logs `already has encryption
+keys`. With `MATRIX_ENCRYPTION=false`, an Element token works, as long as you
 do not sign out of that Element session.
 
 With encryption on, the agent uses the device of its token, whatever
@@ -191,9 +193,9 @@ With `MATRIX_ENCRYPTION=false`, the agent ignores encrypted rooms and logs one
 warning per room.
 
 Keep the `crypto` directory with the access token. If you lose the directory
-but keep the token, the homeserver refuses the new device keys, and the server
-logs an error that says so. Log the agent in again to get a new token and
-device, and update `.env`.
+but keep the token, the agent finds its device's keys on the server without
+the matching store, runs unencrypted, and logs `already has encryption keys`.
+Log the agent in again to get a new token and device, and update `.env`.
 
 ## Use Messaging in a Conversation
 
@@ -531,7 +533,8 @@ The following table lists common symptoms and checks:
 | Sync fails with an authentication error | The token is invalid. Get a new token and do not sign out of the session that issued it. |
 | Messages from a contact never arrive | Confirm that the sender's Matrix ID matches `matrix_id` exactly, and that the room has at most two members. Messages sent before the server first synced are not imported. With `MATRIX_ENCRYPTION=false`, encrypted rooms are ignored. |
 | The log shows `cannot decrypt ... yet; asking for its key` | The key did not arrive yet. The agent retries after each sync for up to 24 hours, and the message appears after it is decrypted. Messages sent before the agent's device existed generally stay unreadable. If a contact's Element never sends to unverified sessions, the key never arrives. |
-| The log shows `the homeserver refused the device keys` | The token is an Element session's (refer to [Get an Access Token](#get-an-access-token)), or the `crypto` directory was lost or replaced while the token stayed. Log the agent in again for a new token and device, and update `MATRIX_ACCESS_TOKEN`. |
+| The log shows `already has encryption keys` and the agent runs unencrypted | The token is an Element session's (refer to [Get an Access Token](#get-an-access-token)), or the `crypto` directory was lost or replaced while the token stayed. Log the agent in again for a new token and device, and update `MATRIX_ACCESS_TOKEN`. |
+| The log shows `the homeserver refused the device keys` | The homeserver rejected the keys of the agent's device. Log the agent in again for a new token and device, and update `MATRIX_ACCESS_TOKEN`. |
 | The log shows `the access token has no device` | Get a token that belongs to a device, for example from the login API. |
 | The log shows `Matrix messaging unavailable in this process` | Another server process holds the key store. Set `UVICORN_WORKERS=1`, or accept that only the first worker has messaging. |
 | The log shows `encryption needs matrix-nio[e2e] (vodozemac); running unencrypted` | The image predates the dependency change. Rebuild the example image. |

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 from loguru import logger
 from nio import (
+    Event,
+    LocalProtocolError,
     MegolmEvent,
     RoomCreateResponse,
     RoomEncryptedAudio,
@@ -60,13 +62,30 @@ def logs():
 
 
 # ------------------------------------------------------- real nio client
-def test_login_loads_the_device_keys_of_the_token(tmp_path, logs):
+def _real_gateway(tmp_path, server_devices=()):
+    """A gateway with a real nio client; whoami and the keys query answered locally."""
     gateway = MatrixGateway(_config(tmp_path))
+    queries = []
 
     async def whoami():
         return WhoamiResponse(ME, "AGENTDEV", False)
 
+    async def send(method, path, data=None, headers=None, **kwargs):
+        queries.append((method, path.split("?")[0]))
+
+        async def json():
+            return {"device_keys": {ME: {device: {} for device in server_devices}}}
+
+        return SimpleNamespace(status=200, json=json)
+
     gateway._client.whoami = whoami
+    gateway._client.send = send
+    gateway.key_queries = queries
+    return gateway
+
+
+def test_login_loads_the_device_keys_of_the_token(tmp_path, logs):
+    gateway = _real_gateway(tmp_path)
 
     async def scenario():
         gateway.lock_store()
@@ -76,10 +95,66 @@ def test_login_loads_the_device_keys_of_the_token(tmp_path, logs):
         assert gateway._client.device_id == "AGENTDEV"
         # A new device: its keys are uploaded after the first sync.
         assert gateway._client.should_upload_keys
+        assert gateway.key_queries == [("POST", "/_matrix/client/v3/keys/query")]
+        await gateway.close()
+        # Next start: the store is there, the device's keys on the server are ours.
+        again = _real_gateway(tmp_path, server_devices=["AGENTDEV"])
+        again.lock_store()
+        await again._login()
+        assert again.encrypted
+        assert again.key_queries == []
+        await again.close()
+
+    asyncio.run(scenario())
+    assert (tmp_path / "crypto" / f"{ME}_AGENTDEV.db").exists()
+
+
+def test_device_with_keys_of_another_client_stays_unencrypted(tmp_path, logs):
+    # The token of an Element session: its device already has keys this store does not hold.
+    gateway = _real_gateway(tmp_path, server_devices=["AGENTDEV"])
+
+    async def scenario():
+        gateway.lock_store()
+        await gateway._login()
+        assert not gateway.encrypted
+        assert not gateway._login_pending
         await gateway.close()
 
     asyncio.run(scenario())
-    assert any((tmp_path / "crypto").iterdir())
+    assert [line for line in logs if "already has encryption keys" in line]
+    assert not (tmp_path / "crypto" / f"{ME}_AGENTDEV.db").exists()
+
+
+def test_decrypted_voice_message_parses_as_an_encrypted_attachment():
+    # The parser nio runs on a decrypted megolm payload.
+    _, keys = encrypt_attachment(b"OggS")
+    event = Event.parse_decrypted_event(
+        {
+            "type": "m.room.message",
+            "event_id": "$v",
+            "sender": BOB,
+            "origin_server_ts": 1,
+            "room_id": "!dm:matrix.org",
+            "content": {"msgtype": "m.audio", "body": "v", "file": {"url": "mxc://matrix.org/enc", **keys}},
+        }
+    )
+    assert isinstance(event, RoomEncryptedAudio)
+    assert inbox_message("!dm:matrix.org", event).media_key
+
+
+def test_encryption_failure_of_a_send_is_a_matrix_error(enc_gateway, enc_client):
+    enc_client.add_room("!dm:matrix.org")
+    enc_gateway.inbox.set_room(BOB, "!dm:matrix.org")
+
+    async def room_send(*args, **kwargs):
+        raise LocalProtocolError("No such room")
+
+    enc_client.room_send = room_send
+    contact = enc_gateway.contacts.by_matrix_id(BOB)
+    with pytest.raises(MatrixError, match="No such room"):
+        asyncio.run(enc_gateway.send_text(contact, "hello"))
+    with pytest.raises(MatrixError, match="No such room"):
+        asyncio.run(enc_gateway.send_voice(contact, b"OggS", duration_ms=1, waveform=[1], body="x"))
 
 
 def test_one_process_owns_the_key_store(tmp_path):

@@ -31,6 +31,7 @@ from typing import IO, Any
 
 from loguru import logger
 from nio import (
+    Api,
     AsyncClient,
     AsyncClientConfig,
     DownloadError,
@@ -240,9 +241,28 @@ class MatrixGateway:
                 f"Matrix: MATRIX_DEVICE_ID is {self.config.device_id}, but the token belongs to {device_id}; "
                 f"using {device_id}"
             )
-        self._client.restore_login(self.config.user_id, device_id, self.config.access_token)
         self._login_pending = False
+        store_file = self.config.store_dir / f"{self.config.user_id}_{device_id}.db"
+        if not store_file.exists() and await self._device_has_keys(device_id):
+            # Another client holds this device's keys (an Element session's token, or a lost store):
+            # keys of our own would clash with them, so the agent stays unencrypted.
+            logger.error(
+                f"Matrix: device {device_id} of the access token already has encryption keys (the token of an "
+                "Element session, or lost keys); running unencrypted. Get a token of the agent's own with the "
+                "login API to read encrypted rooms."
+            )
+            return
+        self._client.restore_login(self.config.user_id, device_id, self.config.access_token)
         logger.info(f"Matrix: end-to-end encryption on (device {device_id})")
+
+    async def _device_has_keys(self, device_id: str) -> bool:
+        """Whether the homeserver already has encryption keys for the agent's ``device_id``."""
+        method, path, data = Api.keys_query(self.config.access_token, {self.config.user_id})
+        response = await self._client.send(method, path, data)
+        if response.status != 200:
+            raise MatrixError(f"keys query: HTTP {response.status}")
+        body = await response.json()
+        return device_id in ((body.get("device_keys") or {}).get(self.config.user_id) or {})
 
     # ----------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -504,9 +524,10 @@ class MatrixGateway:
 
     async def send_text(self, contact: Contact, text: str) -> str:
         """Send ``text`` to ``contact``; returns the event id."""
-        await self._wait_synced()
-        room_id = await self._direct_room(contact)
-        return await self._send_message(contact, room_id, {"msgtype": "m.text", "body": text})
+        async with _send_errors(contact):
+            await self._wait_synced()
+            room_id = await self._direct_room(contact)
+            return await self._send_message(contact, room_id, {"msgtype": "m.text", "body": text})
 
     async def send_voice(
         self, contact: Contact, audio: bytes, *, duration_ms: int, waveform: list[int], body: str
@@ -515,32 +536,33 @@ class MatrixGateway:
 
         ``body`` is the text that clients without voice messages show (and Element shows as a caption).
         """
-        await self._wait_synced()
-        room_id = await self._direct_room(contact)
-        # An encrypted room gets an encrypted attachment: the homeserver only stores ciphertext.
-        encrypt = self._room_encrypted(room_id)
-        response, keys = await self._client.upload(
-            lambda *_: io.BytesIO(audio),
-            content_type=OGG_MIMETYPE,
-            filename=VOICE_FILENAME,
-            filesize=len(audio),
-            encrypt=encrypt,
-        )
-        if not isinstance(response, UploadResponse):
-            raise MatrixError(f"upload a voice message: {getattr(response, 'message', response)}")
-        content: dict[str, Any] = {
-            "msgtype": "m.audio",
-            "body": body,
-            "filename": VOICE_FILENAME,
-            "info": {"mimetype": OGG_MIMETYPE, "size": len(audio), "duration": duration_ms},
-            AUDIO_DETAILS: {"duration": duration_ms, "waveform": waveform},
-            VOICE_FLAG: {},
-        }
-        if encrypt:
-            content["file"] = {"url": response.content_uri, "mimetype": OGG_MIMETYPE, **(keys or {})}
-        else:
-            content["url"] = response.content_uri
-        return await self._send_message(contact, room_id, content)
+        async with _send_errors(contact):
+            await self._wait_synced()
+            room_id = await self._direct_room(contact)
+            # An encrypted room gets an encrypted attachment: the homeserver only stores ciphertext.
+            encrypt = self._room_encrypted(room_id)
+            response, keys = await self._client.upload(
+                lambda *_: io.BytesIO(audio),
+                content_type=OGG_MIMETYPE,
+                filename=VOICE_FILENAME,
+                filesize=len(audio),
+                encrypt=encrypt,
+            )
+            if not isinstance(response, UploadResponse):
+                raise MatrixError(f"upload a voice message: {getattr(response, 'message', response)}")
+            content: dict[str, Any] = {
+                "msgtype": "m.audio",
+                "body": body,
+                "filename": VOICE_FILENAME,
+                "info": {"mimetype": OGG_MIMETYPE, "size": len(audio), "duration": duration_ms},
+                AUDIO_DETAILS: {"duration": duration_ms, "waveform": waveform},
+                VOICE_FLAG: {},
+            }
+            if encrypt:
+                content["file"] = {"url": response.content_uri, "mimetype": OGG_MIMETYPE, **(keys or {})}
+            else:
+                content["url"] = response.content_uri
+            return await self._send_message(contact, room_id, content)
 
     async def download_media(self, message: InboxMessage) -> bytes:
         """The media of a received message, decrypted when it was sent encrypted."""
@@ -571,6 +593,17 @@ class MatrixGateway:
                 await self._client.room_read_markers(room_id, message.event_id, message.event_id)
             except Exception as exc:
                 logger.opt(exception=exc).debug(f"Matrix: could not send a read receipt in {room_id}")
+
+
+@contextlib.asynccontextmanager
+async def _send_errors(contact: Contact):
+    """Any failure of a send is a MatrixError: what nio raises (encryption, connection) is not sent."""
+    try:
+        yield
+    except MatrixError:
+        raise
+    except Exception as exc:
+        raise MatrixError(f"send to {contact.matrix_id}: {exc}") from exc
 
 
 _gateway: MatrixGateway | None = None
