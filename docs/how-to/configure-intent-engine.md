@@ -144,6 +144,7 @@ A server feature can ask a follow-up question in its reply. Only the next user t
 - A question can let a short answer open a longer turn. When the turn starts with one of these answers, such as "Oui. Lis mes messages.", the leading answer counts and the rest is ignored. A turn with conflicting answers, such as "oui" and "non", matches nothing.
 - A question can take the next turn as more of the user's words when the user starts talking before the agent finishes asking it. Messaging uses this to add the rest of a dictated message that turn detection cut off.
 - When the next turn matches nothing, the engine asks the question again once, and it stays open for one more turn. After a second miss, the turn goes to the LLM.
+- A server feature can speak first, without a user request, after the conversation is idle and no question is pending. Messaging uses this to announce new messages. The engine does not ask such a question again: a turn that matches nothing goes to the LLM. Refer to [New Message Announcements](enable-matrix-messaging.md#new-message-announcements).
 
 A `{message}`-style wildcard slot returns the user's original words with their punctuation, even though hassil matches without punctuation. The following example from `fr/messaging.yaml` matches only during the messaging dialog.
 

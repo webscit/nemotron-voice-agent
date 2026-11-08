@@ -714,9 +714,9 @@ endpoint.
   The speaker tag then lists the other people in view, for example
   `[speaker: Alice; also in view: Bob, unknown guest]`.
 - **Greeting.** When a person recognized at face tier `high` comes into view
-  for the first time in a session, and nobody speaks and no reply is pending,
-  the server adds `[presence: Alice came into view]` to the context and runs
-  the LLM once so that the assistant can greet them by name. A person is
+  for the first time in a session, and nobody speaks and no reply or message
+  announcement is pending, the server adds `[presence: Alice came into view]`
+  to the context and runs the LLM once so that the assistant can greet them by name. A person is
   greeted at most once per session. A person who already spoke, or who appeared
   while the conversation stayed busy for 10 seconds, is not greeted.
 - **Enrollment.** `enroll_speaker` also binds the face embeddings that the

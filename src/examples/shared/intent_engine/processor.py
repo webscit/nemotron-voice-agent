@@ -61,6 +61,7 @@ from examples.shared.intent_engine.targets import (
     FollowUp,
     HomeAssistantTarget,
     IntentRequest,
+    IntentResponse,
     ServerTarget,
     TargetUnavailable,
 )
@@ -169,6 +170,24 @@ class IntentEngineProcessor(FrameProcessor):
         """Make ``follow_up`` the pending question, asked by a server target outside of a matched turn."""
         self._dialog = follow_up
         self._question_heard = False
+
+    @property
+    def busy(self) -> bool:
+        """Whether a question is pending or a reply is being run: nothing may be said first now."""
+        return self._dialog is not None or (self._turn_task is not None and not self._turn_task.done())
+
+    def speak_first(self, response: IntentResponse) -> bool:
+        """Say ``response`` without being asked (an announcement); False when the engine is ``busy``.
+
+        Its question, if any, is answered by the next user turn like any other.
+        An interruption cancels it like a reply.
+        """
+        if self.busy:
+            return False
+        self._dialog = response.follow_up
+        self._question_heard = False
+        self._turn_task = self.create_task(self._say(response))
+        return True
 
     # ------------------------------------------------------------ entity sync
     def _start_sync(self) -> None:
@@ -381,12 +400,14 @@ class IntentEngineProcessor(FrameProcessor):
         )
         self._dialog = response.follow_up
         self._question_heard = False
+        await self._say(response)
+
+    async def _say(self, response: IntentResponse) -> None:
+        """Speak a target's reply: its sentences and clips, or its speech."""
         if response.parts:
             await self._output(response.parts)
-            return
-        if not response.speech:
-            return
-        await self._speak(response.speech)
+        elif response.speech:
+            await self._speak(response.speech)
 
     async def _output(self, parts: Sequence[str | AudioClip]) -> None:
         """Speak the sentences of a reply and play its clips, in order."""

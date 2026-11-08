@@ -258,6 +258,15 @@ class MessagingTools:
         person = self._current_person()
         return person.person if person else None
 
+    def current_person_name(self) -> str | None:
+        """The name of the person known for sure, or None."""
+        person = self._person_row()
+        return str(person.get("name") or "") or None if person else None
+
+    async def still_unread(self, event_ids: list[str]) -> set[str]:
+        """The messages of ``event_ids`` nobody has read yet."""
+        return await asyncio.to_thread(self._gateway.inbox.unread_among, event_ids)
+
     def allowed_contacts(self) -> list[Contact]:
         """The contacts the person talking may use."""
         person = self._person_row()

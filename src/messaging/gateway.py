@@ -5,7 +5,8 @@
 
 The gateway syncs in the background, stores what contacts send in the inbox, and
 sends messages to contacts in a direct room it creates (unencrypted) or that the
-contact invited it to. Messages from anybody who is not in the contacts file are
+contact invited it to. Live sessions listen for new messages (``add_listener``)
+to announce them. Messages from anybody who is not in the contacts file are
 ignored, and invitations from them are left pending.
 """
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+from collections.abc import Callable
 from typing import Any
 
 from loguru import logger
@@ -52,6 +54,10 @@ MAX_MEDIA_BYTES = 10 * 1024 * 1024
 VOICE_FLAG = "org.matrix.msc3245.voice"
 AUDIO_DETAILS = "org.matrix.msc1767.audio"
 VOICE_FILENAME = "voice-message.ogg"
+
+
+# Called with each new message a contact sent, right after it was stored.
+MessageListener = Callable[[InboxMessage, Contact], None]
 
 
 class MatrixError(RuntimeError):
@@ -116,6 +122,7 @@ class MatrixGateway:
         # Set once the client knows its rooms (stored rooms are only reused after that).
         self.synced = asyncio.Event()
         self._room_locks: dict[str, asyncio.Lock] = {}
+        self._listeners: list[MessageListener] = []
 
     # ----------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -133,6 +140,26 @@ class MatrixGateway:
             self._task = None
         await self._client.close()
         self.inbox.close()
+
+    def add_listener(self, listener: MessageListener) -> Callable[[], None]:
+        """Call ``listener`` with each new message from a contact; returns the function that removes it.
+
+        Listeners run inside the sync loop: they must return at once (schedule work, do not await it).
+        """
+        self._listeners.append(listener)
+
+        def remove() -> None:
+            with contextlib.suppress(ValueError):
+                self._listeners.remove(listener)
+
+        return remove
+
+    def _notify(self, message: InboxMessage, contact: Contact) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(message, contact)
+            except Exception as exc:
+                logger.opt(exception=exc).warning("Matrix: a new-message listener failed")
 
     # ---------------------------------------------------------------- sync
     async def _sync_loop(self) -> None:
@@ -197,6 +224,7 @@ class MatrixGateway:
             # Replies go where the contact last wrote.
             await asyncio.to_thread(self.inbox.set_room, contact.matrix_id, room_id)
             logger.info(f"Matrix: new {message.kind} message from {contact.name}")
+            self._notify(message, contact)
 
     # ------------------------------------------------------------- sending
     async def _request(self, what: str, call) -> Any:

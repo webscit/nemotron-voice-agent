@@ -38,18 +38,15 @@ from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import (
-    BotStartedSpeakingFrame,
-    BotStoppedSpeakingFrame,
     Frame,
     LLMContextFrame,
     LLMRunFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
 )
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi.frames import RTVIServerMessageFrame
 
+from examples.shared.conversation_activity import QUIET_SECS, ConversationActivity
 from examples.shared.person_memory import (
     PersonContext,
     load_person_context,
@@ -95,12 +92,10 @@ SPEAKER_TAG_PREFIX = "[speaker: "
 PRESENCE_TAG_PREFIX = "[presence: "
 UNKNOWN_SPEAKER_LABEL = "unknown guest"
 # A greeting needs this much silence after the last user or bot activity ...
-GREETING_QUIET_SECS = 1.5
+GREETING_QUIET_SECS = QUIET_SECS
 # ... and is dropped when the conversation does not go idle this soon after the person appeared.
 GREETING_WINDOW_SECS = 10.0
 GREETING_POLL_SECS = 0.25
-# After an LLM run starts, the bot is expected to speak; do not greet meanwhile.
-RESPONSE_PENDING_SECS = 15.0
 
 
 @dataclass(frozen=True)
@@ -626,6 +621,7 @@ class VoiceIdSession:
         session_id: Callable[[], str | None],
         turn_idx: Callable[[], int],
         initial_person: PersonContext | None = None,
+        activity: ConversationActivity | None = None,
     ):
         """Bind voice ID to the session context.
 
@@ -637,6 +633,8 @@ class VoiceIdSession:
             session_id: Returns the recorded session id, or None when not recording.
             turn_idx: Returns the recorder's current turn index (``-1`` when not recording).
             initial_person: The person picked in the client, if any.
+            activity: Conversation activity shared with the other speakers that talk first
+                (message announcements); a session of its own by default.
         """
         self.tracker = VoiceIdTracker(initial_person.person["id"] if initial_person else None)
         self._context = context
@@ -652,10 +650,7 @@ class VoiceIdSession:
         self._last_turn_idx = -1
         self._background: set[asyncio.Task] = set()
         # Conversation activity, to greet somebody only while nobody talks.
-        self._user_speaking = False
-        self._bot_speaking = False
-        self._response_pending_until = 0.0
-        self._last_activity_at = time.monotonic()
+        self.activity = activity or ConversationActivity(quiet_secs=GREETING_QUIET_SECS)
         # People who were greeted, spoke, or missed their greeting window: never greeted (again).
         self._greeted: set[str] = {initial_person.person["id"]} if initial_person else set()
         self._greeting_deadlines: dict[str, float] = {}
@@ -768,7 +763,7 @@ class VoiceIdSession:
     def on_user_turn_started(self) -> None:
         """The user started a turn."""
         self.tracker.start_turn()
-        self._last_activity_at = time.monotonic()
+        self.activity.touch()
 
     # -------------------------------------------------------------- presence
     async def on_presence_update(self, payload: object) -> None:
@@ -793,30 +788,11 @@ class VoiceIdSession:
 
     def on_activity(self, frame: Frame) -> None:
         """Track who is talking (frames seen by ``SpeakerTurnProcessor``)."""
-        now = time.monotonic()
-        if isinstance(frame, UserStartedSpeakingFrame):
-            self._user_speaking = True
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            self._user_speaking = False
-        elif isinstance(frame, BotStartedSpeakingFrame):
-            self._bot_speaking = True
-        elif isinstance(frame, BotStoppedSpeakingFrame):
-            self._bot_speaking = False
-            self._response_pending_until = 0.0
-        elif isinstance(frame, LLMContextFrame):
-            self._response_pending_until = now + RESPONSE_PENDING_SECS
-        else:
-            return
-        self._last_activity_at = now
+        self.activity.on_frame(frame)
 
     def conversation_idle(self, now: float | None = None) -> bool:
         """Whether nobody is talking and no reply is expected, for long enough to speak first."""
-        now = time.monotonic() if now is None else now
-        if self.tracker.turn_open or self._user_speaking or self._bot_speaking:
-            return False
-        if now < self._response_pending_until:
-            return False
-        return now - self._last_activity_at >= GREETING_QUIET_SECS
+        return not self.tracker.turn_open and self.activity.idle(now)
 
     async def _greet_when_idle(self) -> None:
         """Greet the people who just came into view, once the conversation is idle."""
@@ -839,7 +815,7 @@ class VoiceIdSession:
             self._context.add_message(
                 {"role": "user", "content": f"{PRESENCE_TAG_PREFIX}{', '.join(names)} came into view]"}
             )
-            self._response_pending_until = time.monotonic() + RESPONSE_PENDING_SECS
+            self.activity.expect_reply()
             logger.info(f"Face ID: greeting {', '.join(names)}")
             await self._queue_frame(LLMRunFrame())
 
@@ -849,7 +825,7 @@ class VoiceIdSession:
             return
         speaker = self.tracker.commit_turn()
         # The LLM answers this turn next; nobody is greeted until it has spoken.
-        self._response_pending_until = time.monotonic() + RESPONSE_PENDING_SECS
+        self.activity.expect_reply()
         person = await self._person(speaker.person_id)
         if speaker.person_id and person is None:
             # Unknown or archived id (stale client gallery): a guest.
