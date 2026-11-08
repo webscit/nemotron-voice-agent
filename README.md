@@ -190,7 +190,7 @@ npx skills add .
 | How-to | [Intent Engine](docs/how-to/configure-intent-engine.md) | Answer device commands without the LLM through Home Assistant intents and client tools |
 | How-to | [Decision Tools](docs/how-to/configure-decision-tools.md) | Let a small decision model call client tools after each LLM answer, such as a Reachy Mini emotion |
 
-Step-by-step **how-to guides** are indexed in the [Configuration Guide](docs/02-configuration-guide.md). They cover configuring .env, models, and prompts, enabling opentelemetry tracing, a TURN Server, the audio recorder for debugging, and Matrix text messaging, plus the Realtime integrator gateway.
+Step-by-step **how-to guides** are indexed in the [Configuration Guide](docs/02-configuration-guide.md). They cover configuring .env, models, and prompts, enabling opentelemetry tracing, a TURN Server, the audio recorder for debugging, and Matrix text and voice messaging, plus the Realtime integrator gateway.
 
 ---
 

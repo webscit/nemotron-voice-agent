@@ -120,15 +120,35 @@ class FollowUp:
     interrupted: bool = False
 
 
+@dataclass(frozen=True)
+class AudioClip:
+    """Recorded audio a reply plays, 16-bit PCM (for example a received voice message)."""
+
+    audio: bytes
+    sample_rate: int
+    num_channels: int = 1
+
+    @property
+    def duration_secs(self) -> float:
+        """Length of the clip."""
+        return len(self.audio) / (2 * self.num_channels * self.sample_rate)
+
+
 @dataclass
 class IntentResponse:
-    """Home Assistant intent-response shape with ``speech`` rendered by the target."""
+    """Home Assistant intent-response shape with ``speech`` rendered by the target.
+
+    ``parts``, when set, is what the agent outputs instead of ``speech``: sentences
+    spoken in turn with audio clips played between them. ``speech`` then only
+    describes the reply (logs).
+    """
 
     speech: str
     response_type: str = RESPONSE_ACTION_DONE
     speech_slots: dict[str, Any] = field(default_factory=dict)
     data: dict[str, Any] = field(default_factory=dict)
     follow_up: FollowUp | None = None
+    parts: tuple[str | AudioClip, ...] = ()
 
     @property
     def is_error(self) -> bool:

@@ -6,7 +6,7 @@ The engine is available in the Multilingual Assistant example and is off by defa
 
 - **Home Assistant**: executes built-in Home Assistant intents, such as turning a light on, through the Home Assistant REST API.
 - **Client tools**: calls a tool that the client declared at connect time, such as the head and volume tools of a Reachy Mini robot.
-- **Server features**: executes intents of a feature that runs in the server process. Matrix messaging uses this target to check, read, and send messages through a multi-turn dialog. Refer to [Use the Voice Dialog](enable-matrix-messaging.md#use-the-voice-dialog).
+- **Server features**: executes intents of a feature that runs in the server process. Matrix messaging uses this target to check, read, play, and send text and voice messages through a multi-turn dialog. A server feature can play audio inside its reply, such as a received voice message. Refer to [Use the Voice Dialog](enable-matrix-messaging.md#use-the-voice-dialog).
 
 ## Before You Begin
 

@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 from typing import Any
 
 from loguru import logger
 from nio import (
     AsyncClient,
     AsyncClientConfig,
+    DownloadError,
     ErrorResponse,
     InviteMemberEvent,
     JoinError,
@@ -27,11 +29,13 @@ from nio import (
     RoomMessageText,
     RoomPreset,
     SyncResponse,
+    UploadResponse,
 )
 
 from messaging.config import MatrixConfig
 from messaging.contacts import Contact, ContactBook
 from messaging.inbox import KIND_AUDIO, KIND_TEXT, SYNC_TOKEN_KEY, Inbox, InboxMessage
+from messaging.voice import OGG_MIMETYPE
 
 SYNC_TIMEOUT_MS = 30_000
 RETRY_MIN_SECS = 2.0
@@ -42,6 +46,12 @@ MAX_RATE_LIMIT_RETRIES = 3
 FIRST_SYNC_WAIT_SECS = 10.0
 # A room with more members than this is not a direct chat: its messages are not read.
 MAX_DM_MEMBERS = 2
+# Received media larger than this is not downloaded (a few minutes of Opus is well under 1 MB).
+MAX_MEDIA_BYTES = 10 * 1024 * 1024
+# Voice-message flag of Element (MSC3245) and its audio details (MSC1767 extensible events).
+VOICE_FLAG = "org.matrix.msc3245.voice"
+AUDIO_DETAILS = "org.matrix.msc1767.audio"
+VOICE_FILENAME = "voice-message.ogg"
 
 
 class MatrixError(RuntimeError):
@@ -221,18 +231,59 @@ class MatrixGateway:
             logger.info(f"Matrix: created room {response.room_id} with {contact.name}")
             return response.room_id
 
-    async def send_text(self, contact: Contact, text: str) -> str:
-        """Send ``text`` to ``contact``; returns the event id."""
+    async def _wait_synced(self) -> None:
         try:
             await asyncio.wait_for(self.synced.wait(), FIRST_SYNC_WAIT_SECS)
         except TimeoutError as exc:
             raise MatrixError("not connected to the homeserver yet") from exc
+
+    async def _send_message(self, contact: Contact, content: dict[str, Any]) -> str:
         room_id = await self._direct_room(contact)
         response = await self._request(
             f"send to {contact.matrix_id}",
-            lambda: self._client.room_send(room_id, "m.room.message", {"msgtype": "m.text", "body": text}),
+            lambda: self._client.room_send(room_id, "m.room.message", content),
         )
         return response.event_id
+
+    async def send_text(self, contact: Contact, text: str) -> str:
+        """Send ``text`` to ``contact``; returns the event id."""
+        await self._wait_synced()
+        return await self._send_message(contact, {"msgtype": "m.text", "body": text})
+
+    async def send_voice(
+        self, contact: Contact, audio: bytes, *, duration_ms: int, waveform: list[int], body: str
+    ) -> str:
+        """Upload an Ogg/Opus recording and send it to ``contact`` as a voice message; returns the event id.
+
+        ``body`` is the text that clients without voice messages show (and Element shows as a caption).
+        """
+        await self._wait_synced()
+        response, _ = await self._client.upload(
+            lambda *_: io.BytesIO(audio), content_type=OGG_MIMETYPE, filename=VOICE_FILENAME, filesize=len(audio)
+        )
+        if not isinstance(response, UploadResponse):
+            raise MatrixError(f"upload a voice message: {getattr(response, 'message', response)}")
+        return await self._send_message(
+            contact,
+            {
+                "msgtype": "m.audio",
+                "body": body,
+                "filename": VOICE_FILENAME,
+                "url": response.content_uri,
+                "info": {"mimetype": OGG_MIMETYPE, "size": len(audio), "duration": duration_ms},
+                AUDIO_DETAILS: {"duration": duration_ms, "waveform": waveform},
+                VOICE_FLAG: {},
+            },
+        )
+
+    async def download(self, mxc_url: str) -> bytes:
+        """Download received media (authenticated media API, required by matrix.org)."""
+        response = await self._client.download(mxc=mxc_url)
+        if isinstance(response, DownloadError) or not hasattr(response, "body"):
+            raise MatrixError(f"download {mxc_url}: {getattr(response, 'message', response)}")
+        if len(response.body) > MAX_MEDIA_BYTES:
+            raise MatrixError(f"download {mxc_url}: larger than {MAX_MEDIA_BYTES} bytes")
+        return response.body
 
     # ---------------------------------------------------------------- inbox
     async def mark_read(self, messages: list[InboxMessage]) -> None:

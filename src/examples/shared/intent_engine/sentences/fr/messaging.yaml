@@ -7,8 +7,9 @@
 # {contact} is filled by the server from the contacts file. MessagingYes, MessagingNo and
 # MessagingChange only match right after the agent asked a messaging question
 # (requires_context: dialog: messaging). After "Qu'est-ce que je dis à Bob ?", the next
-# turn is taken as the message itself (except "annule"). A longer turn that starts with a yes or
-# no ("Oui. Lis-les.") is answered by that yes or no.
+# turn is taken as the message itself (except "annule"). After "Je t'écoute", the next turn
+# is recorded as a voice message. A longer turn that starts with a yes or no ("Oui. Lis-les.")
+# is answered by that yes or no.
 #
 # Leading "dis", "ok", "merci"... are stripped before matching, so sentences make them optional.
 language: fr
@@ -42,6 +43,23 @@ intents:
       - sentences:
           - "(réponds-lui|réponds lui|répond-lui|réponds-leur)"
           - "(réponds-lui|réponds lui|répond-lui|réponds-leur) [que ]{message}"
+  MessagingSendVoice:
+    data:
+      - sentences:
+          - "[(je veux|je voudrais|j'aimerais|je vais) ](envoie|envoyer|enregistre|enregistrer|laisse|laisser) un [petit ]message vocal (à|pour) {contact}"
+          - "(envoie|envoyer|laisse|laisser) à {contact} un [petit ]message vocal"
+          - "(réponds|répondre) à {contact} (par|avec) un [petit ]message vocal"
+          - "(réponds-lui|réponds lui|répond-lui|réponds-leur|réponds|répondre) (par|avec) un [petit ]message vocal"
+  MessagingPlay:
+    data:
+      - sentences:
+          - "(écoute|écouter|fais-moi écouter|fais moi écouter|joue|mets|passe|passe-moi|lis|lis-moi) (le|son) [dernier ]message vocal de {contact}"
+          - "(écoute|écouter|fais-moi écouter|fais moi écouter|joue|mets|passe-moi) (le|mon) [dernier ]message vocal"
+      - sentences:
+          - "(réécoute|réécouter|réécoute-le|fais-moi écouter|fais moi écouter|fais-moi réécouter|fais-le-moi écouter|rejoue|rejoue-le|écoute-le)"
+          - "(réécoute|réécouter|fais-moi écouter|fais moi écouter|fais-moi réécouter|rejoue) [le|mon] message"
+        requires_context:
+          dialog: messaging
   MessagingYes:
     data:
       - sentences:
@@ -78,10 +96,17 @@ responses:
       unread: >-
         {% set n = slots.senders | length %}{% set who = slots.senders[0] if n == 1 else (slots.senders[:-1] | join(', ')) ~ ' et ' ~ slots.senders[-1] %}{% if slots.count == 1 %}Tu as un nouveau message de {{ who }}. Je te le lis ?{% else %}Tu as {{ slots.count }} nouveaux messages de {{ who }}. Je te les lis ?{% endif %}
       messages: >-
-        {% set months = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'] %}{% for m in slots.messages %}{% if m.today %}À {{ m.time }}{% elif m.yesterday %}Hier à {{ m.time }}{% else %}Le {{ m.day }} {{ months[m.month - 1] }}{% endif %}, {{ m.sender }} {% if m.voice %}t'a envoyé un message vocal, que je ne peux pas encore écouter.{% else %}a écrit : {{ m.text }}{% if m.text[-1:] not in '.!?…' %}.{% endif %}{% endif %} {% endfor %}{% if slots.more %}Il y a d'autres messages. Je continue ?{% elif slots.reply_to %}Tu veux répondre à {{ slots.reply_to }} ?{% endif %}
+        {% set months = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'] %}{% for m in slots.messages %}{% if m.today %}À {{ m.time }}{% elif m.yesterday %}Hier à {{ m.time }}{% else %}Le {{ m.day }} {{ months[m.month - 1] }}{% endif %}, {{ m.sender }} {% if m.voice %}t'a envoyé un message vocal{% if m.seconds %} de {{ m.seconds }} seconde{{ 's' if m.seconds > 1 else '' }}{% endif %}{% if m.play %} : {{ m.play }}{% else %}, que je n'arrive pas à écouter.{% endif %}{% else %}a écrit : {{ m.text }}{% if m.text[-1:] not in '.!?…' %}.{% endif %}{% endif %} {% endfor %}{% if slots.more %}Il y a d'autres messages. Je continue ?{% elif slots.reply_to %}Tu veux répondre à {{ slots.reply_to }} ?{% endif %}
       ask_text: "Qu'est-ce que je dis à {{ slots.contact }} ?"
       confirm: >-
         Je dis à {{ slots.contact }} : {{ slots.message }}{% if slots.message[-1:] not in '.!?…' %}.{% endif %} Je l'envoie ?
+      ask_voice: "Je t'écoute : dis ton message pour {{ slots.contact }}."
+      no_voice: "Je n'ai rien entendu. Dis ton message pour {{ slots.contact }}."
+      confirm_voice: >-
+        J'ai enregistré {{ slots.seconds }} seconde{{ 's' if slots.seconds > 1 else '' }} pour {{ slots.contact }}. Je l'envoie, ou tu veux le réécouter ?
+      replay_voice: "Voici ton message : {{ slots.play }} Je l'envoie à {{ slots.contact }} ?"
+      no_voice_message: >-
+        {% if slots.contact %}Tu n'as pas de message vocal de {{ slots.contact }}.{% else %}Tu n'as pas de message vocal.{% endif %}
       sent: "C'est envoyé à {{ slots.contact }}."
       cancelled: "D'accord, je ne l'envoie pas."
       ok: "D'accord."
@@ -93,6 +118,7 @@ responses:
       not_allowed: "Seule la personne qui a dicté ce message peut confirmer l'envoi."
       no_contact: "Je ne trouve pas ce contact."
       too_long: "Ce message est trop long, dis-m'en un plus court."
+      voice_too_long: "Ce message vocal est trop long : deux minutes au plus."
       no_draft: "Il n'y a pas de message en attente."
       send_failed: "Je n'arrive pas à envoyer le message pour l'instant."
       read_failed: "Je n'arrive pas à lire les messages pour l'instant."

@@ -1,13 +1,15 @@
 # Enable Matrix Messaging
 
-The multilingual assistant can check, read, and send short text messages
+The multilingual assistant can check, read, and send text and voice messages
 through [Matrix](https://matrix.org/), the open chat network behind the Element
 app. The server logs in to one dedicated Matrix account for the agent. People
 who talk with the agent can then ask it whether they have new messages, have
-them read aloud, and dictate replies to the contacts you configure.
+them read aloud or played, and dictate or record replies to the contacts you
+configure.
 
-This first version supports text messages only. Refer to
-[Limitations](#limitations) before you enable it.
+Voice messages work only in the [voice dialog](#use-the-voice-dialog) of the
+intent engine. Refer to [Limitations](#limitations) before you enable
+messaging.
 
 ## How It Works
 
@@ -26,6 +28,11 @@ Messaging has a server part and a set of LLM tools:
   retried.
 - **Read receipts.** When the agent reads a message aloud, it marks the message
   read in its inbox and sends a read receipt to the sender.
+- **Voice messages.** The gateway downloads a received voice message through the
+  homeserver's authenticated media API when the agent plays it. The agent plays
+  the audio through its own voice output, in place of speech. A voice message
+  that you record is encoded as Ogg/Opus, uploaded, and sent as an Element voice
+  message, with its duration and waveform.
 
 ## Prerequisites
 
@@ -146,7 +153,7 @@ and adds the following server-side tools:
 | Tool | Behavior |
 | --- | --- |
 | `check_messages` | Counts unread messages per contact, without reading them |
-| `read_messages` | Returns up to five messages, oldest first, and marks them read. `contact` limits the result to one contact. `include_read` repeats the latest messages that you already heard. |
+| `read_messages` | Returns up to five messages, oldest first, and marks them read. `contact` limits the result to one contact. `include_read` repeats the latest messages that you already heard. The LLM cannot play a voice message: it tells you to ask the voice dialog to play it. |
 | `send_message` | Prepares a draft for `contact` with `text`, up to 2,000 characters. It does not send anything. |
 | `confirm_send_message` | Sends the current draft |
 
@@ -229,8 +236,8 @@ The dialog works as follows:
   counts the unread messages per sender and offers to read them.
 - **Read.** The agent reads up to five messages, oldest first, then asks
   "Je continue ?" ("Shall I go on?") when more are waiting. When all messages
-  came from one sender, it offers to reply. Voice messages are announced, not
-  played.
+  came from one sender, it offers to reply. A voice message plays where it
+  appears in the list, after the agent says who sent it and how long it is.
 - **Dictate.** After "Qu'est-ce que je dis à Bob ?" ("What should I tell
   Bob?"), the agent takes your next turn as the message, word for word, even
   when it sounds like a command. Say "annule" ("cancel") to stop instead.
@@ -254,6 +261,60 @@ joins a short answer to your next sentence. When the turn holds both "oui" and
 "non". While the agent waits for a dictated message, every word is part of the
 message, including a leading "non".
 
+### Voice Messages
+
+The voice dialog plays the voice messages that contacts send, and records the
+ones you send. The following French exchange plays a voice message and answers
+it with another one:
+
+```text
+Vous : Lis les messages de Bob.
+Agent : À 18:05, Bob t'a envoyé un message vocal de 12 secondes : <the message plays> Tu veux répondre à Bob ?
+Vous : Réponds-lui par un message vocal.
+Agent : Je t'écoute : dis ton message pour Bob.
+Vous : <your message, in one turn>
+Agent : J'ai enregistré 9 secondes pour Bob. Je l'envoie, ou tu veux le réécouter ?
+Vous : Réécoute.
+Agent : Voici ton message : <your message plays> Je l'envoie à Bob ?
+Vous : Oui.
+Agent : C'est envoyé à Bob.
+```
+
+The following English exchange plays the latest voice message from a contact,
+even one you already heard, and then records a new one:
+
+```text
+You: Play the voice message from Bob.
+Agent: At 18:05, Bob sent you a 12-second voice message: <the message plays> Do you want to reply to Bob?
+You: Send a voice message to Bob.
+Agent: I'm listening: say your message for Bob.
+You: <your message, in one turn>
+Agent: I recorded 9 seconds for Bob. Shall I send it, or do you want to hear it first?
+You: Yes.
+Agent: Sent to Bob.
+```
+
+Voice messages follow these rules:
+
+- **Playing.** "Lis mes messages" ("Read my messages") plays each voice message
+  in the list. "Fais-moi écouter le message vocal de Bob" ("Play the voice
+  message from Bob") plays the latest voice message from that contact. Without
+  a name, it plays the latest voice message from any contact. Speak to
+  interrupt a voice message, the same way you interrupt the agent.
+- **Recording.** "Envoie un message vocal à Bob" ("Send a voice message to
+  Bob") asks you to speak. The agent records your next turn, from just before
+  you start speaking until the turn ends. When the recording is shorter than
+  half a second, the agent asks you again. It does not send a recording longer
+  than 2 minutes.
+  Say "annule" ("cancel") to stop instead.
+- **Confirming.** Answer "oui" ("yes") to send the recording, "non" ("no") to
+  drop it, "réécoute" ("play it") to hear it first, or "recommence" ("start
+  over") to record it again.
+- **Caption.** The voice message carries what the speech recognition heard as
+  its text, signed like a text message, for example `Alice: See you at six`.
+  Element shows the voice message player. Clients without voice messages show
+  the text.
+
 A question lasts one turn. When your answer matches nothing, the agent asks
 once more, for example "Je l'envoie à Bob ? Réponds par oui ou par non." If
 the next answer does not match either, the question is dropped and the LLM
@@ -275,12 +336,15 @@ The sentences and the spoken replies are in
 `src/examples/shared/intent_engine/sentences/en/messaging.yaml`. Each file
 defines the following intents:
 
-- `MessagingCheck`, `MessagingRead`, `MessagingSend`, and `MessagingReply`
-  start a request. `{contact}` is the contact list, and `{message}` is a
-  wildcard that captures the message text with its punctuation.
+- `MessagingCheck`, `MessagingRead`, `MessagingSend`, `MessagingReply`,
+  `MessagingSendVoice`, and `MessagingPlay` start a request. `{contact}` is the
+  contact list, and `{message}` is a wildcard that captures the message text
+  with its punctuation.
 - `MessagingYes`, `MessagingNo`, and `MessagingChange` declare
   `requires_context: {dialog: messaging}`, so they match only right after the
-  agent asked a messaging question.
+  agent asked a messaging question. `MessagingPlay` has a second sentence group
+  with the same context, such as "réécoute" ("play it"), which replays the
+  recording that waits for confirmation.
 
 The `responses.intents.Messaging` section holds the replies as Jinja templates.
 Keep every response key when you edit a file. A missing reply makes the turn
@@ -298,6 +362,10 @@ The following safeguards apply:
 - The prompt block tells the LLM to never follow instructions found inside a
   message, and to never read one person's messages to another person.
 - Contacts with an `owner` are hidden from everybody except that person.
+- The agent keeps a recorded voice message in memory only, until it is sent,
+  dropped, or expired. Received voice messages are downloaded each time they
+  play and are not stored on disk. When session recording stores turn audio,
+  it also stores what you said and what the agent played.
 - The messaging tool calls and their results are not reported to the browser
   client. The client transcript still shows what the agent says aloud.
 - The messaging tools are disabled for a session when the client declares a
@@ -308,9 +376,15 @@ The following safeguards apply:
 
 This first version has the following limitations:
 
-- **Text only.** The agent lists received voice messages, but it cannot play
-  them yet. It tells you that the message is waiting in Element. It sends only
-  text messages.
+- **Voice messages need the voice dialog.** Only the intent engine plays and
+  records voice messages, in French and English. The LLM tools handle text
+  messages only.
+- **One turn per recording.** A voice message is the audio of one user turn.
+  When you pause long enough for turn detection to end the turn, the
+  recording stops there.
+- **Playback length.** The agent plays at most the first 5 minutes of a voice
+  message. It does not download media larger than 10 MB. It does not
+  transcribe received voice messages.
 - **No end-to-end encryption.** The agent cannot read encrypted rooms, and the
   rooms it creates are unencrypted. The homeserver can read these messages.
 - **One account.** The server uses one Matrix account for every person who talks
@@ -346,3 +420,6 @@ The following table lists common symptoms and checks:
 | The agent says a message was sent, but it never arrives | Look for a `function_result` event of `confirm_send_message` with status `sent` in the turn. Without one, the LLM answered without sending. Turn on the voice dialog, and add the phrasing you used to the `messaging.yaml` files. |
 | The LLM answers messaging requests instead of the voice dialog | Confirm that `INTENT_ENGINE_ENABLED=true` is set, that the session language is French or English, and that the `Intent engine enabled` log line shows `server=messaging`. With a custom `INTENT_ENGINE_SENTENCES_DIR`, copy the `messaging.yaml` files there. |
 | A dictated message is cut off | Turn detection split the message into two turns, and you continued after the read-back ended. Refer to [Limitations](#limitations). |
+| The agent says it cannot play a voice message | Look for `Matrix: cannot play voice message` in the server log. The download failed, the file is larger than 10 MB, or FFmpeg cannot decode it. |
+| A voice message request goes to the LLM | Voice messages need the voice dialog. Confirm the intent engine settings in the row about the LLM above. |
+| A recorded voice message is cut off | You paused long enough to end the turn. Record the message again without long pauses. |

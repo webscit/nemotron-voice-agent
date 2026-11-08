@@ -25,7 +25,7 @@ What ASR / LLM / TTS models are available, their VRAM, precision, and known issu
 | [Record Conversations](how-to/enable-conversation-recording.md) | Persist sessions, metrics, LLM inputs, audio and images; compare variants and post-process offline |
 | [Configure the Intent Engine](how-to/configure-intent-engine.md) | Answer device commands without the LLM through Home Assistant intents and client tools |
 | [Configure Decision Tools](how-to/configure-decision-tools.md) | Let a small decision model call client tools after each LLM answer, such as a Reachy Mini emotion |
-| [Enable Matrix Messaging](how-to/enable-matrix-messaging.md) | Check, read, and send text messages to contacts through Matrix (Element) in the multilingual assistant |
+| [Enable Matrix Messaging](how-to/enable-matrix-messaging.md) | Check, read, and send text and voice messages to contacts through Matrix (Element) in the multilingual assistant |
 | [Use the Realtime Gateway](how-to/use-realtime-gateway.md) | OpenAI Realtime–compatible `WS /v1/realtime` for external clients |
 
 ## Welcome Message
