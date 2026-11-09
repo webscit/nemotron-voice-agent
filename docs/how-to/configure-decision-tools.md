@@ -154,19 +154,20 @@ The decision is not a latency stage, because it runs alongside TTS. The followin
 | Column | Description |
 | --- | --- |
 | `decision_secs` | Latency of the decision model |
+| `decision_started_at` | Time when the decision call started, in epoch seconds. The turn waterfall uses it to place the decision model on the time axis. |
 | `decision_lag_secs` | Time when the decision call was sent, minus the time of the first bot audio. A negative value means that the robot moved before it spoke. |
 | `decision_outcome` | `called`, `none`, `low_confidence`, or `error` |
 | `decision_choice` | The value that the decision model chose |
 | `decision_confidence` | Confidence of the decision that `decision_choice` reports |
 
-The recorder adds these columns to an existing database automatically. To fill them for sessions recorded earlier, run the backfill in [Per-Turn Metrics](enable-conversation-recording.md#per-turn-metrics).
+The recorder adds these columns to an existing database automatically. To fill them for sessions recorded earlier, run the backfill in [Per-Turn Metrics](enable-conversation-recording.md#per-turn-metrics). The backfill computes `decision_started_at` from the recorded `decision_secs` metric, so it also fills the column for sessions recorded before the column existed.
 
 ### Decisions in the Review UI
 
 The [review UI](enable-conversation-recording.md#review-in-the-web-ui) shows the decisions in the following places:
 
 - **Metrics** page: the **Decision model** section shows, for each variant, the number of turns, the decision latency p50 and p90, the **Sent after audio** p50, the **Confidence p50**, the called, none, low confidence, and error rates, the top choices, and the agreement of each source with the reference, after the `redecide` job has run. Select **Decision model** in **Compare by** to compare decision models. The tools table lists decision calls with the trigger **decision model**. **Confidence p50** covers the live decision model only. It reads `decision_confidence`, so a variant with only earlier sessions shows `–` until you run the backfill in [Per-Turn Metrics](enable-conversation-recording.md#per-turn-metrics). The **Sessions** page does not need this backfill.
-- **Sessions** page, turn timeline: the stage legend below the latency bar lists the decision model with a hollow swatch and its latency, for example `Decision model 0.15 s`. The decision model is not a segment of the bar, because it runs alongside TTS. Next to the item, the legend shows when the call was sent relative to the first bot audio, and a badge when the outcome is `none`, `low_confidence`, or `error`.
+- **Sessions** page, turn waterfall: the decision model has its own row with a hollow bar from its start to its end, next to the latency stages and the bot speech. Each decision call has its own tool call row, from its send time to the client result. The legend lists the decision model with a hollow swatch and its latency, for example `Decision model 0.15 s`, when the call was sent relative to the first bot audio, and a badge when the outcome is `none`, `low_confidence`, or `error`. For a row computed before `decision_started_at` existed, the waterfall estimates the start from the send time of the decision call, and the bar tooltip says so. When the turn has no decision call, the row shows `start not recorded` until you run the backfill.
 - **Sessions** page, **Decision tools** table: each row shows the source name on the left and the picked choice on the right, followed by the confidence of that source as a percentage, like the ASR transcripts table. The sources are the live model as `live:<model>`, each `redecide` model, and each human reviewer. A choice that differs from the live choice is highlighted in amber. Human reference choices have no confidence. The tool name appears only when the session has several decision tools. Sessions that are already recorded show the confidence too, so you do not need a backfill.
 - **Sessions** page header: a session that ran decision tools shows one **agrees** badge per source, with the share of turns that agree with the reference, and a **Re-run redecide** button.
 - **Decision reference** activity: a queue of the turns where the live decision model ran, where you set the reference choice. Refer to [Set the Reference Choice](#set-the-reference-choice).

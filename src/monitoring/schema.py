@@ -25,7 +25,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 metadata = MetaData()
 
@@ -116,6 +116,9 @@ turn_metrics = Table(
     Column("gpu_load_peak", Float),
     # Decision model of the turn's first answer (not a stage: it runs alongside TTS).
     Column("decision_secs", Float),
+    # When that decision call started (epoch seconds), for the turn waterfall. Added in
+    # schema version 5: null on older rows until the backfill recomputes them.
+    Column("decision_started_at", Float),
     # Decision call send time - first bot audio (negative: before the robot spoke).
     Column("decision_lag_secs", Float),
     # called | none | low_confidence | error
