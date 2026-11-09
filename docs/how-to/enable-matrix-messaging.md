@@ -65,12 +65,11 @@ Request a token for a new device of the agent's account with the Matrix
 (`POST /_matrix/client/v3/login`):
 
 ```bash
+read -rs "PW?Matrix password: " && echo
 curl -s -X POST https://matrix-client.matrix.org/_matrix/client/v3/login \
   -H 'Content-Type: application/json' \
-  -d '{"type": "m.login.password",
-       "identifier": {"type": "m.id.user", "user": "my-agent"},
-       "password": "<the agent account password>",
-       "initial_device_display_name": "Voice agent"}'
+  -d "$(jq -n --arg pw "$PW" '{type:"m.login.password", identifier:{type:"m.id.user",user:"reachy-fco"}, password:$pw, initial_device_display_name:"nemotron-voice-agent"}')" \
+  | jq '{access_token, device_id, expires_in_ms}'
 ```
 
 The response contains `access_token` and `device_id`. The agent keeps the
