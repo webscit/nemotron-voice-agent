@@ -6,6 +6,7 @@
 """Matrix voice messages: codec, gateway, turn capture, and the dialog that plays and records them."""
 
 import asyncio
+import io
 import math
 import time
 from types import SimpleNamespace
@@ -352,10 +353,12 @@ class OutputTap(FrameProcessor):
 
 
 class Harness:
-    def __init__(self, gateway, person=None, language="fr-FR", capture=True):
+    def __init__(self, gateway, person=None, language="fr-FR", capture=True, transcribe=None):
         self.person = person
         self.recording: AudioClip | None = None
-        self.tools = MessagingTools(gateway=gateway, current_person=lambda: self.person, user_turn=lambda: 0)
+        self.tools = MessagingTools(
+            gateway=gateway, current_person=lambda: self.person, user_turn=lambda: 0, transcribe=transcribe
+        )
         self.context = LLMContext([{"role": "system", "content": "sys"}])
         self.llm = FakeLLM()
         self.engine = build_intent_engine(
@@ -600,3 +603,146 @@ def test_voice_draft_limits(gateway):
     assert tools.prepare_voice(bob, VoiceRecording(bytes(2 * RATE * 121), RATE), "")["code"] == "voice_too_long"
     assert tools.prepare_voice(bob, VoiceRecording(tone(1.0), RATE), "  salut  toi ")["seconds"] == 1
     assert tools.draft.text == "salut toi" and tools.draft.voice is not None
+
+
+# --------------------------------------------------------- transcription
+class FakeASR:
+    def __init__(self, text="Rappelle-moi ce soir", fail=False):
+        self.text = text
+        self.fail = fail
+        self.calls: list[tuple[int, int]] = []
+
+    async def __call__(self, pcm, sample_rate):
+        self.calls.append((len(pcm), sample_rate))
+        if self.fail:
+            raise RuntimeError("ASR unavailable")
+        return self.text
+
+
+def test_voice_message_is_transcribed_once_and_cached(gateway):
+    from examples.shared.messaging_tools import TRANSCRIBE_SAMPLE_RATE
+
+    _receive_voice(gateway)
+    asr = FakeASR("  Rappelle-moi\n ce soir ")
+    tools = MessagingTools(gateway=gateway, current_person=lambda: None, user_turn=lambda: 0, transcribe=asr)
+    [message] = gateway.inbox.messages([BOB])
+    assert run_result(tools.transcript(message)) == "Rappelle-moi ce soir"
+    # About 2 s of 16 kHz PCM.
+    assert asr.calls[0][1] == TRANSCRIBE_SAMPLE_RATE and asr.calls[0][0] > TRANSCRIBE_SAMPLE_RATE * 2 * 1.5
+    [stored] = gateway.inbox.messages([BOB])
+    assert stored.transcript == "Rappelle-moi ce soir"
+    assert run_result(tools.transcript(stored)) == "Rappelle-moi ce soir"
+    assert len(asr.calls) == 1
+
+
+def test_nothing_heard_is_cached_and_failures_are_not(gateway):
+    _receive_voice(gateway, event_id="$silent")
+    _receive_voice(gateway, event_id="$gone", url="mxc://matrix.org/gone")
+    asr = FakeASR("")
+    tools = MessagingTools(gateway=gateway, current_person=lambda: None, user_turn=lambda: 0, transcribe=asr)
+    silent, gone = sorted(gateway.inbox.messages([BOB]), key=lambda m: m.event_id != "$silent")
+    assert run_result(tools.transcript(silent)) is None
+    assert run_result(tools.transcript(gone)) is None
+    by_id = {m.event_id: m for m in gateway.inbox.messages([BOB])}
+    assert by_id["$silent"].transcript == ""
+    assert by_id["$gone"].transcript is None
+    asr.fail = True
+    assert run_result(tools.transcript(by_id["$silent"])) is None
+    assert len(asr.calls) == 1
+
+
+def test_llm_reads_the_transcript_of_a_voice_message(gateway):
+    _receive_voice(gateway)
+    asr = FakeASR()
+    tools = MessagingTools(gateway=gateway, current_person=lambda: None, user_turn=lambda: 0, transcribe=asr)
+    calls = []
+
+    async def callback(result, *, properties=None):
+        calls.append(result)
+
+    params = SimpleNamespace(arguments={"contact": "Bob"}, result_callback=callback, llm=None)
+    run(tools.read_messages(params))
+    [message] = calls[0]["messages"]
+    assert message["voice_message"] is True
+    assert message["transcript"] == "Rappelle-moi ce soir"
+    assert "may contain mistakes" in message["note"]
+    assert "play the voice message from Bob" in message["note"]
+
+
+def test_llm_read_without_asr_keeps_the_play_hint(gateway):
+    _receive_voice(gateway)
+    tools = MessagingTools(gateway=gateway, current_person=lambda: None, user_turn=lambda: 0)
+    calls = []
+
+    async def callback(result, *, properties=None):
+        calls.append(result)
+
+    run(tools.read_messages(SimpleNamespace(arguments={}, result_callback=callback, llm=None)))
+    [message] = calls[0]["messages"]
+    assert "transcript" not in message
+    assert "cannot play yourself" in message["note"]
+
+
+def test_played_voice_message_is_transcribed_for_later(gateway):
+    _receive_voice(gateway)
+    asr = FakeASR()
+
+    async def scenario():
+        async with Harness(gateway, transcribe=asr) as h:
+            output = await h.says("Lis les messages de Bob")
+            # Played, not read out.
+            assert _audio_secs(output) == [2.0]
+            assert not any("Rappelle-moi" in part for part in _sentences(output))
+            async with asyncio.timeout(3):
+                while gateway.inbox.messages([BOB], unread_only=False)[0].transcript is None:
+                    await asyncio.sleep(0.01)
+
+    run(scenario())
+    assert gateway.inbox.messages([BOB], unread_only=False)[0].transcript == "Rappelle-moi ce soir"
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("fr-FR", "que je n'arrive pas à écouter. On y entend : Rappelle-moi ce soir."),
+        ("en-US", "which I can't play. It says: Rappelle-moi ce soir."),
+    ],
+)
+def test_transcript_is_said_when_the_voice_message_cannot_be_played(gateway, language, expected):
+    _receive_voice(gateway, url="mxc://matrix.org/gone")
+    [message] = gateway.inbox.messages([BOB])
+    gateway.inbox.set_transcript(message.event_id, "Rappelle-moi ce soir")
+
+    async def scenario():
+        async with Harness(gateway, language=language) as h:
+            request = "Lis les messages de Bob" if language == "fr-FR" else "Read my messages from Bob"
+            output = await h.says(request)
+            assert _audio_secs(output) == []
+            assert expected in output[0]
+
+    run(scenario())
+
+
+def test_session_transcriber_sends_a_wav_clip(monkeypatch):
+    import wave
+
+    from examples.shared import voice_transcriber
+
+    sent = []
+
+    class FakeRiva:
+        def __init__(self, endpoint):
+            sent.append(endpoint)
+
+        def transcribe_wav(self, wav_bytes, language):
+            with wave.open(io.BytesIO(wav_bytes)) as wf:
+                sent.append((wf.getframerate(), wf.getnchannels(), wf.getnframes(), language))
+            return "bonjour"
+
+    monkeypatch.setattr(voice_transcriber, "RivaTranscriber", FakeRiva)
+    transcriber = voice_transcriber.SessionTranscriber(server="asr:50052", use_ssl=False, language="fr-FR")
+    assert run_result(transcriber(b"\x00\x00" * 16000, 16000)) == "bonjour"
+    assert run_result(transcriber(b"\x00\x00" * 8000, 16000)) == "bonjour"
+    endpoint, first, second = sent
+    assert (endpoint.server, endpoint.use_ssl, endpoint.language) == ("asr:50052", False, "fr-FR")
+    assert first == (16000, 1, 16000, "fr-FR") and second[2] == 8000

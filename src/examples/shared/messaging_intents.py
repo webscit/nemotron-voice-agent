@@ -140,6 +140,8 @@ def message_slots(
     return {
         "sender": contact.name,
         "text": "" if message.kind == KIND_AUDIO else message.body,
+        # What the ASR heard in a voice message, said when it cannot be played.
+        "transcript": (message.transcript or "") if message.kind == KIND_AUDIO else "",
         "voice": message.kind == KIND_AUDIO,
         "play": play,
         "seconds": max(1, round(message.duration_ms / 1000)) if message.duration_ms else 0,
@@ -340,6 +342,7 @@ class MessagingIntents:
             "reply_to": self._reply_to.name if self._reply_to and not more else None,
         }
         played = [clips[index] for index in sorted(clips)]
+        self._tools.transcribe_later([message for message, _ in messages])
         if more:
             return self._reply("messages", slots, ask=OFFER_MORE, clips=played)
         if self._reply_to is not None:
@@ -374,6 +377,7 @@ class MessagingIntents:
             return self._reply("no_voice_message", {CONTACT_SLOT: name})
         message, contact = found
         clips = await self._voice_clips([message])
+        self._tools.transcribe_later([message])
         self._reply_to = contact
         slots = {
             "messages": [message_slots(message, contact, play=_CLIP_MARK.format(0) if clips else "")],

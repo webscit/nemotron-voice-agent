@@ -18,14 +18,17 @@ draft as stored, and "sent" is only said once the gateway sent it.
 
 Voice messages are only recorded and played through the intent-engine dialog
 (``messaging_intents``), which hears the user's audio: ``prepare_voice`` drafts
-a recording, sent by the same ``send_draft``.
+a recording, sent by the same ``send_draft``. Received ones are transcribed with
+the session's ASR (``transcript``, cached in the inbox): the LLM reads the
+transcript, and the dialog says it when the recording cannot be played.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -65,6 +68,14 @@ MAX_VOICE_SECS = 120.0
 MAX_PLAY_SECS = 300.0
 # "Play the voice message from Bob" looks for it among this many latest messages.
 VOICE_LOOKBACK = 20
+# Received voice messages are transcribed at this rate, within this time.
+TRANSCRIBE_SAMPLE_RATE = 16000
+TRANSCRIBE_TIMEOUT_SECS = 20.0
+# Downloaded media kept for playing and transcribing the same message.
+MEDIA_CACHE_SIZE = 4
+
+# Transcribes 16-bit mono PCM at a sample rate: what the ASR heard.
+Transcriber = Callable[[bytes, int], Awaitable[str]]
 
 
 def _schemas() -> list[FunctionSchema]:
@@ -143,15 +154,20 @@ def spoken_time(timestamp: float, now: datetime | None = None) -> str:
     return f"{sent:%A} {sent.day} {sent:%B}"
 
 
-def describe_message(message: InboxMessage, contact_name: str) -> dict[str, Any]:
-    """The tool-result form of a received message."""
+def describe_message(message: InboxMessage, contact_name: str, transcript: str | None = None) -> dict[str, Any]:
+    """The tool-result form of a received message (``transcript``: what the ASR heard in a voice message)."""
     result: dict[str, Any] = {"from": contact_name, "when": spoken_time(message.sent_at)}
     if message.kind == KIND_AUDIO:
         result["voice_message"] = True
-        result["note"] = (
-            "This is a voice message, which you cannot play yourself. Tell the user to say "
-            f'"play the voice message from {contact_name}" to hear it.'
-        )
+        play = f'Tell the user to say "play the voice message from {contact_name}" to hear it.'
+        if transcript:
+            result["transcript"] = transcript
+            result["note"] = (
+                "This is a voice message. 'transcript' is what speech recognition heard in it and may contain "
+                f"mistakes: say it is a voice message when you tell its content. {play}"
+            )
+        else:
+            result["note"] = f"This is a voice message, which you cannot play yourself. {play}"
     else:
         result["text"] = message.body
     return result
@@ -193,6 +209,7 @@ class MessagingTools:
         gateway: MatrixGateway,
         current_person: Callable[[], PersonContext | None],
         user_turn: Callable[[], int],
+        transcribe: Transcriber | None = None,
     ):
         """Bind the tools to the session.
 
@@ -200,11 +217,15 @@ class MessagingTools:
             gateway: The process-wide Matrix gateway.
             current_person: The person known for sure, or None.
             user_turn: Number of user turns so far (a draft is confirmed in a later turn than it was made).
+            transcribe: The session's ASR for received voice messages; without it they are not transcribed.
         """
         self._gateway = gateway
         self._current_person = current_person
         self._user_turn = user_turn
         self._draft: Draft | None = None
+        self._transcribe = transcribe
+        self._media: OrderedDict[str, bytes] = OrderedDict()
+        self._background: set[asyncio.Task] = set()
         # Speech for the result of a send step, or None to let the LLM speak (set by ``MessagingIntents``).
         self.announcer: Callable[[str, dict[str, Any]], str | None] | None = None
 
@@ -382,13 +403,60 @@ class MessagingTools:
 
     async def voice_audio(self, message: InboxMessage, sample_rate: int) -> bytes:
         """The audio of a received voice message, as 16-bit mono PCM at ``sample_rate``."""
-        if not message.media_url:
-            raise MatrixError("the voice message has no media")
-        data = await self._gateway.download_media(message)
+        data = await self._download(message)
         try:
             return await asyncio.to_thread(decode_audio, data, sample_rate, max_secs=MAX_PLAY_SECS)
         except VoiceCodecError as exc:
             raise MatrixError(str(exc)) from exc
+
+    async def _download(self, message: InboxMessage) -> bytes:
+        """The media of ``message``; the latest ones are kept, to play and transcribe them once downloaded."""
+        if not message.media_url:
+            raise MatrixError("the voice message has no media")
+        data = self._media.get(message.event_id)
+        if data is None:
+            data = await self._gateway.download_media(message)
+            self._media[message.event_id] = data
+            while len(self._media) > MEDIA_CACHE_SIZE:
+                self._media.popitem(last=False)
+        return data
+
+    async def transcript(self, message: InboxMessage) -> str | None:
+        """What the ASR heard in a received voice message (cached in the inbox), or None.
+
+        None when it is not a voice message, there is no ASR, or the transcription failed.
+        """
+        if message.kind != KIND_AUDIO:
+            return None
+        if message.transcript is not None:
+            return message.transcript or None
+        if self._transcribe is None:
+            return None
+        try:
+            data = await self._download(message)
+            pcm = await asyncio.to_thread(decode_audio, data, TRANSCRIBE_SAMPLE_RATE, max_secs=MAX_PLAY_SECS)
+            text = await asyncio.wait_for(self._transcribe(pcm, TRANSCRIBE_SAMPLE_RATE), TRANSCRIBE_TIMEOUT_SECS)
+        except Exception as exc:
+            logger.opt(exception=exc).warning(f"Matrix: cannot transcribe voice message {message.event_id}")
+            return None
+        text = " ".join((text or "").split())
+        await asyncio.to_thread(self._gateway.inbox.set_transcript, message.event_id, text)
+        logger.info(f"Matrix: transcribed voice message {message.event_id} ({len(text)} characters)")
+        return text or None
+
+    def transcribe_later(self, messages: list[InboxMessage]) -> None:
+        """Transcribe voice messages in the background (the dialog played them; the LLM may ask)."""
+        pending = [m for m in messages if m.kind == KIND_AUDIO and m.transcript is None]
+        if not pending or self._transcribe is None:
+            return
+
+        async def run() -> None:
+            for message in pending:
+                await self.transcript(message)
+
+        task = asyncio.ensure_future(run())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def cancel_draft(self) -> None:
         """Drop the draft."""
@@ -476,7 +544,10 @@ class MessagingTools:
             return {"error": "The messages could not be read."}
         if not messages:
             return {"status": "no new messages" if not include_read else "no messages"}
-        result: dict[str, Any] = {"messages": [describe_message(m, c.name) for m, c in messages]}
+        transcripts = await asyncio.gather(*(self.transcript(m) for m, _ in messages))
+        result: dict[str, Any] = {
+            "messages": [describe_message(m, c.name, t) for (m, c), t in zip(messages, transcripts, strict=True)]
+        }
         if more:
             result["more"] = "There are more messages; offer to read the next ones."
         return result

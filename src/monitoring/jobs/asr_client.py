@@ -42,6 +42,8 @@ class AsrEndpoint:
     service: str | None = None
     # Base language codes (e.g. ["en"]) this endpoint supports; empty = all.
     languages: tuple[str, ...] = ()
+    # TLS to a Riva server; None: only for NVCF (``dreamer.yaml`` endpoints).
+    use_ssl: bool | None = None
 
     def supports(self, language: str | None) -> bool:
         """Return whether this endpoint should transcribe a session in ``language``."""
@@ -76,7 +78,8 @@ class RivaTranscriber:
             metadata.append(["function-id", endpoint.function_id])
         if is_nvcf(endpoint.server):
             metadata.append(["authorization", f"Bearer {nvidia_api_key()}"])
-        auth = riva.client.Auth(None, is_nvcf(endpoint.server), endpoint.server, metadata)
+        use_ssl = is_nvcf(endpoint.server) if endpoint.use_ssl is None else endpoint.use_ssl
+        auth = riva.client.Auth(None, use_ssl, endpoint.server, metadata)
         self._channel = auth.channel
         self._service = riva.client.ASRService(auth)
 

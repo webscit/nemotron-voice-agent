@@ -7,8 +7,9 @@ who talk with the agent can then ask it whether they have new messages, have
 them read aloud or played, and dictate or record replies to the contacts you
 configure.
 
-Voice messages and the announcement of new messages work only in the
-[voice dialog](#use-the-voice-dialog) of the intent engine. Refer to [Limitations](#limitations) before you enable
+Playing and recording voice messages, and the announcement of new messages,
+work only in the [voice dialog](#use-the-voice-dialog) of the intent engine.
+The LLM tools get a transcript of each received voice message. Refer to [Limitations](#limitations) before you enable
 messaging.
 
 ## How It Works
@@ -34,6 +35,11 @@ Messaging has a server part and a set of LLM tools:
   the audio through its own voice output, in place of speech. A voice message
   that you record is encoded as Ogg/Opus, uploaded, and sent as an Element voice
   message, with its duration and waveform.
+- **Transcripts.** The agent transcribes received voice messages with the ASR
+  server, model, and language of the session. It sends the clip through the
+  same Riva-compatible streaming API as the live pipeline, outside the
+  pipeline. No setting controls it. Refer to
+  [Transcripts of Voice Messages](#transcripts-of-voice-messages).
 - **Encryption.** The agent reads and answers end-to-end encrypted rooms, and
   it keeps its device keys on disk. Unencrypted rooms keep working. Refer to
   [Use End-to-End Encryption](#use-end-to-end-encryption).
@@ -370,6 +376,33 @@ Voice messages follow these rules:
   Element shows the voice message player. Clients without voice messages show
   the text.
 
+#### Transcripts of Voice Messages
+
+The agent transcribes the voice messages that it receives, so that the LLM can
+work with their content. Transcripts follow these rules:
+
+- **Dialog.** The voice dialog plays the recording and does not read the
+  transcript aloud. When the agent cannot play a recording but already has its
+  transcript, it says the transcript instead, for example "..., which I can't
+  play. It says: See you at six." or "..., que je n'arrive pas à écouter. On y
+  entend : À six heures."
+- **Follow-up questions.** After the dialog plays voice messages, the agent
+  transcribes them in the background. The LLM can then answer questions such as
+  "What did Bob say?"
+- **LLM tools.** `read_messages` returns a `transcript` field for each voice
+  message, with a note that the transcript can contain recognition mistakes
+  and that you can say "play the voice message from Bob" to hear it. Without
+  the intent engine, the LLM tells you the content of voice messages from
+  their transcripts.
+- **Cache.** The inbox stores each transcript, so a message is transcribed
+  once. When the ASR hears nothing, the agent stores an empty transcript. When
+  the transcription fails, the server logs
+  `Matrix: cannot transcribe voice message <event ID>` and tries again the next
+  time the message is read. A transcription fails when the ASR is unreachable,
+  takes more than 20 seconds, or the download or decoding fails.
+- **Length.** The agent transcribes at most the first 5 minutes of a voice
+  message.
+
 A question lasts one turn. When your answer matches nothing, the agent asks
 once more, for example "Je l'envoie à Bob ? Réponds par oui ou par non." If
 the next answer does not match either, the question is dropped and the LLM
@@ -471,9 +504,11 @@ The following safeguards apply:
   restrict access to that directory. Anybody who can read it and knows the
   passphrase can decrypt the agent's messages.
 - The agent keeps a recorded voice message in memory only, until it is sent,
-  dropped, or expired. Received voice messages are downloaded each time they
-  play and are not stored on disk. When session recording stores turn audio,
-  it also stores what you said and what the agent played.
+  dropped, or expired. Received voice messages are downloaded to play or
+  transcribe them, kept in memory only, and not stored on disk. Their
+  transcripts are message content, and `inbox.db` stores them like text
+  messages. When session recording stores turn audio, it also stores what you
+  said and what the agent played.
 - The messaging tool calls and their results are not reported to the browser
   client. The client transcript still shows what the agent says aloud.
 - The messaging tools are disabled for a session when the client declares a
@@ -484,17 +519,20 @@ The following safeguards apply:
 
 This first version has the following limitations:
 
-- **Voice messages need the voice dialog.** Only the intent engine plays and
-  records voice messages, in French and English. The LLM tools handle text
-  messages only.
+- **Playing and recording need the voice dialog.** Only the intent engine
+  plays and records voice messages, in French and English. The LLM tools
+  handle voice messages through their transcripts only.
+- **Transcripts are not exact.** A transcript is what the speech recognition
+  heard, and it can contain mistakes. Transcription uses only the
+  Riva-compatible ASR of the session.
 - **Announcements need the voice dialog.** Only the intent engine announces
   unread and new messages, in French and English.
 - **One turn per recording.** A voice message is the audio of one user turn.
   When you pause long enough for turn detection to end the turn, the
   recording stops there.
 - **Playback length.** The agent plays at most the first 5 minutes of a voice
-  message. It does not download media larger than 10 MB. It does not
-  transcribe received voice messages.
+  message, and transcribes at most the first 5 minutes. It does not download
+  media larger than 10 MB.
 - **No device verification.** matrix-nio has no cross-signing and no
   interactive verification. Element shows the agent's device and messages as
   not verified, for example "Encrypted by a device not verified by its owner."
@@ -547,5 +585,6 @@ The following table lists common symptoms and checks:
 | A dictated message is cut off | Turn detection split the message into two turns, and you continued after the read-back ended. Refer to [Limitations](#limitations). |
 | The agent does not announce new messages | Confirm the intent engine settings in the row about the LLM above. Look for `Matrix: announced new messages from` in the server log. A message from a contact with an `owner` waits until that person is known for sure. The agent waits while anybody speaks or a messaging question is open. |
 | The agent says it cannot play a voice message | Look for `Matrix: cannot play voice message` in the server log. The download failed, the file is larger than 10 MB, or FFmpeg cannot decode it. |
-| A voice message request goes to the LLM | Voice messages need the voice dialog. Confirm the intent engine settings in the row about the LLM above. |
+| The LLM does not know what a voice message says | Look for `Matrix: cannot transcribe voice message` in the server log. The ASR server was unreachable or took more than 20 seconds, or the download or decoding failed. The agent tries again the next time the message is read. |
+| A voice message request goes to the LLM | Playing and recording voice messages need the voice dialog. Confirm the intent engine settings in the row about the LLM above. |
 | A recorded voice message is cut off | You paused long enough to end the turn. Record the message again without long pauses. |
