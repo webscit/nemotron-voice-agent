@@ -13,6 +13,10 @@ in the next turn through the engine's follow-up:
 - "Send a message to Bob" -> "What should I tell Bob?" -> <the user's words> -> read back,
   "Shall I send it?" -> yes -> sent / no -> dropped / "change it" -> dictation again.
 - "Tell Bob that <message>" goes straight to the read-back.
+- A message that arrives during the conversation, or was waiting when it started,
+  is announced once nobody talks (``announcement``, said by ``MessagingAnnouncer``):
+  "You just got a new message from Bob. Shall I read it?" -> yes -> read. Any
+  other answer is a turn like any other.
 - Voice messages: received ones play inside "read my messages", or with "play the
   voice message from Bob". "Send a voice message to Bob" -> "I'm listening" -> the
   next turn's audio is the message -> "Shall I send it?" -> yes / no / "play it" /
@@ -37,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -424,6 +429,32 @@ class MessagingIntents:
                 return self._error(result)
             return self._reply("sent", {CONTACT_SLOT: draft.contact.name if draft else result.get("to")})
         raise TargetUnavailable("no messaging question pending")
+
+    # ------------------------------------------------------ announcements
+    def announcement(self, unread: list[tuple[Contact, int]], arrived: int) -> IntentResponse:
+        """Announce the ``unread`` messages of these contacts, ``arrived`` of them just now; a yes reads them.
+
+        With nothing just arrived, the messages were waiting when the session started.
+
+        Said without being asked, so its question is not asked again: an answer
+        that is not yes or no is an ordinary turn. The person talking is named
+        when the messages are from a contact of their own.
+        """
+        senders = [contact for contact, _ in unread]
+        person = self._tools.current_person_name() if any(c.owner for c in senders) else None
+        response = self._reply(
+            "announce",
+            {
+                "count": sum(n for _, n in unread),
+                "new": arrived,
+                "senders": [c.name for c in senders],
+                "person": person,
+            },
+            ask=OFFER_READ,
+        )
+        self._read_contacts = senders
+        follow_up = replace(response.follow_up, reprompt=None) if response.follow_up else None
+        return replace(response, follow_up=follow_up)
 
     # ------------------------------------------------------ LLM send steps
     def announce(self, tool: str, result: dict[str, Any]) -> str | None:

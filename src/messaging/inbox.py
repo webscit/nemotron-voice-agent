@@ -154,6 +154,18 @@ class Inbox:
             ).fetchall()
         return {row["sender"]: row["n"] for row in rows}
 
+    def unread_among(self, event_ids: list[str]) -> set[str]:
+        """The messages of ``event_ids`` that are stored and still unread."""
+        if not event_ids:
+            return set()
+        placeholders = ",".join("?" * len(event_ids))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT event_id FROM messages WHERE read_at IS NULL AND event_id IN ({placeholders})",
+                tuple(event_ids),
+            ).fetchall()
+        return {row["event_id"] for row in rows}
+
     def mark_read(self, event_ids: list[str]) -> None:
         """Mark messages as read."""
         if not event_ids:

@@ -50,6 +50,7 @@ from examples.multilingual.tool_handlers import ClientToolResultBridge, build_cl
 from examples.multilingual.tools import build_client_tools, perceivable_client_tools, without_tools
 from examples.multilingual.transcript_turns import FinalTranscriptUserTurnStartStrategy, TranscriptTurnStopStrategy
 from examples.shared.audio_recorder import create_audio_recorder
+from examples.shared.conversation_activity import ConversationActivity
 from examples.shared.decision_tools import (
     DecisionModelConfig,
     DecisionToolsProcessor,
@@ -67,6 +68,7 @@ from examples.shared.memory_tools import (
     MemoryTools,
     with_memory_tools,
 )
+from examples.shared.messaging_announcer import MessagingAnnouncer
 from examples.shared.messaging_intents import MessagingIntents
 from examples.shared.messaging_tools import (
     CHECK_TOOL_NAME,
@@ -508,6 +510,8 @@ async def bot(runner_args: RunnerArguments) -> None:
     # Voice ID: the client streams who is speaking (``speaker-update``); it needs the
     # people store for names, memories and enrollment, so it is off without monitoring.
     voice_id_session: VoiceIdSession | None = None
+    # Who is talking: the face-ID greeting and the message announcements only speak first while nobody does.
+    conversation_activity = ConversationActivity()
     if ENROLL_TOOL_NAME in client_tool_names:
         logger.warning(f"Voice ID disabled: the client declares its own '{ENROLL_TOOL_NAME}' tool")
     elif people_store_available:
@@ -519,6 +523,7 @@ async def bot(runner_args: RunnerArguments) -> None:
             session_id=lambda: recorder.session_id if recorder else None,
             turn_idx=lambda: recorder.turn_idx if recorder else -1,
             initial_person=person_context,
+            activity=conversation_activity,
         )
         # Runs on the server (the people store lives here). It only enters the LLM's
         # tool list once the client sends its first speaker-update.
@@ -612,6 +617,16 @@ async def bot(runner_args: RunnerArguments) -> None:
     await preload_intent_engine(intent_engine_config, fixed_session_language, learned_intents)
     # Voice messages: the audio of the turn the engine handles is the recording.
     voice_capture = UserTurnAudioCapture() if messaging_enabled else None
+    messaging_intents = (
+        MessagingIntents(
+            messaging_tools,
+            matrix_gateway.contacts.all,
+            voice_capture=voice_capture.take_last_turn,
+            playback_sample_rate=PIPELINE_AUDIO_OUT_SAMPLE_RATE,
+        )
+        if messaging_enabled and intent_engine_config.enabled
+        else None
+    )
     intent_engine = build_intent_engine(
         intent_engine_config,
         language=fixed_session_language,
@@ -622,18 +637,25 @@ async def bot(runner_args: RunnerArguments) -> None:
         recorder=recorder,
         learned=learned_intents,
         # The messaging dialog runs in the engine (deterministic); the LLM tools stay for other phrasings.
-        server=MessagingIntents(
-            messaging_tools,
-            matrix_gateway.contacts.all,
-            voice_capture=voice_capture.take_last_turn,
-            playback_sample_rate=PIPELINE_AUDIO_OUT_SAMPLE_RATE,
-        )
-        if messaging_enabled
-        else None,
+        server=messaging_intents,
     )
+    # Messages that arrive during the session are announced through the engine's dialog.
+    messaging_announcer = (
+        MessagingAnnouncer(
+            gateway=matrix_gateway,
+            tools=messaging_tools,
+            intents=messaging_intents,
+            engine=intent_engine,
+            activity=conversation_activity,
+        )
+        if messaging_intents and intent_engine
+        else None
+    )
+    if messaging_enabled and messaging_announcer is None:
+        logger.info("Matrix: new messages are not announced without the intent engine")
 
     # The capture sits right before the engine, which is the only one to use it.
-    engine_processors = [p for p in (voice_capture, intent_engine) if p] if intent_engine else []
+    engine_processors = [p for p in (messaging_announcer, voice_capture, intent_engine) if p] if intent_engine else []
 
     async def send_rtvi_message(message) -> None:
         await task.rtvi.push_transport_message(message)
@@ -780,6 +802,8 @@ async def bot(runner_args: RunnerArguments) -> None:
         else:
             for audio_processor in audio_processors:
                 await audio_processor.start_recording()
+        if messaging_announcer:
+            await messaging_announcer.announce_waiting(welcome=welcome_enabled)
 
     register_session_start_handlers(
         transport=transport,
@@ -840,5 +864,7 @@ async def bot(runner_args: RunnerArguments) -> None:
         await runner.run()
         end_reason = "completed"
     finally:
+        if messaging_announcer:
+            await messaging_announcer.close()
         if recorder:
             await recorder.close(end_reason)

@@ -7,8 +7,8 @@ who talk with the agent can then ask it whether they have new messages, have
 them read aloud or played, and dictate or record replies to the contacts you
 configure.
 
-Voice messages work only in the [voice dialog](#use-the-voice-dialog) of the
-intent engine. Refer to [Limitations](#limitations) before you enable
+Voice messages and the announcement of new messages work only in the
+[voice dialog](#use-the-voice-dialog) of the intent engine. Refer to [Limitations](#limitations) before you enable
 messaging.
 
 ## How It Works
@@ -329,6 +329,54 @@ person known for sure, only the person who dictated a message can confirm it,
 and a guest's message is sent without a name. A message that is being sent
 when you interrupt the agent is still sent.
 
+### New Message Announcements
+
+The voice dialog announces unread messages when a session starts, and new
+messages when a contact writes while the session runs. It speaks only after
+nobody talks. A yes reads the messages, the same way as after a check. The
+following English exchange starts when a message arrives during a
+conversation:
+
+```text
+Agent: You just got a new message from Bob. Shall I read it?
+You: Yes.
+Agent: At 18:05, Bob wrote: Are you coming tonight? Do you want to reply to Bob?
+```
+
+In French, the agent says "Tu viens de recevoir un nouveau message de Bob. Je
+te le lis ?" Announcements follow these rules:
+
+- **Waiting messages.** When the session starts, the agent announces the
+  unread messages that are already waiting, after the welcome message. When
+  the welcome message is off, it announces them as soon as the conversation is
+  idle. For example, it says "You have 2 unread messages from Bob. Shall I
+  read them?" or "Tu as 2 messages non lus de Bob. Je te les lis ?"
+- **Once per session.** The agent announces each message once per session. It
+  skips a message that somebody read in the meantime, in this session or
+  another one. A message that you leave unread is announced again in the next
+  session.
+- **Grouped arrivals.** Messages that arrive close together are announced
+  together. When older messages from the same senders are still unread, the
+  agent also says how many a yes reads, for example "You just got a new
+  message from Bob, and have 3 unread."
+- **Heard once.** When you speak over an announcement before it ends, the
+  agent answers you and says the announcement again at the next pause.
+- **Owned contacts.** A message from a contact with an `owner` waits until that
+  person is known for sure: picked in **Who's talking**, or recognized by the
+  voice ID at a trusted tier. The agent then names the person, for example
+  "Alice, you just got a new message from Bob."
+- **No interruptions.** The agent waits while you or the agent speak, while a
+  reply is pending, and while a messaging question is open, such as a draft
+  read-back, a dictation, or a recording. The face ID greeting and the
+  announcements wait for each other, so they never talk at the same time.
+- **No second ask.** Answer "non" ("no") to leave the messages unread. The
+  agent does not repeat the announcement question, so any other answer is an
+  ordinary turn.
+
+Without the intent engine, the agent does not announce new messages, and the
+server logs `Matrix: new messages are not announced without the intent engine`.
+Ask "Do I have new messages?" instead.
+
 ### Customize the Sentences
 
 The sentences and the spoken replies are in
@@ -347,6 +395,7 @@ defines the following intents:
   recording that waits for confirmation.
 
 The `responses.intents.Messaging` section holds the replies as Jinja templates.
+The `announce` key holds the announcement of waiting and new messages.
 Keep every response key when you edit a file. A missing reply makes the turn
 fall through to the LLM. Restart the server after you change a file.
 
@@ -379,6 +428,8 @@ This first version has the following limitations:
 - **Voice messages need the voice dialog.** Only the intent engine plays and
   records voice messages, in French and English. The LLM tools handle text
   messages only.
+- **Announcements need the voice dialog.** Only the intent engine announces
+  unread and new messages, in French and English.
 - **One turn per recording.** A voice message is the audio of one user turn.
   When you pause long enough for turn detection to end the turn, the
   recording stops there.
@@ -420,6 +471,7 @@ The following table lists common symptoms and checks:
 | The agent says a message was sent, but it never arrives | Look for a `function_result` event of `confirm_send_message` with status `sent` in the turn. Without one, the LLM answered without sending. Turn on the voice dialog, and add the phrasing you used to the `messaging.yaml` files. |
 | The LLM answers messaging requests instead of the voice dialog | Confirm that `INTENT_ENGINE_ENABLED=true` is set, that the session language is French or English, and that the `Intent engine enabled` log line shows `server=messaging`. With a custom `INTENT_ENGINE_SENTENCES_DIR`, copy the `messaging.yaml` files there. |
 | A dictated message is cut off | Turn detection split the message into two turns, and you continued after the read-back ended. Refer to [Limitations](#limitations). |
+| The agent does not announce new messages | Confirm the intent engine settings in the row about the LLM above. Look for `Matrix: announced new messages from` in the server log. A message from a contact with an `owner` waits until that person is known for sure. The agent waits while anybody speaks or a messaging question is open. |
 | The agent says it cannot play a voice message | Look for `Matrix: cannot play voice message` in the server log. The download failed, the file is larger than 10 MB, or FFmpeg cannot decode it. |
 | A voice message request goes to the LLM | Voice messages need the voice dialog. Confirm the intent engine settings in the row about the LLM above. |
 | A recorded voice message is cut off | You paused long enough to end the turn. Record the message again without long pauses. |

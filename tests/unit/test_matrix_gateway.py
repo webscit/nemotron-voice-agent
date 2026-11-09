@@ -246,3 +246,27 @@ def test_mark_read_sends_one_receipt_per_room(gateway, client):
     assert client.receipts == [("!dm:matrix.org", "$2")]
     assert gateway.inbox.messages([BOB]) == []
     assert [m.event_id for m in gateway.inbox.messages([BOB], unread_only=False)] == ["$1", "$2"]
+
+
+def test_listeners_hear_new_contact_messages_once(gateway, client):
+    gateway.inbox.put(SYNC_TOKEN_KEY, "s1")
+    client.add_room("!dm:matrix.org")
+    heard = []
+
+    def broken(message, contact):
+        raise RuntimeError("dead session")
+
+    gateway.add_listener(broken)
+    remove = gateway.add_listener(lambda message, contact: heard.append((message.event_id, contact.name)))
+    batch = [_message("$1", BOB, "hello"), _message("$2", "@stranger:matrix.org", "spam")]
+    client.syncs.append(sync_response("s2", join={"!dm:matrix.org": batch}))
+    asyncio.run(gateway.sync_once())
+    # A failing listener does not stop the others; a message stored again is not news.
+    client.syncs.append(sync_response("s3", join={"!dm:matrix.org": [_message("$1", BOB, "hello")]}))
+    asyncio.run(gateway.sync_once())
+    assert heard == [("$1", "Bob")]
+    remove()
+    remove()
+    client.syncs.append(sync_response("s4", join={"!dm:matrix.org": [_message("$3", BOB, "again")]}))
+    asyncio.run(gateway.sync_once())
+    assert heard == [("$1", "Bob")]
