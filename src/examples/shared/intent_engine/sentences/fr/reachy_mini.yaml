@@ -68,11 +68,17 @@ intents:
           - "<montre>[-moi] que tu es {emotion}"
       - sentences:
           - "<montre>[-moi] une [autre ]émotion"
+  # Said as the whole turn, it always wins: it ends a pending question, a dictated
+  # message, a voice recording, or a reply in progress (escape hatch). Keep these
+  # imperatives addressed to the robot, so they are never a message to dictate
+  # (no "bonne nuit").
   ReachyGoToSleep:
     data:
       - sentences:
-          - "(va|aller|vas) (dormir|te coucher|se coucher|au lit)"
-          - "(endors-toi|dors)"
+          - "(va|aller|vas|allez) (dormir|te coucher|se coucher|au lit|faire dodo)"
+          - "(endors-toi|endors toi|dors|rendors-toi|rendors toi)"
+          - "(mets-toi|mets toi|passe) en [mode ]veille"
+          - "c'est l'heure (de dormir|d'aller (dormir|te coucher|au lit))"
   ReachySweepLook:
     data:
       - sentences:

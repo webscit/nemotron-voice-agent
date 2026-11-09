@@ -301,6 +301,8 @@ The dialog works as follows:
 - **Dictate.** After "Qu'est-ce que je dis à Bob ?" ("What should I tell
   Bob?"), the agent takes your next turn as the message, word for word, even
   when it sounds like a command. Say "annule" ("cancel") to stop instead.
+  "Va dormir" ("go to sleep") said alone also stops the dialog, and the robot
+  goes to sleep.
 - **Confirm.** The agent reads the message back and asks "Je l'envoie ?"
   ("Shall I send it?"). Answer "oui" ("yes") or "je confirme" ("I confirm")
   to send it, "non" ("no") to drop it, "change le message" ("change it") to
@@ -320,6 +322,13 @@ joins a short answer to your next sentence. When the turn holds both "oui" and
 "non", the agent asks again. A later "change le message" wins over a leading
 "non". While the agent waits for a dictated message, every word is part of the
 message, including a leading "non".
+
+At any step, a turn that is only "va dormir" ("go to sleep") ends the dialog.
+The agent drops the question and the draft that waits for confirmation, and
+the robot goes to sleep. The robot must declare the `go_to_sleep` tool. A
+message that mentions sleep, such as "Dis à Bob que je vais dormir," is still
+a message. Refer to
+[Go to Sleep Takes Precedence](configure-intent-engine.md#go-to-sleep-takes-precedence).
 
 ### Voice Messages
 
@@ -366,7 +375,8 @@ Voice messages follow these rules:
   you start speaking until the turn ends. When the recording is shorter than
   half a second, the agent asks you again. It does not send a recording longer
   than 2 minutes.
-  Say "annule" ("cancel") to stop instead.
+  Say "annule" ("cancel") to stop instead. "Va dormir" ("go to sleep") said
+  alone stops the dialog too and is not recorded.
 - **Confirming.** Answer "oui" ("yes") to send the recording, "non" ("no") to
   drop it, "réécoute" ("play it") to hear it first, or "recommence" ("start
   over") to record it again.

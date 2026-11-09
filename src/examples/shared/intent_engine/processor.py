@@ -18,6 +18,11 @@ context frame for a finished user turn, the processor matches the transcript:
 
 The processor always waits for the target's answer before speaking. If the
 target cannot answer, the swallowed frame is released to the LLM.
+
+A turn that is, as a whole, an escape intent ("go to sleep") takes precedence
+over everything: it is matched before any pending question, so it is never taken
+as dictated words. The pending question, the server target's dialog (a message
+draft or a voice recording), and the reply in progress are dropped first.
 """
 
 from __future__ import annotations
@@ -84,6 +89,8 @@ _SYNC_RETRY_SECS = 30.0
 _MAX_ANSWER_WORDS = 5
 # Audio clips are pushed in frames of this length (the output transport re-chunks them).
 _CLIP_FRAME_SECS = 0.5
+# Intents that end whatever is going on when they are the whole user turn (the escape hatch).
+ESCAPE_INTENTS = frozenset({"ReachyGoToSleep"})
 
 
 class TurnTelemetry(Protocol):
@@ -133,6 +140,10 @@ class IntentEngineProcessor(FrameProcessor):
         # Whether the bot finished speaking since the question was asked.
         self._question_heard = False
         self._turn_task: asyncio.Task | None = None
+        # A reply (the LLM's or the engine's) may still be generated or spoken: no
+        # interruption or end of bot speech went by since it was released.
+        self._reply_pending = False
+        self._escape_intents = ESCAPE_INTENTS & set(matcher.custom_intent_names)
         self._sync_task: asyncio.Task | None = None
         self._last_sync_attempt = 0.0
 
@@ -148,16 +159,16 @@ class IntentEngineProcessor(FrameProcessor):
             self._dialog = replace(self._dialog, interrupted=True)
         if isinstance(frame, BotStoppedSpeakingFrame):
             self._question_heard = True
+        if isinstance(frame, (InterruptionFrame, BotStoppedSpeakingFrame)):
+            self._reply_pending = False
         if isinstance(frame, (InterruptionFrame, EndFrame, CancelFrame)):
             await self._cancel_turn()
         elif isinstance(frame, FunctionCallResultFrame) and self._client_tools:
             self._client_tools.observe_result(frame, direction)
-        elif (
-            isinstance(frame, LLMContextFrame)
-            and direction == FrameDirection.DOWNSTREAM
-            and self._handle_user_turn(frame)
-        ):
-            return
+        elif isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
+            if await self._escape(frame) or self._handle_user_turn(frame):
+                return
+            self._reply_pending = True
         await self.push_frame(frame, direction)
 
     async def cleanup(self) -> None:
@@ -207,6 +218,43 @@ class IntentEngineProcessor(FrameProcessor):
             logger.info(f"Intent engine: synced {len(lists['name'].values)} Home Assistant entity names")
         except TargetUnavailable as exc:
             logger.warning(f"Intent engine: Home Assistant sync failed ({exc}); its intents stay inactive")
+
+    # ------------------------------------------------------------ escape hatch
+    async def _escape(self, frame: LLMContextFrame) -> bool:
+        """Run an escape intent said as the whole turn, after dropping everything in progress.
+
+        Return True when the engine takes the turn over. When the intent goes to
+        the LLM (deferred or not ready), what was in progress is dropped all the
+        same and the turn is then matched as usual.
+        """
+        if self._config.dry_run or not self._escape_intents:
+            return False
+        text = self._user_text()
+        if not strip_tags(text):
+            return False
+        extra = self._server.slot_lists() if self._server else None
+        # No dialog context: the turn is matched as if no question were pending.
+        match = self._matcher.match(text, None, extra_slot_lists=extra)
+        if match is None or match.name not in self._escape_intents:
+            return False
+        logger.info(f"Intent engine: '{text}' is {match.name}; dropping what was in progress")
+        await self._cancel_turn()
+        self._dialog = None
+        reset_dialog = getattr(self._server, "reset_dialog", None)
+        if reset_dialog is not None:
+            reset_dialog()
+        if self._reply_pending:
+            # An LLM answer or a reply may still be generated or spoken: stop it as the user talking would.
+            self._reply_pending = False
+            await self.broadcast_interruption()
+        target, _ = self._route(match)
+        if target is None:
+            return False
+        request = IntentRequest(
+            name=match.name, data=match.slots, language=self._language, response_key=match.response_key
+        )
+        self._turn_task = self.create_task(self._run_turn(frame, match, target, request))
+        return True
 
     # ------------------------------------------------------------- user turns
     def _user_text(self) -> str:
@@ -357,6 +405,7 @@ class IntentEngineProcessor(FrameProcessor):
 
     async def _speak(self, speech: str) -> None:
         """Speak ``speech`` the way an LLM reply would be spoken."""
+        self._reply_pending = True
         start = LLMFullResponseStartFrame()
         start.metadata[INTENT_REPLY_METADATA] = True
         await self.push_frame(start)
@@ -380,12 +429,14 @@ class IntentEngineProcessor(FrameProcessor):
             logger.warning(f"Intent engine: {match.name} via {target.name} failed ({detail}); using the LLM")
             self._record("llm", intent=match.name, target=target.name, reason="target_unavailable")
             if not getattr(exc, "llm_notified", False):
+                self._reply_pending = True
                 await self.push_frame(frame)
             return
         except Exception as exc:
             # Never leave a turn unanswered because of an engine bug or a bad template.
             logger.opt(exception=exc).error(f"Intent engine: {match.name} via {target.name} crashed; using the LLM")
             self._record("llm", intent=match.name, target=target.name, reason="engine_error")
+            self._reply_pending = True
             await self.push_frame(frame)
             return
         self._metric(METRIC_TARGET_SECS, time.perf_counter() - started)
