@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SQLite inbox: received messages, the DM room of each contact and the sync token."""
+"""SQLite inbox: received messages, the DM room of each contact and the sync token.
+
+Besides text and voice messages, the inbox keeps a placeholder for the media a
+contact sends (photo, file, video, location, sticker): its caption and file name,
+never the media itself. Edits replace the stored text, redactions delete the
+message, and a reply remembers a short quote of the message it answers. The
+agent's own recent messages are kept too (``sent``), to quote them when a
+contact replies to one.
+"""
 
 from __future__ import annotations
 
@@ -29,18 +37,44 @@ CREATE TABLE IF NOT EXISTS messages (
     duration_ms INTEGER,
     media_key TEXT,
     transcript TEXT,
+    filename TEXT,
+    reply_to TEXT,
+    reply_quote TEXT,
+    reply_mine INTEGER,
     sent_at REAL NOT NULL,
     received_at REAL NOT NULL,
     read_at REAL
 );
 CREATE INDEX IF NOT EXISTS messages_sender ON messages (sender, sent_at);
+CREATE TABLE IF NOT EXISTS sent (
+    event_id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    sent_at REAL NOT NULL
+);
 """
 # Columns added after the first release: (name, SQL type), added to older databases.
-_ADDED_COLUMNS = (("media_key", "TEXT"), ("transcript", "TEXT"))
+_ADDED_COLUMNS = (
+    ("media_key", "TEXT"),
+    ("transcript", "TEXT"),
+    ("filename", "TEXT"),
+    ("reply_to", "TEXT"),
+    ("reply_quote", "TEXT"),
+    ("reply_mine", "INTEGER"),
+)
+# The agent's own messages kept to quote them in replies (the latest ones).
+MAX_SENT = 500
 
 SYNC_TOKEN_KEY = "sync_token"
 KIND_TEXT = "text"
 KIND_AUDIO = "audio"
+# Media that is only announced, never downloaded: ``body`` is its caption ("" without one).
+KIND_IMAGE = "image"
+KIND_FILE = "file"
+KIND_VIDEO = "video"
+KIND_LOCATION = "location"
+KIND_STICKER = "sticker"
+MEDIA_KINDS = frozenset({KIND_IMAGE, KIND_FILE, KIND_VIDEO, KIND_LOCATION, KIND_STICKER})
 
 
 @dataclass(frozen=True)
@@ -61,6 +95,13 @@ class InboxMessage:
     media_key: str | None = None
     # What the ASR heard in a voice message ("" when it heard nothing), once transcribed.
     transcript: str | None = None
+    # File name of an attachment (a file, image or video), when the sender gave one.
+    filename: str | None = None
+    # A reply: the event it answers, a short quote of that message (None when unknown),
+    # and whether that message was the agent's own.
+    reply_to: str | None = None
+    reply_quote: str | None = None
+    reply_mine: bool = False
 
 
 class Inbox:
@@ -117,7 +158,8 @@ class Inbox:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "INSERT OR IGNORE INTO messages (event_id, room_id, sender, kind, body, media_url, mimetype, "
-                "duration_ms, media_key, sent_at, received_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "duration_ms, media_key, filename, reply_to, reply_quote, reply_mine, sent_at, received_at, read_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     message.event_id,
                     message.room_id,
@@ -128,6 +170,10 @@ class Inbox:
                     message.mimetype,
                     message.duration_ms,
                     message.media_key,
+                    message.filename,
+                    message.reply_to,
+                    message.reply_quote,
+                    int(message.reply_mine),
                     message.sent_at,
                     time.time(),
                     message.read_at,
@@ -179,6 +225,51 @@ class Inbox:
             ).fetchall()
         return {row["event_id"] for row in rows}
 
+    def message(self, event_id: str) -> InboxMessage | None:
+        """The stored message ``event_id``, or None."""
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM messages WHERE event_id = ?", (event_id,)).fetchone()
+        return _message(row) if row else None
+
+    def edit(self, event_id: str, room_id: str, sender: str, body: str, filename: str | None = None) -> bool:
+        """Replace the text (or caption) of a stored message; False when there is no such message.
+
+        Only the message's sender may edit it, in the room it was sent to. Its read state is kept.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE messages SET body = ?, filename = COALESCE(?, filename) "
+                "WHERE event_id = ? AND room_id = ? AND sender = ?",
+                (body, filename, event_id, room_id, sender),
+            )
+        return cursor.rowcount > 0
+
+    def remove(self, event_id: str, room_id: str, sender: str) -> bool:
+        """Delete a stored message its sender redacted; False when there is no such message."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM messages WHERE event_id = ? AND room_id = ? AND sender = ?", (event_id, room_id, sender)
+            )
+        return cursor.rowcount > 0
+
+    def add_sent(self, event_id: str, room_id: str, body: str) -> None:
+        """Remember a message the agent sent (the latest ``MAX_SENT`` are kept)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO sent (event_id, room_id, body, sent_at) VALUES (?, ?, ?, ?)",
+                (event_id, room_id, body, time.time()),
+            )
+            self._conn.execute(
+                "DELETE FROM sent WHERE event_id NOT IN (SELECT event_id FROM sent ORDER BY sent_at DESC LIMIT ?)",
+                (MAX_SENT,),
+            )
+
+    def sent_body(self, event_id: str) -> str | None:
+        """The text of a message the agent sent, or None when it is not kept."""
+        with self._lock:
+            row = self._conn.execute("SELECT body FROM sent WHERE event_id = ?", (event_id,)).fetchone()
+        return row["body"] if row else None
+
     def set_transcript(self, event_id: str, transcript: str) -> None:
         """Store what the ASR heard in a voice message."""
         with self._lock, self._conn:
@@ -210,4 +301,8 @@ def _message(row: sqlite3.Row) -> InboxMessage:
         read_at=row["read_at"],
         media_key=row["media_key"],
         transcript=row["transcript"],
+        filename=row["filename"],
+        reply_to=row["reply_to"],
+        reply_quote=row["reply_quote"],
+        reply_mine=bool(row["reply_mine"]),
     )

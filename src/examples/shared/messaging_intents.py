@@ -62,7 +62,7 @@ from examples.shared.intent_engine.targets import (
 from examples.shared.messaging_tools import CONFIRM_TOOL_NAME, SEND_TOOL_NAME, MessagingTools, VoiceRecording
 from messaging.contacts import Contact
 from messaging.gateway import MatrixError
-from messaging.inbox import KIND_AUDIO, InboxMessage
+from messaging.inbox import KIND_AUDIO, KIND_FILE, MEDIA_KINDS, InboxMessage
 
 CHECK_INTENT = "MessagingCheck"
 READ_INTENT = "MessagingRead"
@@ -139,10 +139,18 @@ def message_slots(
     now = now or datetime.now()
     return {
         "sender": contact.name,
-        "text": "" if message.kind == KIND_AUDIO else message.body,
+        "text": "" if message.kind == KIND_AUDIO or message.kind in MEDIA_KINDS else message.body,
         # What the ASR heard in a voice message, said when it cannot be played.
         "transcript": (message.transcript or "") if message.kind == KIND_AUDIO else "",
         "voice": message.kind == KIND_AUDIO,
+        # A photo, file, video, location or sticker: only its caption (and a file's name) is said.
+        "media": message.kind if message.kind in MEDIA_KINDS else "",
+        "caption": message.body if message.kind in MEDIA_KINDS else "",
+        "filename": (message.filename or "") if message.kind == KIND_FILE else "",
+        # A reply: a short quote of the message it answers ("" when unknown), and whether it was the user's.
+        "replied": bool(message.reply_to),
+        "reply_quote": message.reply_quote or "",
+        "reply_mine": message.reply_mine,
         "play": play,
         "seconds": max(1, round(message.duration_ms / 1000)) if message.duration_ms else 0,
         "time": f"{sent:%H:%M}",

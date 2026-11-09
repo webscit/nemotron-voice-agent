@@ -15,6 +15,12 @@ nio's olm machine (vodozemac): the agent's device keys live in
 the agent creates are encrypted, and voice messages are encrypted attachments.
 Messages are encrypted for every device of a contact (trust on first use); a
 device that appears later is logged. Unencrypted rooms keep working.
+
+Photos, files, videos, locations and stickers are stored as placeholders (their
+caption or file name; the media is never downloaded). An edit replaces the text
+of the message it edits and a redaction deletes it, without counting as a new
+message; a reply loses its quoted fallback and keeps a short quote of the message
+it answers. Reactions are ignored.
 """
 
 from __future__ import annotations
@@ -24,9 +30,11 @@ import contextlib
 import fcntl
 import io
 import json
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import IO, Any
 
 from loguru import logger
@@ -55,7 +63,18 @@ from nio.exceptions import EncryptionError
 
 from messaging.config import MatrixConfig
 from messaging.contacts import Contact, ContactBook
-from messaging.inbox import KIND_AUDIO, KIND_TEXT, SYNC_TOKEN_KEY, Inbox, InboxMessage
+from messaging.inbox import (
+    KIND_AUDIO,
+    KIND_FILE,
+    KIND_IMAGE,
+    KIND_LOCATION,
+    KIND_STICKER,
+    KIND_TEXT,
+    KIND_VIDEO,
+    SYNC_TOKEN_KEY,
+    Inbox,
+    InboxMessage,
+)
 from messaging.voice import OGG_MIMETYPE
 
 SYNC_TIMEOUT_MS = 30_000
@@ -84,6 +103,15 @@ PENDING_DECRYPT_SECS = 24 * 3600.0
 MAX_PENDING_DECRYPT = 200
 # Devices of a contact seen so far (inbox key-value store), to log the new ones.
 DEVICES_KEY = "devices:{}"
+# Media placeholders by msgtype (stickers are their own event type).
+MEDIA_MSGTYPES = {"m.image": KIND_IMAGE, "m.file": KIND_FILE, "m.video": KIND_VIDEO, "m.location": KIND_LOCATION}
+STICKER_EVENT = "m.sticker"
+REDACTION_EVENT = "m.room.redaction"
+# Text description of a location (MSC3488), better than the body some clients fill with a geo: URI.
+LOCATION_DETAILS = "org.matrix.msc3488.location"
+# A reply quotes this many characters of the message it answers, at most.
+MAX_QUOTE_CHARS = 80
+_QUOTED_SENDER = re.compile(r"^\*?\s*<([^>]*)>\s*")
 
 
 # Called with each new message a contact sent, right after it was stored.
@@ -94,13 +122,19 @@ class MatrixError(RuntimeError):
     """A Matrix request failed."""
 
 
-def media_key(event: RoomEncryptedAudio) -> str | None:
-    """The decryption key of an encrypted attachment, as stored in the inbox (JSON)."""
-    key = (event.key or {}).get("k")
-    sha256 = (event.hashes or {}).get("sha256")
-    if not key or not sha256 or not event.iv:
+def media_key(event: Any) -> str | None:
+    """The decryption key of an encrypted attachment event, as stored in the inbox (JSON)."""
+    return file_media_key({"key": event.key, "hashes": event.hashes, "iv": event.iv})
+
+
+def file_media_key(file: dict[str, Any]) -> str | None:
+    """The inbox form (JSON) of the decryption key in an attachment's ``file`` object, or None."""
+    key = (file.get("key") or {}).get("k")
+    sha256 = (file.get("hashes") or {}).get("sha256")
+    iv = file.get("iv")
+    if not key or not sha256 or not iv:
         return None
-    return json.dumps({"k": key, "iv": event.iv, "sha256": sha256})
+    return json.dumps({"k": key, "iv": iv, "sha256": sha256})
 
 
 def decrypt_media(data: bytes, key: str) -> bytes:
@@ -112,17 +146,191 @@ def decrypt_media(data: bytes, key: str) -> bytes:
         raise MatrixError(f"cannot decrypt the attachment: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class MessageEdit:
+    """A contact replaced the text (or the caption) of an earlier message."""
+
+    target: str
+    body: str
+    filename: str | None = None
+
+
+@dataclass(frozen=True)
+class MessageRedaction:
+    """A contact deleted an earlier message."""
+
+    target: str
+
+
+def _source(event: Any) -> dict[str, Any]:
+    source = getattr(event, "source", None)
+    return source if isinstance(source, dict) else {}
+
+
+def _content(event: Any) -> dict[str, Any]:
+    content = _source(event).get("content")
+    return content if isinstance(content, dict) else {}
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def event_sender(event: Any) -> str | None:
+    """The sender of a timeline event (also of events nio could not parse)."""
+    return getattr(event, "sender", None) or _source(event).get("sender")
+
+
+def _relation(content: dict[str, Any]) -> dict[str, Any]:
+    relation = content.get("m.relates_to")
+    return relation if isinstance(relation, dict) else {}
+
+
+def _reply_target(content: dict[str, Any]) -> str | None:
+    """The event a message replies to, or None (a thread's fallback reply is not a reply)."""
+    relation = _relation(content)
+    if relation.get("is_falling_back"):
+        return None
+    target = (relation.get("m.in_reply_to") or {}).get("event_id")
+    return target if isinstance(target, str) and target else None
+
+
+def split_reply_fallback(body: str) -> tuple[str, str | None, str | None]:
+    """A reply's body without its quoted fallback: (reply, quoted text, quoted sender).
+
+    The fallback is the leading ``> `` lines (``> <@bob:server> original``) and the blank line after them.
+    The HTML fallback (``<mx-reply>`` in ``formatted_body``) is never stored, so it needs no stripping.
+    """
+    lines = body.split("\n")
+    quoted = []
+    while lines and lines[0].startswith(">"):
+        quoted.append(lines.pop(0)[1:].removeprefix(" "))
+    if not quoted:
+        return body, None, None
+    if lines and not lines[0].strip():
+        lines.pop(0)
+    sender = _QUOTED_SENDER.match(quoted[0])
+    quoted[0] = _QUOTED_SENDER.sub("", quoted[0])
+    quote = " ".join(" ".join(quoted).split())
+    return "\n".join(lines), quote or None, sender.group(1) if sender else None
+
+
+def short_quote(text: str) -> str:
+    """The start of a message, cut at a word, as a reply quotes it."""
+    text = " ".join(text.split())
+    if len(text) <= MAX_QUOTE_CHARS:
+        return text
+    cut = text[:MAX_QUOTE_CHARS].rsplit(" ", 1)[0] or text[:MAX_QUOTE_CHARS]
+    return cut.rstrip(",;:") + "…"
+
+
+def _caption(content: dict[str, Any]) -> tuple[str, str | None]:
+    """(caption, file name) of an attachment: with a ``filename``, a different ``body`` is the caption."""
+    body = _text(content.get("body")).strip()
+    filename = _text(content.get("filename")).strip() or None
+    if filename:
+        return ("" if body == filename else body), filename
+    return "", body or None
+
+
+def _location_caption(content: dict[str, Any]) -> str:
+    """What a shared location says about itself (never its geo: URI)."""
+    details = content.get(LOCATION_DETAILS)
+    description = _text(details.get("description")).strip() if isinstance(details, dict) else ""
+    if description:
+        return description
+    body = _text(content.get("body")).strip()
+    return "" if "geo:" in body else body
+
+
+def _placeholder(event: Any, room_id: str, sent_at: float) -> InboxMessage | None:
+    """The inbox placeholder of a photo, file, video, location or sticker (plain or encrypted)."""
+    source = _source(event)
+    content = _content(event)
+    if source.get("type") == STICKER_EVENT:
+        kind = KIND_STICKER
+    elif source.get("type") == "m.room.message" and content.get("msgtype") in MEDIA_MSGTYPES:
+        kind = MEDIA_MSGTYPES[content["msgtype"]]
+    else:
+        return None
+    event_id = _text(source.get("event_id")) or _text(getattr(event, "event_id", None))
+    sender = event_sender(event)
+    if not event_id or not sender:
+        return None
+    if kind == KIND_LOCATION:
+        caption, filename = _location_caption(content), None
+    elif kind == KIND_STICKER:
+        caption, filename = _text(content.get("body")).strip(), None
+    else:
+        caption, filename = _caption(content)
+    file = content.get("file") if isinstance(content.get("file"), dict) else {}
+    info = content.get("info") if isinstance(content.get("info"), dict) else {}
+    return InboxMessage(
+        event_id=event_id,
+        room_id=room_id,
+        sender=sender,
+        kind=kind,
+        body=caption,
+        sent_at=sent_at,
+        # Kept for later; the media itself is never downloaded.
+        media_url=_text(content.get("url") or file.get("url")) or None,
+        mimetype=_text(info.get("mimetype") or file.get("mimetype")) or None,
+        media_key=file_media_key(file) if file else None,
+        filename=filename,
+    )
+
+
+def inbox_change(event: Any) -> MessageEdit | MessageRedaction | None:
+    """The edit or the redaction of an earlier message that a timeline event is, or None."""
+    source = _source(event)
+    content = _content(event)
+    if source.get("type") == REDACTION_EVENT:
+        # The target is at the top level before room version 11, in the content since.
+        target = getattr(event, "redacts", None) or source.get("redacts") or content.get("redacts")
+        return MessageRedaction(target) if isinstance(target, str) and target else None
+    if source.get("type") != "m.room.message":
+        return None
+    relation = _relation(content)
+    target = relation.get("event_id")
+    if relation.get("rel_type") != "m.replace" or not isinstance(target, str) or not target:
+        return None
+    new = content.get("m.new_content")
+    if not isinstance(new, dict) or not isinstance(new.get("body"), str):
+        return None
+    if new.get("msgtype") == "m.location":
+        return MessageEdit(target, _location_caption(new))
+    if new.get("msgtype") in MEDIA_MSGTYPES:
+        caption, filename = _caption(new)
+        return MessageEdit(target, caption, filename)
+    return MessageEdit(target, new["body"])
+
+
 def inbox_message(room_id: str, event: Any) -> InboxMessage | None:
-    """The inbox form of a timeline event, or None when it is not a text or audio message."""
-    sent_at = (getattr(event, "server_timestamp", 0) or 0) / 1000
+    """The inbox form of a timeline event, or None when it is not a message to store.
+
+    Edits and redactions are not messages (``inbox_change``); reactions are ignored.
+    """
+    source = _source(event)
+    sent_at = (getattr(event, "server_timestamp", 0) or source.get("origin_server_ts") or 0) / 1000
+    unsigned = source.get("unsigned")
+    if (isinstance(unsigned, dict) and unsigned.get("redacted_because")) or inbox_change(event) is not None:
+        return None
     if isinstance(event, RoomMessageText | RoomMessageEmote):
+        body, reply_to, quote, quoted_sender = event.body, _reply_target(_content(event)), None, None
+        if reply_to:
+            body, quote, quoted_sender = split_reply_fallback(body)
         return InboxMessage(
             event_id=event.event_id,
             room_id=room_id,
             sender=event.sender,
             kind=KIND_TEXT,
-            body=event.body,
+            body=body,
             sent_at=sent_at,
+            reply_to=reply_to,
+            reply_quote=short_quote(quote) if quote else None,
+            # In a direct chat, a quote of somebody else's message quotes the agent's; the gateway
+            # settles it from the messages it knows (``MatrixGateway._with_reply_quote``).
+            reply_mine=quoted_sender is not None and quoted_sender != event.sender,
         )
     if isinstance(event, RoomMessageAudio):
         info = (event.source.get("content") or {}).get("info") or {}
@@ -156,7 +364,7 @@ def inbox_message(room_id: str, event: Any) -> InboxMessage | None:
             duration_ms=int(duration) if isinstance(duration, int | float) else None,
             media_key=key,
         )
-    return None
+    return _placeholder(event, room_id, sent_at)
 
 
 def _inviter(own_user_id: str, invite_state: list[Any]) -> str | None:
@@ -431,23 +639,64 @@ class MatrixGateway:
         return room is None or room.member_count <= MAX_DM_MEMBERS
 
     async def _on_event(self, room_id: str, event: Any) -> None:
-        if getattr(event, "sender", None) == self.config.user_id:
+        sender = event_sender(event)
+        if sender == self.config.user_id:
             return
         if isinstance(event, MegolmEvent):
             if self.contacts.by_matrix_id(event.sender) is not None and self._is_direct(room_id):
                 await self._undecryptable(room_id, event)
             return
+        contact = self.contacts.by_matrix_id(sender) if sender else None
+        if contact is None or not self._is_direct(room_id):
+            return
+        change = inbox_change(event)
+        if change is not None:
+            # Not a new message: listeners are not told about it.
+            await self._apply_change(room_id, sender, contact, change)
+            return
         message = inbox_message(room_id, event)
         if message is None:
             return
-        contact = self.contacts.by_matrix_id(message.sender)
-        if contact is None or not self._is_direct(room_id):
-            return
+        if message.reply_to:
+            message = await self._with_reply_quote(message)
         if await asyncio.to_thread(self.inbox.add, message):
             # Replies go where the contact last wrote.
             await asyncio.to_thread(self.inbox.set_room, contact.matrix_id, room_id)
             logger.info(f"Matrix: new {message.kind} message from {contact.name}")
             self._notify(message, contact)
+
+    async def _apply_change(
+        self, room_id: str, sender: str, contact: Contact, change: MessageEdit | MessageRedaction
+    ) -> None:
+        """Edit or delete a stored message; a change to a message that is not stored is ignored."""
+        if isinstance(change, MessageEdit):
+            edit = (change.target, room_id, sender, change.body, change.filename)
+            done = await asyncio.to_thread(self.inbox.edit, *edit)
+            what = "edited"
+        else:
+            done = await asyncio.to_thread(self.inbox.remove, change.target, room_id, sender)
+            what = "deleted"
+        if done:
+            logger.info(f"Matrix: {contact.name} {what} a message")
+        else:
+            logger.debug(f"Matrix: {contact.name} {what} {change.target}, which is not in the inbox; ignored")
+
+    async def _with_reply_quote(self, message: InboxMessage) -> InboxMessage:
+        """A reply with the quote of the message it answers: the agent's own, a stored one, or its fallback."""
+        sent = await asyncio.to_thread(self.inbox.sent_body, message.reply_to)
+        if sent is not None:
+            return replace(message, reply_quote=short_quote(sent) or None, reply_mine=True)
+        original = await asyncio.to_thread(self.inbox.message, message.reply_to)
+        if original is not None and original.body:
+            return replace(message, reply_quote=short_quote(original.body), reply_mine=False)
+        return message
+
+    async def _remember_sent(self, room_id: str, event_id: str, body: str) -> None:
+        """Keep what the agent sent, to quote it when a contact replies to it."""
+        try:
+            await asyncio.to_thread(self.inbox.add_sent, event_id, room_id, body)
+        except Exception as exc:
+            logger.opt(exception=exc).debug("Matrix: could not keep a sent message")
 
     # ------------------------------------------------------------- sending
     async def _request(self, what: str, call) -> Any:
@@ -527,7 +776,9 @@ class MatrixGateway:
         async with _send_errors(contact):
             await self._wait_synced()
             room_id = await self._direct_room(contact)
-            return await self._send_message(contact, room_id, {"msgtype": "m.text", "body": text})
+            event_id = await self._send_message(contact, room_id, {"msgtype": "m.text", "body": text})
+        await self._remember_sent(room_id, event_id, text)
+        return event_id
 
     async def send_voice(
         self, contact: Contact, audio: bytes, *, duration_ms: int, waveform: list[int], body: str
@@ -562,7 +813,9 @@ class MatrixGateway:
                 content["file"] = {"url": response.content_uri, "mimetype": OGG_MIMETYPE, **(keys or {})}
             else:
                 content["url"] = response.content_uri
-            return await self._send_message(contact, room_id, content)
+            event_id = await self._send_message(contact, room_id, content)
+        await self._remember_sent(room_id, event_id, body)
+        return event_id
 
     async def download_media(self, message: InboxMessage) -> bytes:
         """The media of a received message, decrypted when it was sent encrypted."""

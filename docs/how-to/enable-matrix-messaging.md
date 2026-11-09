@@ -35,6 +35,22 @@ Messaging has a server part and a set of LLM tools:
   the audio through its own voice output, in place of speech. A voice message
   that you record is encoded as Ogg/Opus, uploaded, and sent as an Element voice
   message, with its duration and waveform.
+- **Photos, files, and other attachments.** The gateway stores a placeholder
+  for a photo, file, video, location, or sticker, with its caption or file
+  name. It never downloads the attachment. The agent says, for example, "Bob
+  sent you a photo: At the beach." It names a file, but not a photo or video
+  file, and it never reads a location's coordinates. The placeholder works the
+  same in plain and encrypted rooms.
+- **Edits, replies, and deletions.** When a contact edits a message, the
+  gateway replaces the stored text and keeps the message read or unread. When
+  a contact deletes a message, the gateway removes it from the inbox. Neither
+  counts as a new message, so the agent does not announce it. An edit or
+  deletion of a message that the inbox does not hold is ignored. A reply loses
+  the quoted text that some clients add, and the agent names the message it
+  answers, for example `Bob replied to your message "Are you coming?": Yes, at 8.`
+  When the agent does not know the original message, it says "replied to one
+  of your messages" or "replied to an earlier message." The gateway ignores
+  reactions.
 - **Transcripts.** The agent transcribes received voice messages with the ASR
   server, model, and language of the session. It sends the clip through the
   same Riva-compatible streaming API as the live pipeline, outside the
@@ -213,7 +229,7 @@ and adds the following server-side tools:
 | Tool | Behavior |
 | --- | --- |
 | `check_messages` | Counts unread messages per contact, without reading them |
-| `read_messages` | Returns up to five messages, oldest first, and marks them read. `contact` limits the result to one contact. `include_read` repeats the latest messages that you already heard. The LLM cannot play a voice message: it tells you to ask the voice dialog to play it. |
+| `read_messages` | Returns up to five messages, oldest first, and marks them read. `contact` limits the result to one contact. `include_read` repeats the latest messages that you already heard. The LLM cannot play a voice message: it tells you to ask the voice dialog to play it. An attachment comes back as `attachment`, with its type, caption, and file name, and the LLM cannot open it. A reply carries `in_reply_to`, with a short quote of the original message when the agent knows it. |
 | `send_message` | Prepares a draft for `contact` with `text`, up to 2,000 characters. It does not send anything. |
 | `confirm_send_message` | Sends the current draft |
 
@@ -508,6 +524,10 @@ The following safeguards apply:
   transcripts are message content, and `inbox.db` stores them like text
   messages. When session recording stores turn audio, it also stores what you
   said and what the agent played.
+- `inbox.db` stores the caption and file name of received attachments, not the
+  attachments. It also keeps the text of the last 500 messages that the agent
+  sent, to quote them when a contact replies. A message that its sender
+  deletes is removed from `inbox.db`.
 - The messaging tool calls and their results are not reported to the browser
   client. The client transcript still shows what the agent says aloud.
 - The messaging tools are disabled for a session when the client declares a
@@ -526,6 +546,9 @@ This first version has the following limitations:
   Riva-compatible ASR of the session.
 - **Announcements need the voice dialog.** Only the intent engine announces
   unread and new messages, in French and English.
+- **Attachments are not opened.** The agent says that a contact sent a photo,
+  file, video, location, or sticker, but it cannot show, describe, or open it.
+  Polls and other event types are ignored.
 - **One turn per recording.** A voice message is the audio of one user turn.
   When you pause long enough for turn detection to end the turn, the
   recording stops there.
