@@ -46,7 +46,7 @@ from pipecat.frames.frames import (
 from examples.shared.person_memory import PersonContext
 from messaging.contacts import Contact, match_contacts
 from messaging.gateway import MatrixError, MatrixGateway
-from messaging.inbox import KIND_AUDIO, InboxMessage
+from messaging.inbox import KIND_AUDIO, KIND_FILE, MEDIA_KINDS, InboxMessage
 from messaging.voice import VoiceCodecError, decode_audio, encode_voice, pcm_duration_ms, waveform
 
 if TYPE_CHECKING:
@@ -73,6 +73,8 @@ TRANSCRIBE_SAMPLE_RATE = 16000
 TRANSCRIBE_TIMEOUT_SECS = 20.0
 # Downloaded media kept for playing and transcribing the same message.
 MEDIA_CACHE_SIZE = 4
+# How a received photo, file, video, location or sticker is named to the LLM.
+MEDIA_NAMES = {"image": "photo", "file": "file", "video": "video", "location": "location", "sticker": "sticker"}
 
 # Transcribes 16-bit mono PCM at a sample rate: what the ASR heard.
 Transcriber = Callable[[bytes, int], Awaitable[str]]
@@ -168,8 +170,21 @@ def describe_message(message: InboxMessage, contact_name: str, transcript: str |
             )
         else:
             result["note"] = f"This is a voice message, which you cannot play yourself. {play}"
+    elif message.kind in MEDIA_KINDS:
+        attachment: dict[str, Any] = {"type": MEDIA_NAMES.get(message.kind, message.kind)}
+        if message.body:
+            attachment["caption"] = message.body
+        if message.kind == KIND_FILE and message.filename:
+            attachment["filename"] = message.filename
+        result["attachment"] = attachment
+        result["note"] = (
+            f"The contact sent a {attachment['type']}, which you cannot see or open: say they sent it, "
+            "with its caption or file name if there is one."
+        )
     else:
         result["text"] = message.body
+    if message.reply_to:
+        result["in_reply_to"] = {"quote": message.reply_quote or None, "your_message": message.reply_mine}
     return result
 
 
