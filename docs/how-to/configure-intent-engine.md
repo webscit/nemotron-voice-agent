@@ -85,7 +85,7 @@ A reply from a server feature can ask a question that the next turn answers, suc
 3. It cancels the intent that is still running, and it interrupts an LLM answer or a reply that might still be generated or spoken.
 4. It calls the `go_to_sleep` client tool and says "Bonne nuit" or "Good night."
 
-Only a full-turn match counts. A dictated message that mentions sleep, such as "Dis à Bob que je vais dormir" or "Tell Bob I'm going to sleep," stays a message. The escape hatch is active only when the client declares the `go_to_sleep` tool. When `client_tools.yaml` sets `defer_to_llm: true` for `ReachyGoToSleep`, the engine still drops what is in progress, and the LLM answers the turn. Refer to [Map Intents to Client Tools](#map-intents-to-client-tools) for the shipped sentences.
+Only a full-turn match counts. A dictated message that mentions sleep, such as "Dis à Bob que je vais dormir" or "Tell Bob I'm going to sleep," stays a message. The escape hatch is active only when `client_tools.yaml` maps `ReachyGoToSleep` to the `go_to_sleep` tool and the client declares that tool. Refer to [Map Intents to Client Tools](#map-intents-to-client-tools) for the shipped sentences.
 
 The following table describes how the engine handles failures.
 
