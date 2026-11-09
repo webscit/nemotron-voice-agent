@@ -18,6 +18,9 @@
 4. Store the rest as ``intent_suggestions``: merged into an existing suggestion
    proposing the same thing (evidence accumulates across sessions), skipped when
    a reviewer rejected it before.
+
+Sessions that ran the messaging dialog also teach sentences for its request
+intents, with the slot and privacy rules of ``dream_messaging``.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from typing import Any
 from loguru import logger
 
 from monitoring import intents
+from monitoring.jobs.dream_messaging import DESCRIPTIONS, MessagingPolicy, load_contacts, session_uses_messaging
 
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
@@ -66,6 +70,8 @@ Rules:
 - New intent names are CamelCase. arguments: literal values, or {{"slot": "<slot name>"}} for a
   value taken from a {{list}} of the sentence.
 - response: a short spoken confirmation in {language_name}; it may use {{{{ slots.<name> }}}}.
+- Messaging intents: write {{contact}} for the contact and never a name; write {{message}} for what the
+  person wants to send, only at the very end of the sentence and never the words of the message itself.
 - turns: the missed turn numbers a proposal comes from.
 - confidence: 0.9+ when the turn clearly asks for exactly that, lower when unsure.
 
@@ -137,17 +143,28 @@ class Check:
     matched: list[int] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     unchecked: bool = False
+    # Slots of the candidate's match, by matched turn.
+    slots: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 class IntentCatalog:
     """The sentence data and tool mapping a session's intent engine used, rebuilt offline."""
 
-    def __init__(self, store, session_config: dict[str, Any], cfg: dict[str, Any], *, session_id: str | None = None):
+    def __init__(
+        self,
+        store,
+        session_config: dict[str, Any],
+        cfg: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        messaging: MessagingPolicy | None = None,
+    ):
         """Rebuild the catalog for ``session_config`` (see ``available``).
 
         ``session_id``: the session being dreamed. Its own unreviewed dream
         suggestions are left out: a re-run replaces them, so they must not count
-        as already matching its turns.
+        as already matching its turns. ``messaging``: the session ran the
+        messaging dialog, with these contacts.
         """
         from examples.shared.intent_engine.config import IntentEngineConfig
         from examples.shared.intent_engine.learned import LearnedIntent, tool_entries
@@ -156,6 +173,7 @@ class IntentCatalog:
 
         self.cfg = cfg
         self.notes: list[str] = []
+        self.messaging = messaging
         snapshot = session_config.get("intent_engine") or {}
         self.enabled = bool(snapshot.get("enabled"))
         self.language = session_config.get("language") or "en-US"
@@ -197,6 +215,10 @@ class IntentCatalog:
 
     def keep(self, name: str) -> bool:
         """Whether the session's engine kept a custom intent (like the live ``keep_custom_intent``)."""
+        from examples.shared.intent_engine.learned import MESSAGING_INTENTS
+
+        if name in MESSAGING_INTENTS:
+            return self.messaging is not None
         if name in self.tool_map:
             return self.tool_map.tool(name) in self.client_tools
         return self.use_home_assistant and name in self.allowed
@@ -287,9 +309,16 @@ class IntentCatalog:
         return None
 
     def learnable(self, name: str) -> bool:
-        """Whether sentences may be learned for an intent (defined, and not reserved for the LLM)."""
+        """Whether sentences may be learned for an intent (defined, and not reserved for the LLM).
+
+        Messaging: only its request intents, and only when the contact names are known.
+        """
+        from examples.shared.intent_engine.learned import MESSAGING_INTENTS, learnable_intent
+
         if self.owner(name) is None:
             return False
+        if name in MESSAGING_INTENTS:
+            return learnable_intent(name) and self.messaging is not None and self.messaging.available
         return not (name in self.tool_map and self.tool_map.defers_to_llm(name))
 
     def names(self) -> list[str]:
@@ -313,7 +342,9 @@ class IntentCatalog:
         rules: dict[str, str] = {}
         for name in self.names():
             data = self.owner(name) or {}
-            if name in self.tool_map:
+            if name in DESCRIPTIONS:
+                runs = DESCRIPTIONS[name]
+            elif name in self.tool_map:
                 entry = self.tool_map.entry(name)
                 runs = f"client tool {entry.get('tool')} with arguments {json.dumps(entry.get('arguments') or {})}"
             else:
@@ -338,8 +369,16 @@ class IntentCatalog:
             rules.setdefault(rule, body)
         lines.append("")
         lines.append("Lists:")
+        messaging = any(name in DESCRIPTIONS for name in self.names())
         for list_name, body in sorted(lists.items()):
+            if messaging and list_name == "message":
+                lines.append(
+                    "- {message}: the message to send; only at the end of a MessagingSend or MessagingReply sentence"
+                )
+                continue
             lines.append(f"- {{{list_name}}}: {self._describe_list(body)}")
+        if messaging:
+            lines.append("- {contact}: a contact's name, from the contact list (never write a name)")
         if self.stock is not None:
             names = ""
             if self.slot_lists:
@@ -424,6 +463,7 @@ class IntentCatalog:
         from examples.shared.intent_engine.matcher import _EMPTY_SLOT_LISTS
 
         context = {"area": {"value": self.area, "text": self.area}} if self.area else None
+        slot_lists = {**(self.slot_lists or _EMPTY_SLOT_LISTS), **self.server_lists}
         for parsed in sets or self.parsed:
             if parsed is None:
                 continue
@@ -431,7 +471,7 @@ class IntentCatalog:
                 result = recognize_best(
                     text,
                     parsed,
-                    slot_lists=self.slot_lists or _EMPTY_SLOT_LISTS,
+                    slot_lists=slot_lists,
                     intent_context=context,
                     language=self.base,
                     best_slot_name="name",
@@ -443,6 +483,11 @@ class IntentCatalog:
                 slots = {entity.name: entity.value for entity in result.entities_list}
                 return result.intent.name, slots, (result.intent_metadata or {}).get(LEARNED_ID_KEY)
         return None
+
+    @cached_property
+    def server_lists(self) -> dict[str, Any]:
+        """Lists the server fills at match time (the messaging ``contact`` list)."""
+        return self.messaging.slot_lists() if self.messaging is not None else {}
 
     def check(self, candidate, turns: list[dict[str, Any]]) -> Check:
         """Match a ``LearnedIntent`` candidate against the person's words in its evidence turns."""
@@ -466,6 +511,10 @@ class IntentCatalog:
         follow_up = candidate.intent in tool_map and tool_map.has_follow_up(candidate.intent)
         for turn in turns:
             text = self.normalize(turn["user_text"])
+            if self.server_lists:
+                from examples.shared.intent_engine.matcher import respell_slot_values
+
+                text = respell_slot_values(text, self.server_lists)
             if text not in self._before:
                 self._before[text] = self.recognize(text)
             before = self._before[text]
@@ -476,7 +525,16 @@ class IntentCatalog:
             if after is None or after[0] != candidate.intent or after[2] != _CANDIDATE_ID:
                 result.notes.append(f"turn {turn['idx']} does not match")
                 continue
-            if candidate.intent in tool_map and not follow_up:
+            if candidate.intent in DESCRIPTIONS:
+                problem = (
+                    self.messaging.check_turn(candidate.intent, after[1], turn["tool_calls"])
+                    if self.messaging is not None
+                    else "messaging is off"
+                )
+                if problem:
+                    result.notes.append(f"turn {turn['idx']} matches but {problem}")
+                    continue
+            elif candidate.intent in tool_map and not follow_up:
                 tool = tool_map.tool(candidate.intent)
                 built = ClientToolMap({candidate.intent: tool_map.entry(candidate.intent)}).arguments(
                     candidate.intent, after[1]
@@ -489,6 +547,7 @@ class IntentCatalog:
                     result.notes.append(f"turn {turn['idx']} has no {tool} call")
                     continue
             result.matched.append(turn["idx"])
+            result.slots[turn["idx"]] = after[1]
         return result
 
 
@@ -500,9 +559,16 @@ def sentence_set_problems(
     ``home_assistant``: ``data`` is the stock set, each sentence must fit the shape
     of one of the intent's stock blocks (``learned.stock_blocks``).
     """
-    from examples.shared.intent_engine.learned import sentence_problems, stock_blocks
+    from examples.shared.intent_engine.learned import MESSAGING_INTENTS, intent_lists, sentence_problems, stock_blocks
 
-    problems = [f"{s!r}: {p}" for s in candidate.sentences for p in sentence_problems(s, data, extra_lists=extra_lists)]
+    extra_lists, trailing = intent_lists(candidate.intent, extra_lists)
+    # A messaging sentence is not quoted: it may still hold a name or message words.
+    quoted = candidate.intent not in MESSAGING_INTENTS
+    problems = [
+        f"{s!r}: {p}" if quoted else f"sentence {i + 1}: {p}"
+        for i, s in enumerate(candidate.sentences)
+        for p in sentence_problems(s, data, extra_lists=extra_lists, trailing_wildcards=trailing)
+    ]
     body = (data.get("intents") or {}).get(candidate.intent)
     if home_assistant and not problems and isinstance(body, dict):
         _, misfits = stock_blocks(candidate, body, data)
@@ -642,6 +708,23 @@ def candidates(
         if not check.matched:
             dropped.append(f"{intent}: {'; '.join(check.notes) or 'no evidence turn matches'}")
             return
+        if intent in DESCRIPTIONS and catalog.messaging is not None:
+            # Only the shape of what the person said: no contact name, no message.
+            evidence = [
+                {
+                    "turn_idx": i,
+                    "text": catalog.messaging.redact_text(
+                        missed[i]["user_text"], check.slots.get(i) or {}, missed[i]["tool_calls"]
+                    ),
+                    "tool_calls": catalog.messaging.redact_calls(missed[i]["tool_calls"]),
+                }
+                for i in check.matched
+            ]
+        else:
+            evidence = [
+                {"turn_idx": i, "text": missed[i]["user_text"], "tool_calls": missed[i]["tool_calls"] or None}
+                for i in check.matched
+            ]
         out.append(
             {
                 "kind": kind,
@@ -654,14 +737,7 @@ def candidates(
                 "confidence": _confidence(item),
                 "validated": not check.unchecked and len(check.matched) == len(turn_ids),
                 "validation": {"matched_turns": check.matched, "notes": check.notes},
-                "evidence": [
-                    {
-                        "turn_idx": i,
-                        "text": missed[i]["user_text"],
-                        "tool_calls": missed[i]["tool_calls"] or None,
-                    }
-                    for i in check.matched
-                ],
+                "evidence": evidence,
             }
         )
 
@@ -669,10 +745,26 @@ def candidates(
         intent = str(item.get("intent") or "")
         sentences, turn_ids = _strings(item.get("sentences")), _turn_ids(item, missed)
         if not catalog.learnable(intent) or not sentences or not turn_ids:
-            dropped.append(f"{intent or '?'}: unknown intent, no sentence or no missed turn")
+            dropped.append(f"{intent or '?'}: unknown or unlearnable intent, no sentence or no missed turn")
             continue
         slots = _scalar_dict(item.get("slots"))
-        problems = problems_for(sentences, catalog.owner(intent), intent, slots)
+        problems = []
+        if intent in DESCRIPTIONS and catalog.messaging is not None:
+            policy = catalog.messaging
+            # Contact names become {contact}; a name or message words left in the sentence drop it.
+            sentences = list(dict.fromkeys(policy.substitute(s) for s in sentences))
+            slots = {}
+            bodies = [
+                str((call.get("arguments") or {}).get("text") or "")
+                for i in turn_ids
+                for call in missed[i]["tool_calls"]
+            ]
+            problems = [
+                f"sentence {n + 1}: {p}"
+                for n, s in enumerate(sentences)
+                for p in [*policy.name_problems(s), *policy.message_problems(s, bodies)]
+            ]
+        problems += problems_for(sentences, catalog.owner(intent), intent, slots)
         if problems:
             dropped.append(f"{intent}: {'; '.join(problems)}")
             continue
@@ -802,7 +894,12 @@ def learn_intents(ctx, session_id: str, session_config: dict[str, Any], turns, g
     if not missed:
         intents.retract_session_suggestions(ctx.store, session_id)
         return {"intents_skipped": "no missed turn"}
-    catalog = IntentCatalog(ctx.store, session_config, cfg, session_id=session_id)
+    messaging = None
+    if session_uses_messaging(annotated):
+        messaging = MessagingPolicy(load_contacts(), annotated)
+    catalog = IntentCatalog(ctx.store, session_config, cfg, session_id=session_id, messaging=messaging)
+    if messaging is not None and not messaging.available:
+        catalog.notes.append("messaging contacts unavailable (MATRIX_CONTACTS_FILE); messaging sentences not learned")
     if not catalog.available:
         intents.retract_session_suggestions(ctx.store, session_id)
         return {"intents_skipped": "intent engine off or no sentences for the session language"}
@@ -866,4 +963,9 @@ def correction_problems(
     elif row["kind"] == "sentence":
         data = custom
     problems += sentence_set_problems(candidate, data, home_assistant=home_assistant, extra_lists=HOME_ASSISTANT_LISTS)
+    if row["intent"] in DESCRIPTIONS:
+        policy = MessagingPolicy(load_contacts())
+        problems += [
+            f"sentence {n + 1}: {p}" for n, s in enumerate(candidate.sentences) for p in policy.name_problems(s)
+        ]
     return problems

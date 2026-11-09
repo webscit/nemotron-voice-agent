@@ -221,7 +221,7 @@ The `dream` job of the [offline post-processing runner](enable-conversation-reco
 - **New sentences** for an intent that the engine already has, for example another phrasing of `HassTurnOn` or `ReachyMoveHead`.
 - **New intents** for a recurring request that the LLM answered with one client tool call whose arguments are the same every time. A new intent maps its sentences to that client tool and adds a short spoken response.
 
-The job does not learn sentences for server features such as Matrix messaging yet.
+The job also learns new sentences for the request intents of [Matrix messaging](enable-matrix-messaging.md). Refer to [Learn Messaging Sentences](#learn-messaging-sentences).
 
 ### Requirements
 
@@ -254,6 +254,29 @@ The job can only check a sentence that needs Home Assistant names, such as `{nam
 The job merges a proposal into an equivalent suggestion from an earlier session, so the evidence accumulates and recurring requests rise to the top of the review list. A suggestion that waits for review also gains the new sentences. A suggestion that is already in use, that is, approved or active through `auto_use_threshold`, gains the evidence but keeps its sentences. New sentences then become a separate unchecked suggestion that waits for review. The job does not propose a suggestion again after a reviewer rejected it.
 
 When you re-run the job on a session, it replaces that session's unreviewed proposals after it parses the new LLM answer. If the LLM call or its answer fails, the earlier proposals stay. If the re-run finds no missed turn, or the session ran without the engine, the job retracts the earlier proposals.
+
+### Learn Messaging Sentences
+
+When a session ran the Matrix messaging dialog, the job also learns from the missed turns where the LLM called a messaging tool. The following table lists the intent that each tool call teaches.
+
+| LLM tool call | Learned intent | Slots |
+| --- | --- | --- |
+| `check_messages` | `MessagingCheck` | None |
+| `read_messages` | `MessagingRead` | `{contact}` when the call names a contact |
+| `send_message` with a contact in the sentence | `MessagingSend` | `{contact}` and a trailing `{message}` |
+| `send_message` without a contact in the sentence | `MessagingReply` | A trailing `{message}` |
+
+A turn that only called `confirm_send_message` answered the read-back question, so it teaches nothing. The job never learns sentences for the dialog answers and capture steps `MessagingYes`, `MessagingNo`, `MessagingChange`, `MessagingDictate`, `MessagingRecord`, and `MessagingContinue`, or for the voice message intents `MessagingSendVoice` and `MessagingPlay`. The engine also ignores such a sentence when it finds one in the monitoring database.
+
+The job applies the following rules to a messaging proposal:
+
+- `{contact}` stands for a name or alias of the contacts file. The job replaces a contact name or alias in a proposal with `{contact}`, and drops a proposal that still contains a word of a contact name.
+- `{message}` is free text. It is valid only once, at the end of a `MessagingSend` or `MessagingReply` sentence, after at least one word that is not optional, for example `balance à {contact} que {message}`. The job drops a proposal that uses `{message}` anywhere else, or that copies words of the message into the sentence.
+- The words of the person must match the proposal with the same contact as the LLM tool call, and `{message}` must capture text close to the message that the LLM prepared.
+
+The dreamer reads the contacts file that `MATRIX_CONTACTS_FILE` configures, by default `data/matrix/contacts.yaml`, from the same `.env` and `data` directory as the application. When the dreamer cannot read any contact, the job learns no messaging sentence and adds a note to the job progress.
+
+A messaging suggestion keeps only the sentence shape of what the person said. Its evidence text replaces the contact with `{contact}` and the message with `{message}`, for example `Balance à {contact} que {message}`. Its tool calls show the tool names with the same placeholders. The **Intents** page and `GET /api/review/intents` show no audio for messaging suggestions, because the audio speaks the contact name and the message. A reviewer correction that names a contact, or that uses `{message}` anywhere but at the end, is refused.
 
 ### Configure Learning
 
