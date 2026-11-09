@@ -7,9 +7,15 @@ Environment variables:
   - MATRIX_HOMESERVER      Homeserver base URL, e.g. https://matrix-client.matrix.org (required)
   - MATRIX_USER_ID         The agent's own Matrix account, e.g. @atlas-bot:matrix.org (required)
   - MATRIX_ACCESS_TOKEN    Access token of that account (required)
-  - MATRIX_DEVICE_ID       Device id the token was issued for (optional)
-  - MATRIX_DATA_DIR        Inbox database and sync state (default: <project_root>/data/matrix)
+  - MATRIX_DEVICE_ID       Device id the token was issued for (optional; with encryption,
+                           the homeserver's answer for the token wins)
+  - MATRIX_DATA_DIR        Inbox database, sync state and encryption keys
+                           (default: <project_root>/data/matrix)
   - MATRIX_CONTACTS_FILE   Address book (default: <MATRIX_DATA_DIR>/contacts.yaml)
+  - MATRIX_ENCRYPTION      End-to-end encryption: read and answer encrypted rooms, and
+                           create encrypted ones (default: true)
+  - MATRIX_STORE_KEY       Passphrase of the encryption key store (optional; changing it
+                           later makes the stored keys unreadable)
 
 Messaging is enabled when the three required variables are set.
 """
@@ -20,7 +26,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from utils import PROJECT_ROOT
+from utils import PROJECT_ROOT, parse_env_bool
+
+# nio's own passphrase of the key store when none is configured.
+DEFAULT_STORE_KEY = "DEFAULT_KEY"
 
 
 @dataclass(frozen=True)
@@ -33,6 +42,8 @@ class MatrixConfig:
     device_id: str
     data_dir: Path
     contacts_file: Path
+    encryption: bool = True
+    store_key: str = DEFAULT_STORE_KEY
 
     @property
     def enabled(self) -> bool:
@@ -43,6 +54,11 @@ class MatrixConfig:
     def db_path(self) -> Path:
         """SQLite file of the inbox and the sync state."""
         return self.data_dir / "inbox.db"
+
+    @property
+    def store_dir(self) -> Path:
+        """Encryption keys of the agent's device (one process at a time)."""
+        return self.data_dir / "crypto"
 
 
 def _path(value: str, default: Path) -> Path:
@@ -60,4 +76,6 @@ def load_matrix_config() -> MatrixConfig:
         device_id=os.getenv("MATRIX_DEVICE_ID", "").strip(),
         data_dir=data_dir,
         contacts_file=_path(os.getenv("MATRIX_CONTACTS_FILE", "").strip(), data_dir / "contacts.yaml"),
+        encryption=parse_env_bool("MATRIX_ENCRYPTION", default=True),
+        store_key=os.getenv("MATRIX_STORE_KEY", "") or DEFAULT_STORE_KEY,
     )

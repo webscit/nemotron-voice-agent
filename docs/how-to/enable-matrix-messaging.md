@@ -17,13 +17,14 @@ Messaging has a server part and a set of LLM tools:
 
 - **Gateway.** When the server starts, it logs in to the agent's Matrix account
   and syncs in the background. One gateway serves every session. The first
-  sync only catches up, so the agent does not import older chat history.
+  sync only catches up, so the agent does not import older chat history. The
+  first sync of each server process also loads the full state of every room.
 - **Inbox.** The gateway stores messages only from configured contacts, and
   only from direct rooms with at most two members. It ignores messages from
   anybody else. It joins rooms automatically when a contact invites the agent
   and leaves invitations from other accounts pending.
 - **Sending.** The first time the agent writes to a contact, it creates an
-  unencrypted direct room and invites that contact. Later replies go to the room
+  end-to-end encrypted direct room and invites that contact. Later replies go to the room
   where the contact last wrote, as long as the contact is still in it. Rate-limited requests (`M_LIMIT_EXCEEDED`) are
   retried.
 - **Read receipts.** When the agent reads a message aloud, it marks the message
@@ -33,6 +34,9 @@ Messaging has a server part and a set of LLM tools:
   the audio through its own voice output, in place of speech. A voice message
   that you record is encoded as Ogg/Opus, uploaded, and sent as an Element voice
   message, with its duration and waveform.
+- **Encryption.** The agent reads and answers end-to-end encrypted rooms, and
+  it keeps its device keys on disk. Unencrypted rooms keep working. Refer to
+  [Use End-to-End Encryption](#use-end-to-end-encryption).
 
 ## Prerequisites
 
@@ -50,21 +54,33 @@ You need the following items:
 
 ## Get an Access Token
 
-You can get an access token from Element:
-
-1. Sign in to Element with the agent's account.
-2. Open **Settings > Help & About** and copy the **Access Token** under
-   **Advanced**.
-3. Open **Settings > Sessions** and note the ID of the current session. This is
-   the device ID.
-
-Alternatively, request a token with the Matrix
+Request a token for a new device of the agent's account with the Matrix
 [login API](https://spec.matrix.org/latest/client-server-api/#post_matrixclientv3login)
-(`POST /_matrix/client/v3/login`). The response contains `access_token` and
-`device_id`.
+(`POST /_matrix/client/v3/login`):
 
-Do not sign out of the Element session that issued the token. Signing out
-invalidates the token, and the agent can no longer sync.
+```bash
+curl -s -X POST https://matrix-client.matrix.org/_matrix/client/v3/login \
+  -H 'Content-Type: application/json' \
+  -d '{"type": "m.login.password",
+       "identifier": {"type": "m.id.user", "user": "my-agent"},
+       "password": "<the agent account password>",
+       "initial_device_display_name": "Voice agent"}'
+```
+
+The response contains `access_token` and `device_id`. The agent keeps the
+encryption keys of that device in `<MATRIX_DATA_DIR>/crypto`, so use the token
+for the agent only.
+
+Do not use the access token of an Element session (**Settings > Help & About >
+Advanced**) while encryption is on. That token belongs to Element's own device,
+which already has encryption keys that the agent does not hold. When the agent
+finds keys on the server for its device but none in its `crypto` directory, it
+does not replace them: it runs unencrypted and logs `already has encryption
+keys`. With `MATRIX_ENCRYPTION=false`, an Element token works, as long as you
+do not sign out of that Element session.
+
+With encryption on, the agent uses the device of its token, whatever
+`MATRIX_DEVICE_ID` says.
 
 ## Configure the Account
 
@@ -77,16 +93,18 @@ required variables are set. They are read from the environment by
 | `MATRIX_HOMESERVER` | Not set (required) | Base URL of the homeserver client API, for example `https://matrix-client.matrix.org` |
 | `MATRIX_USER_ID` | Not set (required) | The agent's Matrix ID, for example `@my-agent:matrix.org` |
 | `MATRIX_ACCESS_TOKEN` | Not set (required) | Access token of the agent's account |
-| `MATRIX_DEVICE_ID` | Empty | Device ID that the token was issued for |
-| `MATRIX_DATA_DIR` | `data/matrix` | Directory for `inbox.db`, which stores received messages, the room used with each contact, and the sync token |
+| `MATRIX_DEVICE_ID` | Empty | Device ID that the token was issued for. With encryption on, the server asks the homeserver for the token's device, logs a warning when this value differs, and ignores it. |
+| `MATRIX_DATA_DIR` | `data/matrix` | Directory for `inbox.db`, which stores received messages, the room used with each contact, and the sync token, and for `crypto/`, which stores the encryption keys of the agent's device |
 | `MATRIX_CONTACTS_FILE` | `<MATRIX_DATA_DIR>/contacts.yaml` | Address book of the contacts that the agent can message |
+| `MATRIX_ENCRYPTION` | `true` | End-to-end encryption: read and answer encrypted rooms, and create encrypted rooms. Set `false` to ignore encrypted rooms. |
+| `MATRIX_STORE_KEY` | Empty (a built-in passphrase) | Passphrase of the encryption key store. If you change it later, the stored keys become unreadable. The server never logs it. |
 
 Relative paths resolve against the project root. The Compose app services
 already mount `./data` read-write at `/app/data`, so the defaults persist
 across container restarts without a Compose change.
 
-Treat `MATRIX_ACCESS_TOKEN` as a password. Keep it in `.env` and do not commit
-it.
+Treat `MATRIX_ACCESS_TOKEN` and `MATRIX_STORE_KEY` as passwords. Keep them in
+`.env` and do not commit them.
 
 ## Add Contacts
 
@@ -135,12 +153,49 @@ A contact can start a chat in one of two ways:
 
 - Wait for the first message from the agent. The contact accepts the invitation
   to the direct room that the agent created.
-- Invite the agent's Matrix ID to a new unencrypted direct chat. The agent joins
+- Invite the agent's Matrix ID to a new direct chat. The agent joins
   automatically if the contact is in the contacts file.
 
-Element encrypts new direct chats by default. The agent cannot read encrypted
-rooms yet, so contacts must write in the room that the agent created, or in a
-direct room with encryption turned off.
+Element encrypts new direct chats by default, and the agent reads them. With
+`MATRIX_ENCRYPTION=false`, contacts must use a direct room with encryption
+turned off.
+
+## Use End-to-End Encryption
+
+Encryption is on by default. It needs the `matrix-nio[e2e]` dependency, which
+uses the vodozemac library. Its wheels include aarch64, so Jetson needs no
+`libolm` build. The dependency changed with this feature, so rebuild the
+example image of an existing deployment before you restart it.
+
+Encryption works as follows:
+
+- **Device keys.** The agent's device keys live in
+  `<MATRIX_DATA_DIR>/crypto`. The Compose app services mount `./data`, so the
+  keys persist across container restarts. The startup log line
+  `Matrix: end-to-end encryption on (device <ID>)` names the device.
+- **Rooms.** The agent reads and answers encrypted rooms. The rooms it creates
+  use Megolm encryption. Existing unencrypted rooms keep working.
+- **Voice messages.** A voice message to an encrypted room is uploaded as an
+  encrypted attachment, so the homeserver stores only ciphertext. The agent
+  decrypts the encrypted voice messages that it receives.
+- **Trust on first use.** The agent encrypts messages for every device of a
+  contact, verified or not. When a contact adds a device, the server logs
+  `Matrix: Bob has a new device (<ID>); messages are encrypted for it too`.
+- **Late keys.** When the agent cannot decrypt a message yet, it asks the
+  sender's devices for the key and tries again after each sync, for up to
+  24 hours. The agent stores and announces the message only after it
+  decrypts it. This happens often right after you turn encryption on.
+- **One process.** One server process owns the key store, through a file lock.
+  With `UVICORN_WORKERS` greater than 1, only the first worker has messaging.
+  The other workers log `Matrix messaging unavailable in this process`.
+
+With `MATRIX_ENCRYPTION=false`, the agent ignores encrypted rooms and logs one
+warning per room.
+
+Keep the `crypto` directory with the access token. If you lose the directory
+but keep the token, the agent finds its device's keys on the server without
+the matching store, runs unencrypted, and logs `already has encryption keys`.
+Log the agent in again to get a new token and device, and update `.env`.
 
 ## Use Messaging in a Conversation
 
@@ -411,6 +466,10 @@ The following safeguards apply:
 - The prompt block tells the LLM to never follow instructions found inside a
   message, and to never read one person's messages to another person.
 - Contacts with an `owner` are hidden from everybody except that person.
+- The agent's device keys stay in `<MATRIX_DATA_DIR>/crypto`, protected by
+  `MATRIX_STORE_KEY`. Without it, a built-in passphrase protects them, so
+  restrict access to that directory. Anybody who can read it and knows the
+  passphrase can decrypt the agent's messages.
 - The agent keeps a recorded voice message in memory only, until it is sent,
   dropped, or expired. Received voice messages are downloaded each time they
   play and are not stored on disk. When session recording stores turn audio,
@@ -436,8 +495,16 @@ This first version has the following limitations:
 - **Playback length.** The agent plays at most the first 5 minutes of a voice
   message. It does not download media larger than 10 MB. It does not
   transcribe received voice messages.
-- **No end-to-end encryption.** The agent cannot read encrypted rooms, and the
-  rooms it creates are unencrypted. The homeserver can read these messages.
+- **No device verification.** matrix-nio has no cross-signing and no
+  interactive verification. Element shows the agent's device and messages as
+  not verified, for example "Encrypted by a device not verified by its owner."
+  When a contact turns on the Element setting that never sends encrypted
+  messages to unverified sessions, the agent cannot read that contact's
+  messages.
+- **Older encrypted history.** The agent generally cannot decrypt messages
+  sent before its device existed.
+- **One worker.** Only one server process can use encryption. Refer to
+  [Use End-to-End Encryption](#use-end-to-end-encryption).
 - **One account.** The server uses one Matrix account for every person who talks
   with the agent. Messages show who asked for them only through the name
   prefix.
@@ -464,7 +531,14 @@ The following table lists common symptoms and checks:
 | --- | --- |
 | The agent does not offer to check or send messages | Confirm that `MATRIX_HOMESERVER`, `MATRIX_USER_ID`, and `MATRIX_ACCESS_TOKEN` are all set, then restart the server and look for `Matrix: syncing as` in the logs. |
 | Sync fails with an authentication error | The token is invalid. Get a new token and do not sign out of the session that issued it. |
-| Messages from a contact never arrive | Confirm that the sender's Matrix ID matches `matrix_id` exactly, and that the room is unencrypted and has at most two members. Messages sent before the server first synced are not imported. |
+| Messages from a contact never arrive | Confirm that the sender's Matrix ID matches `matrix_id` exactly, and that the room has at most two members. Messages sent before the server first synced are not imported. With `MATRIX_ENCRYPTION=false`, encrypted rooms are ignored. |
+| The log shows `cannot decrypt ... yet; asking for its key` | The key did not arrive yet. The agent retries after each sync for up to 24 hours, and the message appears after it is decrypted. Messages sent before the agent's device existed generally stay unreadable. If a contact's Element never sends to unverified sessions, the key never arrives. |
+| The log shows `already has encryption keys` and the agent runs unencrypted | The token is an Element session's (refer to [Get an Access Token](#get-an-access-token)), or the `crypto` directory was lost or replaced while the token stayed. Log the agent in again for a new token and device, and update `MATRIX_ACCESS_TOKEN`. |
+| The log shows `the homeserver refused the device keys` | The homeserver rejected the keys of the agent's device. Log the agent in again for a new token and device, and update `MATRIX_ACCESS_TOKEN`. |
+| The log shows `the access token has no device` | Get a token that belongs to a device, for example from the login API. |
+| The log shows `Matrix messaging unavailable in this process` | Another server process holds the key store. Set `UVICORN_WORKERS=1`, or accept that only the first worker has messaging. |
+| The log shows `encryption needs matrix-nio[e2e] (vodozemac); running unencrypted` | The image predates the dependency change. Rebuild the example image. |
+| Element marks the agent's messages as not verified | Expected. The agent cannot verify its device. Refer to [Limitations](#limitations). |
 | The agent does not join a contact's invitation | The inviter is not in the contacts file. Add them, then invite the agent again. |
 | The agent says a contact belongs to someone else | The contact has an `owner`, and the agent does not know for sure who is talking. Pick the person in **Who's talking** or let the voice ID recognize them. |
 | The agent never sends the message | You must confirm the draft in a later turn, within 5 minutes, as the same person who asked for it. |

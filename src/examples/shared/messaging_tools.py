@@ -384,7 +384,7 @@ class MessagingTools:
         """The audio of a received voice message, as 16-bit mono PCM at ``sample_rate``."""
         if not message.media_url:
             raise MatrixError("the voice message has no media")
-        data = await self._gateway.download(message.media_url)
+        data = await self._gateway.download_media(message)
         try:
             return await asyncio.to_thread(decode_audio, data, sample_rate, max_secs=MAX_PLAY_SECS)
         except VoiceCodecError as exc:

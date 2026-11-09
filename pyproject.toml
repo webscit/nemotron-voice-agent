@@ -16,7 +16,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "hassil>=3.12.1",
     "home-assistant-intents>=2026.9.30",
-    "matrix-nio>=0.26.0",
+    "matrix-nio[e2e]>=0.26.0",
     "av>=17.1.0",
 ]
 

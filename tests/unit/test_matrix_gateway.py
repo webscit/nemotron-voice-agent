@@ -95,7 +95,8 @@ class FakeClient:
         self.add_room(room_id, users=(ME,), invited=tuple(kwargs["invite"]))
         return RoomCreateResponse(room_id)
 
-    async def room_send(self, room_id, message_type, content):
+    async def room_send(self, room_id, message_type, content, ignore_unverified_devices=False):
+        assert ignore_unverified_devices
         if self.send_errors:
             return self.send_errors.pop(0)
         self.sent.append((room_id, content))
