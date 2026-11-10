@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# English sentences for the Reachy Mini client tools (hassil format, same as the
+# Home Assistant intents repository). ../client_tools.yaml maps each intent to its tool.
+#
+# Only the go_to_sleep escape hatch is defined in English: the other Reachy Mini
+# commands go to the LLM. Said as the whole turn, ReachyGoToSleep always wins: it
+# ends a pending question, a dictated message, a voice recording, or a reply in
+# progress. Keep these imperatives addressed to the robot, so they are never a
+# message to dictate (no "good night").
+language: en
+intents:
+  ReachyGoToSleep:
+    data:
+      - sentences:
+          - "[go ][back ]to (sleep|bed)[ now]"
+          - "[go ]sleep[ now]"
+          - "fall asleep[ now]"
+          - "[it's ]time (to sleep|for bed|to go to (sleep|bed))"
+responses:
+  intents:
+    ReachyGoToSleep:
+      default: "Good night"

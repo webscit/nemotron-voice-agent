@@ -226,6 +226,12 @@ class MessagingIntents:
         """Use ``open_dialog`` to ask the read-back question after an LLM send step."""
         self._open_dialog = open_dialog
 
+    def reset_dialog(self) -> None:
+        """Drop the pending question and the draft or recording in progress (the user said "go to sleep")."""
+        self._state = None
+        self._contact = None
+        self._tools.cancel_draft()
+
     def slot_lists(self) -> dict[str, SlotList]:
         """Return the ``contact`` list, rebuilt when the contacts file changed."""
         contacts = tuple(self._contacts())

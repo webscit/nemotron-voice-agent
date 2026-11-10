@@ -76,6 +76,17 @@ The engine sits between the user context aggregator and the LLM and handles each
 
 A reply from a server feature can ask a question that the next turn answers, such as "Je l'envoie ?" Refer to [Multi-Turn Dialogs](#multi-turn-dialogs).
 
+### Go to Sleep Takes Precedence
+
+"Va dormir" or "Go to sleep" works as an escape hatch. When a whole turn matches a `ReachyGoToSleep` sentence, the engine handles it before anything else, in the following order:
+
+1. It drops the pending question, so the turn is never taken as a dictated message or a voice recording.
+2. It drops the messaging draft or recording that waits for confirmation.
+3. It cancels the intent that is still running, and it interrupts an LLM answer or a reply that might still be generated or spoken.
+4. It calls the `go_to_sleep` client tool and says "Bonne nuit" or "Good night."
+
+Only a full-turn match counts. A dictated message that mentions sleep, such as "Dis à Bob que je vais dormir" or "Tell Bob I'm going to sleep," stays a message. The escape hatch is active only when `client_tools.yaml` maps `ReachyGoToSleep` to the `go_to_sleep` tool and the client declares that tool. Refer to [Map Intents to Client Tools](#map-intents-to-client-tools) for the shipped sentences.
+
 The following table describes how the engine handles failures.
 
 | Situation | Behavior |
@@ -140,7 +151,7 @@ Restart the example service after you change a sentence file.
 A server feature can ask a follow-up question in its reply. Only the next user turn answers the question, and it is matched as follows:
 
 - The custom sentences are matched with the hassil intent context `dialog: <context>`. A sentence block with `requires_context: {dialog: <context>}` matches only while such a question is pending. Messaging uses `dialog: messaging` for its yes, no, and change sentences, so a plain "oui" never matches outside the dialog.
-- A question can capture the next turn's own words as a slot, for example a dictated message. The turn is then taken word for word, even when it resembles another command, unless it matches one of the intents that the question accepts, such as "annule."
+- A question can capture the next turn's own words as a slot, for example a dictated message. The turn is then taken word for word, even when it resembles another command, unless it matches one of the intents that the question accepts, such as "annule," or it is a go-to-sleep sentence. Refer to [Go to Sleep Takes Precedence](#go-to-sleep-takes-precedence).
 - A question can let a short answer open a longer turn. When the turn starts with one of these answers, such as "Oui. Lis mes messages.", the leading answer counts and the rest is ignored. A turn with conflicting answers, such as "oui" and "non", matches nothing.
 - A question can take the next turn as more of the user's words when the user starts talking before the agent finishes asking it. Messaging uses this to add the rest of a dictated message that turn detection cut off.
 - When the next turn matches nothing, the engine asks the question again once, and it stays open for one more turn. After a second miss, the turn goes to the LLM.
@@ -192,7 +203,9 @@ intents:
 
 An entry with `defer_to_llm: true` and no arguments reserves its sentences for the LLM. Use it to keep a sentence away from a stock Home Assistant intent.
 
-The repository ships French sentences in `sentences/fr/reachy_mini.yaml` for the following tools of the Reachy Mini conversation app: `volume_control`, `move_head`, `dance`, `stop_dance`, `play_emotion`, `go_to_sleep`, and `sweep_look`. The mapping follows the tool schemas of that app. If your client differs, adjust the mapping.
+The repository ships French sentences in `sentences/fr/reachy_mini.yaml` for the following tools of the Reachy Mini conversation app: `volume_control`, `move_head`, `dance`, `stop_dance`, `play_emotion`, `go_to_sleep`, and `sweep_look`. The English file, `sentences/en/reachy_mini.yaml`, defines only the `go_to_sleep` sentences, so the other English requests go to the LLM. The mapping follows the tool schemas of that app. If your client differs, adjust the mapping.
+
+The `ReachyGoToSleep` sentences cover phrasings such as "va dormir," "va te coucher," "endors-toi," "mets-toi en veille," and "c'est l'heure d'aller au lit" in French, and "go to sleep," "go to bed," "go back to sleep," and "time for bed" in English. Because these sentences end any dialog, keep them to commands addressed to the robot. The files leave out "bonne nuit" and "good night," which you might want to dictate as a message.
 
 Note the following behavior:
 

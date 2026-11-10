@@ -179,6 +179,9 @@ class ServerTarget(Protocol):
     def bind_dialog(self, open_dialog: Callable[[FollowUp], None]) -> None:
         """Receive the engine's ``open_dialog``, to ask a question outside of ``handle``."""
 
+    def reset_dialog(self) -> None:
+        """Drop the pending question and any work in progress (an escape intent such as "go to sleep")."""
+
     def build_call(self, request: IntentRequest) -> Any:
         """Return what ``handle`` would do, for the dry-run log."""
 
