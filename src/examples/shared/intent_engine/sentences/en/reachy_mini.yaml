@@ -3,14 +3,88 @@
 
 # English sentences for the Reachy Mini client tools (hassil format, same as the
 # Home Assistant intents repository). ../client_tools.yaml maps each intent to its tool.
-#
-# Only the go_to_sleep escape hatch is defined in English: the other Reachy Mini
-# commands go to the LLM. Said as the whole turn, ReachyGoToSleep always wins: it
-# ends a pending question, a dictated message, a voice recording, or a reply in
-# progress. Keep these imperatives addressed to the robot, so they are never a
-# message to dictate (no "good night").
 language: en
 intents:
+  ReachySetVolume:
+    data:
+      - sentences:
+          - "[<set> ]<your_volume> (to|at) <level>"
+  ReachyVolumeRelative:
+    data:
+      - sentences:
+          - "[<speak> ][even ]louder"
+          - "(turn|crank) (up <your_volume>|<your_volume> up)"
+          - "(raise|increase) <your_volume>"
+        slots:
+          step: 20
+      - sentences:
+          - "[<speak> ](a [little ]bit|a little|slightly) louder"
+          - "(turn|crank) (up <your_volume>|<your_volume> up) (a [little ]bit|a little|slightly)"
+          - "(raise|increase) <your_volume> (a [little ]bit|a little|slightly)"
+        slots:
+          step: 10
+      - sentences:
+          - "[<speak> ][even ](quieter|softer|more quietly|more softly)"
+          - "turn (down <your_volume>|<your_volume> down)"
+          - "(lower|decrease|reduce) <your_volume>"
+        slots:
+          step: -20
+      - sentences:
+          - "[<speak> ](a [little ]bit|a little|slightly) (quieter|softer|more quietly|more softly)"
+          - "turn (down <your_volume>|<your_volume> down) (a [little ]bit|a little|slightly)"
+          - "(lower|decrease|reduce) <your_volume> (a [little ]bit|a little|slightly)"
+        slots:
+          step: -10
+  ReachyMoveHead:
+    data:
+      - sentences:
+          - "(look|turn your head|turn [your ]head) [to |to the |towards |towards the ][your ]{direction}"
+      - sentences:
+          - "(raise|lift) your head"
+          - "(look|turn your head) up"
+        slots:
+          direction: up
+      - sentences:
+          - "lower your head"
+          - "(look|turn your head) down"
+        slots:
+          direction: down
+      - sentences:
+          - "look (ahead|straight ahead|in front of you|forward|straight)"
+          - "(center|straighten|reset) your head"
+          - "(put|bring) your head (back to the center|back in the middle|straight)"
+        slots:
+          direction: front
+  ReachyDance:
+    data:
+      - sentences:
+          - "dance"
+          - "(do|perform|show me) a [little |short |new |different ]dance"
+          - "(do|perform|show me) another dance"
+          - "dance {repeat} times"
+      - sentences:
+          - "dance twice"
+        slots:
+          repeat: 2
+  ReachyStopDance:
+    data:
+      - sentences:
+          - "stop dancing"
+          - "stop the dance"
+  ReachyPlayEmotion:
+    data:
+      - sentences:
+          - "<show> [me ][an |the ]emotion [like |of ][being ]{emotion}"
+          - "<show> [me ](a|an) {emotion} (emotion|face)"
+          - "<show> [me ](that you are|that you're|how) {emotion}"
+          - "<show> [me ]{emotion}"
+          - "(be|act|look) {emotion}"
+      - sentences:
+          - "<show> [me ](an|another) emotion"
+  # Said as the whole turn, it always wins: it ends a pending question, a dictated
+  # message, a voice recording, or a reply in progress (escape hatch). Keep these
+  # imperatives addressed to the robot, so they are never a message to dictate
+  # (no "good night").
   ReachyGoToSleep:
     data:
       - sentences:
@@ -18,7 +92,105 @@ intents:
           - "[go ]sleep[ now]"
           - "fall asleep[ now]"
           - "[it's ]time (to sleep|for bed|to go to (sleep|bed))"
+  ReachySweepLook:
+    data:
+      - sentences:
+          - "look around[ you| the room]"
+          - "(scan|sweep) the room"
+lists:
+  volume_percent:
+    range:
+      from: 0
+      to: 100
+  volume_named:
+    values:
+      - in: "[the ](maximum|max)"
+        out: 100
+      - in: "[the ](minimum|min)"
+        out: 10
+      - in: "half"
+        out: 50
+  repeat:
+    range:
+      from: 1
+      to: 5
+  # Values of the move_head tool's "direction" enum ("front" has its own sentences).
+  direction:
+    values:
+      - in: "right"
+        out: right
+      - in: "left"
+        out: left
+  # Values of the play_emotion tool's "emotion" enum that have a clear spoken form.
+  emotion:
+    values:
+      - in: "(happy|happiness|joy|joyful|cheerful)"
+        out: happy
+      - in: "(excited|excitement|enthusiastic)"
+        out: excited
+      - in: "(loving|in love|love)"
+        out: loving
+      - in: "(grateful|thankful|gratitude)"
+        out: grateful
+      - in: "(thinking|thoughtful|pensive)"
+        out: thinking
+      - in: "(attentive|focused)"
+        out: attentive
+      - in: "(confused|confusion|lost)"
+        out: confused
+      - in: "(sad|sadness|unhappy)"
+        out: sad
+      - in: "(angry|anger|mad)"
+        out: angry
+      - in: "(irritated|annoyed|irritation)"
+        out: irritated
+      - in: "(disgusted|disgust)"
+        out: disgusted
+      - in: "(scared|afraid|frightened|fear)"
+        out: scared
+      - in: "(anxious|worried|nervous|anxiety)"
+        out: anxious
+      - in: "(surprised|surprise|astonished)"
+        out: surprised
+      - in: "(amazed|amazement|impressed|in awe)"
+        out: amazed
+      - in: "(relieved|relief)"
+        out: relief
+      - in: "(impatient|impatience)"
+        out: impatient
+      - in: "(embarrassed|embarrassment|shy)"
+        out: embarrassed
+      - in: "(bored|boredom)"
+        out: bored
+      - in: "(tired|tiredness)"
+        out: tired
+expansion_rules:
+  set: "(set|put|turn|change|make)"
+  speak: "(speak|talk)"
+  your_volume: "[your |the ](volume|sound)"
+  level: "({volume_percent:level}[ percent| %]|{volume_named:level})"
+  show: "(do|make|show|express)"
+skip_words:
+  - "please"
+  - "can you"
+  - "could you"
+  - "would you"
+  - "I want you to"
 responses:
   intents:
+    ReachySetVolume:
+      default: "Volume at {{ slots.level }} percent"
+    ReachyVolumeRelative:
+      default: "Volume at {{ slots.level }} percent"
+    ReachyMoveHead:
+      default: "There you go"
+    ReachyDance:
+      default: "Here we go"
+    ReachyStopDance:
+      default: "I'll stop dancing"
+    ReachyPlayEmotion:
+      default: "There you go"
     ReachyGoToSleep:
       default: "Good night"
+    ReachySweepLook:
+      default: "I'm looking around"
