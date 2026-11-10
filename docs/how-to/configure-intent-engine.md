@@ -203,7 +203,7 @@ intents:
 
 An entry with `defer_to_llm: true` and no arguments reserves its sentences for the LLM. Use it to keep a sentence away from a stock Home Assistant intent.
 
-The repository ships French sentences in `sentences/fr/reachy_mini.yaml` for the following tools of the Reachy Mini conversation app: `volume_control`, `move_head`, `dance`, `stop_dance`, `play_emotion`, `go_to_sleep`, and `sweep_look`. The English file, `sentences/en/reachy_mini.yaml`, defines only the `go_to_sleep` sentences, so the other English requests go to the LLM. The mapping follows the tool schemas of that app. If your client differs, adjust the mapping.
+The repository ships French sentences in `sentences/fr/reachy_mini.yaml` for the following tools of the Reachy Mini conversation app: `volume_control`, `move_head`, `dance`, `stop_dance`, `play_emotion`, `go_to_sleep`, and `sweep_look`. The English file, `sentences/en/reachy_mini.yaml`, covers the same tools with English phrasings such as "set the volume to seventy," "speak louder," "look to the right," "do a little dance," "show me that you are tired," and "look around." The mapping follows the tool schemas of that app. If your client differs, adjust the mapping.
 
 The `ReachyGoToSleep` sentences cover phrasings such as "va dormir," "va te coucher," "endors-toi," "mets-toi en veille," and "c'est l'heure d'aller au lit" in French, and "go to sleep," "go to bed," "go back to sleep," and "time for bed" in English. Because these sentences end any dialog, keep them to commands addressed to the robot. The files leave out "bonne nuit" and "good night," which you might want to dictate as a message.
 

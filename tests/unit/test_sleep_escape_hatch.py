@@ -354,13 +354,15 @@ def test_sleep_needs_the_whole_turn(language, text):
     assert matcher.match(text) is None
 
 
-def test_english_sentences_only_add_sleep():
-    matcher = IntentMatcher(
-        "en-US",
-        allowed_intents=(),
-        sentences_dir=IntentEngineConfig().sentences_dir,
-        load_stock=False,
-        keep_custom_intent=lambda name: name.startswith("Reachy"),
-    )
-    assert matcher.custom_intent_names == ["ReachyGoToSleep"]
-    assert matcher.response_template("ReachyGoToSleep") == "Good night"
+def test_english_and_french_cover_the_same_reachy_intents():
+    def names(language):
+        return IntentMatcher(
+            language,
+            allowed_intents=(),
+            sentences_dir=IntentEngineConfig().sentences_dir,
+            load_stock=False,
+            keep_custom_intent=lambda name: name.startswith("Reachy"),
+        ).custom_intent_names
+
+    assert names("en-US") == names("fr-FR")
+    assert "ReachyGoToSleep" in names("en-US")

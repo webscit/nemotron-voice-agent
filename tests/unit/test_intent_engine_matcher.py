@@ -264,13 +264,59 @@ class CustomSentenceTests(unittest.TestCase):
             *("sleepy", "yes", "yes_understanding", "no", "no_sad", "no_excited", "no_firm", "welcoming"),
             *("greeting", "goodbye", "go_away", "helpful", "dance", "electric", "dying"),
         }
-        content = yaml.safe_load((PACKAGED_SENTENCES_DIR / "fr" / "reachy_mini.yaml").read_text(encoding="utf-8"))
-        self.assertLessEqual({value["out"] for value in content["lists"]["direction"]["values"]}, directions)
-        self.assertLessEqual({value["out"] for value in content["lists"]["emotion"]["values"]}, emotions)
-        fixed = {
-            block["slots"]["direction"] for block in content["intents"]["ReachyMoveHead"]["data"] if "slots" in block
+        for language in ("fr", "en"):
+            with self.subTest(language=language):
+                path = PACKAGED_SENTENCES_DIR / language / "reachy_mini.yaml"
+                content = yaml.safe_load(path.read_text(encoding="utf-8"))
+                lists = content["lists"]
+                self.assertLessEqual({value["out"] for value in lists["direction"]["values"]}, directions)
+                self.assertLessEqual({value["out"] for value in lists["emotion"]["values"]}, emotions)
+                blocks = content["intents"]["ReachyMoveHead"]["data"]
+                fixed = {block["slots"]["direction"] for block in blocks if "slots" in block}
+                self.assertLessEqual(fixed, directions)
+
+    def test_english_reachy_sentences(self) -> None:
+        matcher = make_matcher("en-US")
+        cases = {
+            "Go to sleep.": ("go_to_sleep", {}),
+            "Can you look to the right?": ("move_head", {"direction": "right"}),
+            "Could you look to your left, please?": ("move_head", {"direction": "left"}),
+            "Raise your head": ("move_head", {"direction": "up"}),
+            "Look down": ("move_head", {"direction": "down"}),
+            "Look straight ahead": ("move_head", {"direction": "front"}),
+            "Can you dance?": ("dance", {}),
+            "Can you do a little dance?": ("dance", {}),
+            "Dance three times": ("dance", {"repeat": 3}),
+            "Dance twice": ("dance", {"repeat": 2}),
+            "Stop dancing": ("stop_dance", {"dummy": True}),
+            "Show me an emotion like being surprised": ("play_emotion", {"emotion": "surprised"}),
+            "Show me an emotion": ("play_emotion", {}),
+            "Be sad": ("play_emotion", {"emotion": "sad"}),
+            "Show me anger": ("play_emotion", {"emotion": "angry"}),
+            "Do a happy face": ("play_emotion", {"emotion": "happy"}),
+            "Show me that you are tired": ("play_emotion", {"emotion": "tired"}),
+            "Look around": ("sweep_look", {}),
+            "Set the volume to seventy": ("volume_control", {"device": "speaker", "level": 70}),
+            "Set your volume to 70 %": ("volume_control", {"device": "speaker", "level": 70}),
+            "Turn the volume to the maximum": ("volume_control", {"device": "speaker", "level": 100}),
         }
-        self.assertLessEqual(fixed, directions)
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                match = matcher.match(text, SLOT_LISTS)
+                self.assertIsNotNone(match)
+                self.assertEqual(
+                    (self.tool_map.tool(match.name), self.tool_map.arguments(match.name, match.slots)), expected
+                )
+        steps = {
+            "Speak louder": 20,
+            "A little louder": 10,
+            "Turn down the volume": -20,
+            "Turn the sound down a bit": -10,
+        }
+        for text, step in steps.items():
+            with self.subTest(text=text):
+                match = matcher.match(text, SLOT_LISTS)
+                self.assertEqual((match.name, match.slots), ("ReachyVolumeRelative", {"step": step}))
 
     def test_speaker_tag_is_stripped_before_matching(self) -> None:
         text = "[speaker: Alice; also in view: unknown guest] Merci Richie, tu peux aller dormir."
