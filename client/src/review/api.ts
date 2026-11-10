@@ -94,6 +94,8 @@ export interface TurnMetrics {
   gpu_load_peak: number | null;
   /** Decision model of the turn's first answer: latency, call send time - first bot audio, what it decided. */
   decision_secs: number | null;
+  /** When that decision call started (epoch seconds); absent or null on rows computed before schema version 5. */
+  decision_started_at?: number | null;
   decision_lag_secs: number | null;
   decision_outcome: DecisionOutcome | null;
   decision_choice: string | null;

@@ -40,8 +40,10 @@ Decision tools
 --------------
 The decision model runs after the LLM answer, alongside TTS, so it is not a stage:
 ``decision_secs`` is its latency for the turn's first answer, ``decision_outcome``,
-``decision_choice`` and ``decision_confidence`` what it decided, and ``decision_lag_secs`` when its call
-was sent relative to the first bot audio (negative: before the robot spoke). Its
+``decision_choice`` and ``decision_confidence`` what it decided, ``decision_started_at`` when the
+decision call started (the ``decision_secs`` metric's time stamp minus its value), and
+``decision_lag_secs`` when its tool call was sent relative to the first bot audio (negative:
+before the robot spoke). Its
 calls are ``tool_calls`` rows with the ``decision`` trigger; they count for the
 response latency when perceivable, but not for the turn kind or ``n_tool_calls``.
 
@@ -407,7 +409,10 @@ def _turn_row(
     # ---- decision model (the turn's first answer)
     decisions = [e for e in events if e["kind"] == DECISION_EVENT]
     decision = next((e for e in decisions if data(e).get("outcome") == "called"), decisions[0] if decisions else None)
-    decision_secs = next((m["value"] for m in metrics if m["name"] == DECISION_METRIC), None)
+    decision_metric = next((m for m in metrics if m["name"] == DECISION_METRIC), None)
+    decision_secs = decision_metric["value"] if decision_metric else None
+    # The metric is stamped (wall clock) when the call returns and holds its duration.
+    decision_started_at = decision_metric["ts"] - decision_metric["value"] if decision_metric else None
     decision_sends = [c["sent_at"] for c in calls if c["trigger"] == "decision"]
     decision_lag = min(decision_sends) - audio if decision_sends and audio is not None else None
     # Decision calls follow every answer: they do not make a turn a tool turn.
@@ -450,6 +455,7 @@ def _turn_row(
         "gpu_load_mean": sum(loads) / len(loads) if loads else None,
         "gpu_load_peak": max(loads) if loads else None,
         "decision_secs": decision_secs,
+        "decision_started_at": decision_started_at,
         "decision_lag_secs": decision_lag,
         "decision_outcome": data(decision).get("outcome") if decision else None,
         "decision_choice": data(decision).get("choice") if decision else None,

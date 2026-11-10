@@ -379,6 +379,8 @@ def test_decision_model_is_tracked_without_making_a_tool_turn():
     (row,), calls, _ = derive(trace.build())
     assert (row["kind"], row["n_tool_calls"]) == ("plain", 0)
     assert row["decision_secs"] == pytest.approx(0.15)
+    # Started when the answer was complete: the metric's time stamp minus its duration.
+    assert row["decision_started_at"] == pytest.approx(T0 + 12.0)
     assert row["decision_lag_secs"] == pytest.approx(0.65)
     assert (row["decision_outcome"], row["decision_choice"]) == ("called", "happy")
     assert row["decision_confidence"] == pytest.approx(0.8)
@@ -393,11 +395,14 @@ def test_decision_model_is_tracked_without_making_a_tool_turn():
 def test_decision_without_a_call_records_its_outcome():
     trace = _plain()
     trace.event(12.2, "decision_tool", outcome="error", error="ReadTimeout")
+    trace.metric(12.2, "decision_secs", 0.2, "DecisionTools")
     (row,), calls, _ = derive(trace.build())
     assert (row["decision_outcome"], row["decision_choice"], row["decision_lag_secs"]) == ("error", None, None)
+    assert row["decision_started_at"] == pytest.approx(T0 + 12.0)
     assert calls == []
     (plain,), _, _ = derive(_plain().build())
     assert plain["decision_outcome"] is None
+    assert (plain["decision_secs"], plain["decision_started_at"]) == (None, None)
 
 
 def test_report_decision_stats():
@@ -522,11 +527,48 @@ def test_schema_migration_from_version_3(tmp_path):
     migrated.create_schema()  # idempotent
     assert set(new_columns) <= {column["name"] for column in inspect(migrated.engine).get_columns("turns")}
     with migrated.engine.connect() as conn:
-        assert conn.execute(select(func.max(schema.schema_version.c.version))).scalar() == schema.SCHEMA_VERSION == 4
+        assert conn.execute(select(func.max(schema.schema_version.c.version))).scalar() == schema.SCHEMA_VERSION == 5
     (turn,) = migrated.rows("turns", "s1")
     assert turn["barge_in"] is None and turn["user_stopped_at"] == T0 + 10.6  # existing data untouched
     # The speech times were dropped with the columns, so this turn cannot be timed.
     assert backfill(migrated) == {"s1": 1} and migrated.rows("turn_metrics", "s1")[0]["voice_latency"] is None
+
+
+def _decision_trace() -> Trace:
+    trace = _plain()
+    trace.event(12.15, "decision_tool", outcome="called", tool="play_emotion", choice="happy", tool_call_id="d-1")
+    trace.metric(12.15, "decision_secs", 0.15, "DecisionTools")
+    return trace
+
+
+def test_decision_start_round_trips_through_the_store(tmp_path):
+    store = _store_with(_decision_trace(), tmp_path)
+    assert recompute_session(store, "s1") == 1
+    (row,) = store.rows("turn_metrics", "s1")
+    assert row["decision_started_at"] == pytest.approx(T0 + 12.0)
+    assert row["decision_secs"] == pytest.approx(0.15)
+
+
+def test_schema_migration_from_version_4_adds_the_decision_start(tmp_path):
+    store = _store_with(_decision_trace(), tmp_path)
+    assert recompute_session(store, "s1") == 1
+    with store.engine.begin() as conn:  # put the database back into its version 4 shape
+        conn.execute(text("ALTER TABLE turn_metrics DROP COLUMN decision_started_at"))
+        conn.execute(schema.schema_version.delete().where(schema.schema_version.c.version > 4))
+    assert "decision_started_at" not in {c["name"] for c in inspect(store.engine).get_columns("turn_metrics")}
+
+    migrated = SessionStore(str(store.engine.url))
+    migrated.create_schema()
+    migrated.create_schema()  # idempotent
+    assert "decision_started_at" in {c["name"] for c in inspect(migrated.engine).get_columns("turn_metrics")}
+    with migrated.engine.connect() as conn:
+        assert conn.execute(select(func.max(schema.schema_version.c.version))).scalar() == schema.SCHEMA_VERSION
+    (old,) = migrated.rows("turn_metrics", "s1")
+    # The row computed before the migration keeps its values; only the new column is empty.
+    assert old["decision_started_at"] is None and old["decision_secs"] == pytest.approx(0.15)
+    # The backfill fills it from the recorded decision metric.
+    assert backfill(migrated) == {"s1": 1}
+    assert migrated.rows("turn_metrics", "s1")[0]["decision_started_at"] == pytest.approx(T0 + 12.0)
 
 
 # ----------------------------------------------------------- attribution repair

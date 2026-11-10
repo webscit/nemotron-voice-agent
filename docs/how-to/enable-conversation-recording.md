@@ -138,9 +138,9 @@ The turn `kind` lets you compare like with like. The first matching rule wins:
 image input), `tool` (at least one tool or intent call), and `plain`.
 
 When the session runs [decision tools](configure-decision-tools.md), the
-`decision_secs`, `decision_lag_secs`, `decision_outcome`, `decision_choice`,
-and `decision_confidence` columns describe the decision for the first answer of
-the turn. The decision is not a stage, because it runs alongside TTS. A decision
+`decision_secs`, `decision_started_at`, `decision_lag_secs`,
+`decision_outcome`, `decision_choice`, and `decision_confidence` columns
+describe the decision for the first answer of the turn. The decision is not a stage, because it runs alongside TTS. A decision
 call has the `decision` trigger in `tool_calls`. It counts for the response
 latency when it is perceivable, but it does not make the turn a `tool` turn and
 is not counted in `n_tool_calls`. Refer to
@@ -286,9 +286,14 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
   - a summary of the host load during the session: GPU and CPU load, GPU
     temperature, RAM, and board input power or GPU power, depending on the source;
   - the response and voice latency, the turn kind, a barge-in badge, and a
-    timeline of the latency stages next to the GPU and CPU load during the turn;
-  - the tool and intent calls with their duration and outcome;
-  - the decision model latency in the timeline legend, and a **Decision tools**
+    waterfall of the turn. The waterfall shares one time axis, from the end of
+    user speech to the bot stopping, and has one row for each latency stage,
+    the bot speech, the decision model, and each tool or intent call. A dashed
+    line marks the first perceivable response, and the GPU and CPU load runs
+    underneath on the same axis. Hover a bar for its start and duration;
+  - the tool and intent calls as waterfall rows, colored by outcome, with
+    their duration and a badge when the outcome is not `ok`;
+  - the decision model on its own waterfall row, and a **Decision tools**
     table with the choice and confidence of each source,
     when the session ran
     [decision tools](configure-decision-tools.md#decisions-in-the-review-ui),

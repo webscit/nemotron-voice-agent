@@ -436,7 +436,15 @@ def test_session_detail_has_turn_metrics_tool_calls_and_system_samples(env):
     session = store.get_session("s1")
     store.write_batch(
         [
-            _turn_metric("s1", 1, "tool", 1.5),
+            _turn_metric(
+                "s1",
+                1,
+                "tool",
+                1.5,
+                decision_secs=0.15,
+                decision_started_at=session["started_at"] + 12.5,
+                decision_outcome="called",
+            ),
             (
                 "tool_calls",
                 {
@@ -460,6 +468,9 @@ def test_session_detail_has_turn_metrics_tool_calls_and_system_samples(env):
     first, second = (next(t for t in detail["turns"] if t["idx"] == idx) for idx in (1, 2))
     assert first["metrics"]["kind"] == "tool" and first["metrics"]["segments"][0]["stage"] == "asr"
     assert [call["name"] for call in first["tool_calls"]] == ["move_head"]
+    # Start times for the turn waterfall: the decision model's and each tool call's.
+    assert first["metrics"]["decision_started_at"] == pytest.approx(session["started_at"] + 12.5)
+    assert first["tool_calls"][0]["sent_at"] == pytest.approx(session["started_at"] + 12)
     assert second["metrics"] is None and second["tool_calls"] == []
     assert [sample["gpu_load"] for sample in detail["system_samples"]] == [55.0, 65.0]  # the session window only
 
