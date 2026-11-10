@@ -69,7 +69,7 @@ characters. The recorder replaces any other value with a generated id.
 | `memory_evidence` | The session, turn and quote that support each memory |
 | `memory_uses` | Which memories were injected into which live session |
 | `intent_suggestions` | Intent-engine sentences and intents learned by the `dream` job: kind (`sentence` or `intent`), language, intent, sentences, slots, tool, response, confidence, validation, `status` (`proposed`, `active`, `rejected` or `superseded`), source, and review fields. Rows are never deleted. |
-| `intent_evidence` | The session, turn, user text and LLM tool calls that support each intent suggestion |
+| `intent_evidence` | The session, turn, user text and LLM tool calls that support each intent suggestion. For messaging intents, the text and tool calls use `{contact}` and `{message}` placeholders. |
 
 Images are never stored inline. Any `data:` image found in the LLM context or in a
 tool result is replaced by `{"type": "media_ref", "sha256": …}`, and the file is
@@ -534,7 +534,9 @@ in the **Intents** activity. The job progress records `intents_written` and the
 `retracted`, and `notes`), or `intents_skipped` with the reason. The
 `dream.intents` section of `dreamer.yaml` controls this part. By default,
 `auto_use_threshold` is `null`, so every suggestion waits for approval, and new
-intents always wait. For the checks, settings, and review, refer to
+intents always wait. For sessions that ran Matrix messaging, the job also
+learns messaging sentences and stores only their sentence shape, without
+contact names or message text. For the checks, settings, and review, refer to
 [Learn Sentences From Conversations](configure-intent-engine.md#learn-sentences-from-conversations).
 
 ### Add a job

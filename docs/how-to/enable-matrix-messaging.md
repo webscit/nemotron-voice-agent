@@ -590,8 +590,12 @@ This first version has the following limitations:
   messaging tools itself, but the LLM can still claim that it sent a message
   without calling any tool. The prompt forbids it. The voice dialog avoids the
   LLM for the usual phrasings.
-- **No learned messaging sentences.** The `dream` job does not learn new
-  messaging sentences yet. Add phrasings to the `messaging.yaml` files.
+- **Learned messaging sentences cover requests only.** The `dream` job learns
+  new phrasings to check, read, send, and reply to messages, and keeps contact
+  names and message text out of them. It does not learn yes-or-no answers,
+  corrections, or voice message phrasings. Add those phrasings to the
+  `messaging.yaml` files. Refer to
+  [Learn Messaging Sentences](configure-intent-engine.md#learn-messaging-sentences).
 
 ## Troubleshooting
 

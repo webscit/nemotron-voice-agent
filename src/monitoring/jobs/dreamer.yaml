@@ -83,7 +83,9 @@ dream:
   # ran the intent engine): new sentences for existing intents, and new intents
   # for recurring requests the LLM answered with one client tool call. Every
   # proposal is checked with hassil against what the person said, then waits in
-  # the review UI (Intents); approved ones are loaded by new sessions.
+  # the review UI (Intents); approved ones are loaded by new sessions. Sessions that
+  # ran Matrix messaging also teach messaging phrasings, with {contact} and {message}
+  # instead of names and message text (contacts read from MATRIX_CONTACTS_FILE).
   intents:
     enabled: true
     # Use validated sentences for existing intents live before review when their

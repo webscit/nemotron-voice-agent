@@ -15,6 +15,11 @@ in a sentence file:
 
 Every merged block carries ``metadata: {learned_id: <id>}`` so a match says
 which suggestion it came from.
+
+The messaging dialog takes learned sentences for its four request intents only
+(``MESSAGING_SENTENCE_LISTS``): ``{contact}`` comes from the contact list the
+server fills, and ``{message}`` (a wildcard) may only end a sentence. Its dialog
+answers and capture steps are never learned.
 """
 
 from __future__ import annotations
@@ -25,7 +30,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from hassil.expression import Alternative, Group, ListReference, RuleReference
+from hassil.expression import Alternative, Group, ListReference, RuleReference, TextChunk
+from hassil.expression import Sequence as SequenceExpr
 from hassil.parse_expression import parse_sentence
 from loguru import logger
 
@@ -37,6 +43,49 @@ HOME_ASSISTANT_LISTS = frozenset({"name", "area", "floor"})
 _MAX_COMBINATIONS = 64
 # Stock block keys a learned copy inherits.
 _INHERITED_KEYS = ("requires_context", "excludes_context", "response")
+
+# The intents of the messaging dialog (``examples.shared.messaging_intents.MESSAGING_INTENTS``;
+# a test keeps them equal). Defined here so loading learned sentences does not import Matrix.
+MESSAGING_INTENTS = frozenset(
+    {
+        "MessagingCheck",
+        "MessagingRead",
+        "MessagingSend",
+        "MessagingReply",
+        "MessagingYes",
+        "MessagingNo",
+        "MessagingChange",
+        "MessagingSendVoice",
+        "MessagingPlay",
+        "MessagingDictate",
+        "MessagingRecord",
+        "MessagingContinue",
+    }
+)
+# Messaging intents that take learned sentences: ``(server lists, trailing wildcard lists)``
+# a sentence may use. The other messaging intents are dialog answers, capture steps or
+# voice features: a learned sentence for them is never used.
+MESSAGING_SENTENCE_LISTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "MessagingCheck": (frozenset(), frozenset()),
+    "MessagingRead": (frozenset({"contact"}), frozenset()),
+    "MessagingSend": (frozenset({"contact"}), frozenset({"message"})),
+    "MessagingReply": (frozenset(), frozenset({"message"})),
+}
+
+
+def learnable_intent(name: str) -> bool:
+    """Whether learned sentences may be used for intent ``name`` (not a messaging dialog step)."""
+    return name not in MESSAGING_INTENTS or name in MESSAGING_SENTENCE_LISTS
+
+
+def intent_lists(name: str, extra_lists: Iterable[str] = HOME_ASSISTANT_LISTS) -> tuple[frozenset[str], frozenset[str]]:
+    """``(extra lists, trailing wildcard lists)`` a learned sentence of intent ``name`` may use.
+
+    A messaging intent takes its server lists instead of ``extra_lists``.
+    """
+    if name in MESSAGING_SENTENCE_LISTS:
+        return MESSAGING_SENTENCE_LISTS[name]
+    return frozenset(extra_lists), frozenset()
 
 
 @dataclass(frozen=True)
@@ -106,12 +155,16 @@ def sentence_references(
     return lists, rules, slots
 
 
-def sentence_problems(template: str, data: dict[str, Any], *, extra_lists: Iterable[str] = ()) -> list[str]:
+def sentence_problems(
+    template: str, data: dict[str, Any], *, extra_lists: Iterable[str] = (), trailing_wildcards: Iterable[str] = ()
+) -> list[str]:
     """Why a template cannot be used with sentence ``data`` (empty when it can).
 
     Every list and expansion rule must be defined in ``data`` (or be one of
     ``extra_lists``), also the ones used inside the rules it references, and no
-    list may be a wildcard: a wildcard matches almost any sentence.
+    list may be a wildcard: a wildcard matches almost any sentence. A list of
+    ``trailing_wildcards`` may be used once, at the very end of the sentence,
+    after words that are not optional ("tell {contact} that {message}").
     """
     try:
         lists, rules, _ = sentence_references(template, data.get("expansion_rules") or {})
@@ -121,12 +174,45 @@ def sentence_problems(template: str, data: dict[str, Any], *, extra_lists: Itera
     known = set(declared) | set(extra_lists)
     problems = [f"unknown list {{{name}}}" for name in sorted(lists - known)]
     problems += [f"unknown rule <{name}>" for name in sorted(rules - set(data.get("expansion_rules") or {}))]
-    problems += [
-        f"wildcard list {{{name}}}"
-        for name in sorted(lists & set(declared))
-        if isinstance(declared[name], dict) and declared[name].get("wildcard")
-    ]
+    trailing = set(trailing_wildcards)
+    for name in sorted(lists & set(declared)):
+        if not (isinstance(declared[name], dict) and declared[name].get("wildcard")):
+            continue
+        if name not in trailing:
+            problems.append(f"wildcard list {{{name}}}")
+        elif not _trailing_wildcard(template, name):
+            problems.append(f"wildcard list {{{name}}} must end the sentence, once, after required words")
     return problems
+
+
+def _trailing_wildcard(template: str, list_name: str) -> bool:
+    """Whether ``{list_name}`` is used once, as the last item of the sentence, after a required word or list."""
+    expression = parse_sentence(template).expression
+    count, stack = 0, [expression]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, ListReference) and item.list_name == list_name:
+            count += 1
+        elif isinstance(item, Group):
+            stack.extend(item.items)
+    items = expression.items if isinstance(expression, SequenceExpr) else [expression]
+    last = items[-1] if items else None
+    if count != 1 or not (isinstance(last, ListReference) and last.list_name == list_name):
+        return False
+    return any(_required(item) for item in items[:-1])
+
+
+def _required(item) -> bool:
+    """Whether an expression always matches some words (a word, a list or a rule; not an optional part)."""
+    if isinstance(item, TextChunk):
+        return bool(item.text.strip())
+    if isinstance(item, (ListReference, RuleReference)):
+        return True
+    if isinstance(item, Alternative):
+        return bool(item.items) and all(_required(child) for child in item.items)
+    if isinstance(item, Group):
+        return any(_required(child) for child in item.items)
+    return False
 
 
 def target_combinations(template: str, rules: dict[str, str]) -> set[frozenset[str]] | None:
@@ -259,11 +345,18 @@ def merge_learned(
     merged = copy.deepcopy(data)
     intents = merged.setdefault("intents", {})
     used: list[int] = []
-    extra_lists = HOME_ASSISTANT_LISTS
 
     def usable(item: LearnedIntent) -> bool:
+        if not learnable_intent(item.intent):
+            logger.warning(
+                f"Intent engine: learned suggestion #{item.id} ignored: {item.intent} takes no learned sentence"
+            )
+            return False
+        extra_lists, trailing = intent_lists(item.intent)
         problems = [
-            p for sentence in item.sentences for p in sentence_problems(sentence, merged, extra_lists=extra_lists)
+            p
+            for sentence in item.sentences
+            for p in sentence_problems(sentence, merged, extra_lists=extra_lists, trailing_wildcards=trailing)
         ]
         if problems:
             logger.warning(f"Intent engine: learned suggestion #{item.id} ignored: {'; '.join(problems)}")

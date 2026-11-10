@@ -36,6 +36,15 @@ REVIEW_ACTIONS = ("approve", "correct", "reject", "restore")
 DREAM_PREFIX = "dream:"
 HUMAN_PREFIX = "human:"
 INTENT_EVENT = "intent_engine"
+# Messaging intents (``MessagingSend``, ...): their evidence is stored as a sentence shape
+# ("tell {contact} that {message}") and is reviewed without the turn's audio, which
+# speaks the contact's name and the message.
+PRIVATE_INTENT_PREFIX = "Messaging"
+
+
+def is_private(row: dict[str, Any]) -> bool:
+    """Whether a suggestion's evidence may hold private words (a contact's name, a message)."""
+    return str(row.get("intent") or "").startswith(PRIVATE_INTENT_PREFIX)
 
 
 def base_language(code: str | None) -> str:
@@ -432,7 +441,7 @@ def live_uses(store: SessionStore, suggestion_ids: list[int]) -> Counter:
 
 
 def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add evidence (with audio), occurrence and live-use counts."""
+    """Add evidence (with audio, except for private intents), occurrence and live-use counts."""
     if not rows:
         return []
     ids = [r["id"] for r in rows]
@@ -451,7 +460,10 @@ def attach_details(store: SessionStore, rows: list[dict[str, Any]]) -> list[dict
                 "occurrences": len({(ev["session_id"], ev["turn_idx"]) for ev in evs}),
                 "sessions": len({ev["session_id"] for ev in evs}),
                 "live_uses": uses.get(row["id"], 0),
-                "evidence": [{**ev, "audio": audio.get((ev["session_id"], ev["turn_idx"]), [])} for ev in evs],
+                "evidence": [
+                    {**ev, "audio": [] if is_private(row) else audio.get((ev["session_id"], ev["turn_idx"]), [])}
+                    for ev in evs
+                ],
             }
         )
     return out
