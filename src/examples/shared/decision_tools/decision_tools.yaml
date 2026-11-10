@@ -30,7 +30,7 @@ tools:
     min_confidence: 0.0
     criteria:
       happy: "Joy or pleasure, good news, something fun"
-      excited: "Enthusiasm or eagerness about something coming"
+      # excited: "Enthusiasm or eagerness about something coming"
       loving: "Affection, tenderness, warm compliments"
       grateful: "Thanks given or received"
       success: "Something worked, a task is done, a goal is reached"
