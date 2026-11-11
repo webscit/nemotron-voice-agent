@@ -475,6 +475,34 @@ def test_session_detail_has_turn_metrics_tool_calls_and_system_samples(env):
     assert [sample["gpu_load"] for sample in detail["system_samples"]] == [55.0, 65.0]  # the session window only
 
 
+def test_session_detail_has_the_robot_timeline_series(env, monkeypatch):
+    client, store = env
+
+    def metric(session_id, name, ts, value, processor="client"):
+        row = {"session_id": session_id, "turn_idx": 1, "ts": ts, "processor": processor, "name": name}
+        return ("metrics", {**row, "value": value})
+
+    store.write_batch(
+        [
+            metric("s1", "client.timeline.cpu_pct", 10.0, 20.0),
+            metric("s1", "client.timeline.cpu_pct", 11.0, 90.0),
+            metric("s1", "client.timeline.cpu_pct", 12.0, 30.0),
+            metric("s1", "client.timeline.playback_error", 11.5, 1.0),
+            metric("s1", "client.loop.lag_s.p95", 11.0, 0.2),  # a window aggregate, not a timeline
+            metric("s2", "client.timeline.cpu_pct", 11.0, 50.0),  # another session
+            metric("s1", "client.timeline.spoofed", 11.0, 1.0, processor=None),  # not sent by the robot
+        ]
+    )
+
+    samples = client.get("/api/review/sessions/s1").json()["client_samples"]
+    assert samples == {"cpu_pct": [[10.0, 20.0], [11.0, 90.0], [12.0, 30.0]], "playback_error": [[11.5, 1.0]]}
+
+    # Thinned series keep each run's peak, so a spike stays visible.
+    monkeypatch.setattr("monitoring.api.CLIENT_SAMPLE_MAX_POINTS", 2)
+    samples = client.get("/api/review/sessions/s1").json()["client_samples"]
+    assert samples["cpu_pct"] == [[11.0, 90.0], [12.0, 30.0]]
+
+
 def test_report_cli_splits_latency_by_turn_kind(env):
     from monitoring.report import collect, summarize
 

@@ -12,6 +12,7 @@ import {
   useSaveReferences,
   useSessionDetail,
   useSessions,
+  type ClientSamples,
   type LlmCallBrief,
   type MemoryRow,
   type Person,
@@ -229,6 +230,41 @@ function SystemSummary({ samples }: Readonly<{ samples: SystemSample[] }>) {
   );
 }
 
+/** The robot's load and playback over the session (its per-second client.timeline.* metrics). */
+function RobotSummary({ samples }: Readonly<{ samples: ClientSamples }>) {
+  const heartbeat = samples.loop_lag_max_s ?? [];
+  if (!heartbeat.length) return null;
+  const values = (name: string) => (samples[name] ?? []).map(([, value]) => value);
+  const meanPeak = (name: string, unit: string, digits = 0) => {
+    const all = values(name);
+    if (!all.length) return null;
+    const mean = all.reduce((sum, value) => sum + value, 0) / all.length;
+    return `${mean.toFixed(digits)}${unit} mean, ${Math.max(...all).toFixed(digits)}${unit} peak`;
+  };
+  const parts: string[] = [];
+  const cpu = meanPeak("cpu_pct", "%");
+  if (cpu) parts.push(`CPU ${cpu}`);
+  const core = values("cpu_max_core_pct");
+  if (core.length) parts.push(`busiest core ${Math.max(...core).toFixed(0)}% peak`);
+  const app = values("process_cores");
+  if (app.length) parts.push(`app up to ${Math.max(...app).toFixed(2)} cores`);
+  const gpu = meanPeak("gpu_pct", "%");
+  if (gpu) parts.push(`GPU ${gpu}`);
+  parts.push(`event loop lag ${formatSecs(Math.max(...values("loop_lag_max_s")))} max`);
+  const seconds = (name: string, flagged: (value: number) => boolean) => values(name).filter(flagged).length;
+  const unheard = seconds("speech_unheard", (value) => value > 0);
+  if (unheard) parts.push(`bot speech not reaching the speaker for ${unheard} s`);
+  const stalled = seconds("speaker_buffers", (value) => value === 0);
+  if (stalled) parts.push(`speaker sink stopped for ${stalled} s`);
+  const errors = values("playback_error").length + values("playback_eos").length;
+  if (errors) parts.push(`${errors} GStreamer error${errors === 1 ? "" : "s"} or end-of-stream`);
+  return (
+    <p className="text-xs text-muted">
+      Robot during the session ({heartbeat.length} samples): {parts.join(" · ")}
+    </p>
+  );
+}
+
 function TurnCard({
   sessionId,
   liveSource,
@@ -236,6 +272,7 @@ function TurnCard({
   people,
   sessionSpeaker,
   samples,
+  clientSamples,
   decisionOptions,
 }: Readonly<{
   sessionId: string;
@@ -243,6 +280,7 @@ function TurnCard({
   turn: TurnDetail;
   decisionOptions: Record<string, Record<string, string>>;
   samples: SystemSample[];
+  clientSamples: ClientSamples;
   people: Person[];
   sessionSpeaker: string | null;
 }>) {
@@ -267,7 +305,7 @@ function TurnCard({
           </span>
         )}
       </div>
-      <TurnTimeline turn={turn} samples={samples} />
+      <TurnTimeline turn={turn} samples={samples} clientSamples={clientSamples} />
       {(turn.user_text || turn.audio.user.length > 0) && (
         <div className="rv-side rv-side-user">
           <span className="rv-label">User</span>
@@ -519,6 +557,7 @@ export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>
             </p>
           )}
           <SystemSummary samples={data.system_samples ?? []} />
+          <RobotSummary samples={data.client_samples ?? {}} />
           {data.conversation_audio && (
             <div className="rv-audio">
               <span className="rv-label">Whole call (user left · assistant right)</span>
@@ -534,6 +573,7 @@ export function SessionDetailView({ sessionId }: Readonly<{ sessionId: string }>
               people={peopleList}
               sessionSpeaker={data.speakers.session}
               samples={data.system_samples ?? []}
+              clientSamples={data.client_samples ?? {}}
               decisionOptions={decisionOptions}
             />
           ))}

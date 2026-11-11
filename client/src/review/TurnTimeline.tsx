@@ -4,9 +4,9 @@
 // Per-turn waterfall of the session view: one row per latency stage, the bot speech,
 // the decision model and each tool call on a shared time axis that runs from the end
 // of user speech to the bot stopping, with the first perceivable response marked and
-// the host load during the turn underneath.
+// the host and robot load during the turn underneath, with the robot's playback problems.
 
-import type { SystemSample, ToolCall, TurnDetail, TurnMetrics } from "./api";
+import type { ClientSamples, SystemSample, ToolCall, TurnDetail, TurnMetrics } from "./api";
 import { INK, KIND_LABELS, SERIES, secondsTick, stageInfo } from "./chartTheme";
 import { formatSecs, triggerLabel } from "./utils";
 
@@ -27,6 +27,94 @@ const TICK_STEPS = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 30, 60, 120
 // Load sparkline viewBox: x follows the axis in per-mille, y is 0-100 % load.
 const LOAD_WIDTH = 1000;
 const LOAD_HEIGHT = 28;
+// The robot reports once per second while connected: a longer silence means it stalled or disconnected.
+const REPORT_GAP_SECS = 2.5;
+const LAG_FLAG_SECS = 0.1;
+const LATE_PLAYBACK_SECS = 1;
+const LAG_COLOR = "#f87171";
+const NO_REPORT_FILL = "rgba(251, 191, 36, 0.22)";
+
+type Point = [number, number];
+
+interface LoadSeries {
+  key: string;
+  points: Point[];
+  color: string;
+  dashed?: boolean;
+}
+
+type RobotAudioIssue = "unheard" | "stalled" | "late" | "error" | "eos";
+
+const ROBOT_AUDIO: Record<RobotAudioIssue, { label: string; color: string }> = {
+  unheard: { label: "Bot speech not reaching the speaker", color: "#f87171" },
+  stalled: { label: "Speaker sink stopped", color: "#b91c1c" },
+  late: { label: "Playback queued late", color: "#fbbf24" },
+  error: { label: "GStreamer error", color: "#f87171" },
+  eos: { label: "GStreamer end-of-stream", color: "#f87171" },
+};
+
+/** Spans of a per-second robot series where ``flagged`` holds, each covering the second before its sample. */
+function flaggedSpans(points: Point[], flagged: (value: number) => boolean): [number, number][] {
+  const spans: [number, number][] = [];
+  for (const [ts, value] of points) {
+    if (!flagged(value)) continue;
+    const last = spans[spans.length - 1];
+    if (last && ts - 1 <= last[1] + 0.5) last[1] = ts;
+    else spans.push([ts - 1, ts]);
+  }
+  return spans;
+}
+
+/** Stretches of ``[from, to]`` without a robot report: gaps between heartbeats and at either end. */
+function reportGaps(heartbeat: Point[], from: number, to: number): [number, number][] {
+  const times = heartbeat.map(([ts]) => ts).filter((ts) => ts >= from - REPORT_GAP_SECS && ts <= to + REPORT_GAP_SECS);
+  const edges = [from - 1, ...times, to + 1];
+  const gaps: [number, number][] = [];
+  for (let i = 1; i < edges.length; i++) {
+    if (edges[i] - edges[i - 1] > REPORT_GAP_SECS) gaps.push([Math.max(edges[i - 1], from), Math.min(edges[i], to)]);
+  }
+  return gaps.filter(([start, end]) => end > start);
+}
+
+type RobotAudioBar = Bar & { issue: RobotAudioIssue };
+
+/** The robot's playback problems between ``from`` and ``to`` as waterfall bars (events as ticks). */
+function robotAudioBars(samples: ClientSamples, from: number, to: number): RobotAudioBar[] {
+  const within = (name: string) => (samples[name] ?? []).filter(([ts]) => ts >= from && ts - 1 <= to);
+  const bars: RobotAudioBar[] = [];
+  const spans = (issue: RobotAudioIssue, name: string, flagged: (value: number) => boolean, what: string) => {
+    for (const [start, end] of flaggedSpans(within(name), flagged)) {
+      bars.push({ issue, start, end, color: ROBOT_AUDIO[issue].color, title: `${ROBOT_AUDIO[issue].label}: ${what}` });
+    }
+  };
+  spans("stalled", "speaker_buffers", (value) => value === 0, "the speaker sink consumed no buffer, not even silence");
+  spans("unheard", "speech_unheard", (value) => value > 0, "the robot pushed speech but the speaker got none");
+  spans("late", "playback_lead_s", (value) => value > LATE_PLAYBACK_SECS, `playback over ${LATE_PLAYBACK_SECS} s ahead`);
+  for (const issue of ["error", "eos"] as const) {
+    for (const [ts] of within(`playback_${issue}`)) {
+      bars.push({
+        issue,
+        start: ts,
+        end: null,
+        color: ROBOT_AUDIO[issue].color,
+        title: `${ROBOT_AUDIO[issue].label} (see the robot log)`,
+      });
+    }
+  }
+  return bars;
+}
+
+/** SVG polyline point lists of ``points``, broken wherever the source stopped reporting. */
+function polylines(points: Point[], px: (ts: number) => number, y: (value: number) => number): string[] {
+  const lines: string[][] = [];
+  let previous: number | null = null;
+  for (const [ts, value] of points) {
+    if (previous === null || ts - previous > REPORT_GAP_SECS) lines.push([]);
+    lines[lines.length - 1].push(`${px(ts).toFixed(1)},${y(value).toFixed(1)}`);
+    previous = ts;
+  }
+  return lines.map((line) => line.join(" "));
+}
 
 interface Bar {
   start: number;
@@ -96,31 +184,36 @@ function DecisionLegend({ metrics }: Readonly<{ metrics: TurnMetrics }>) {
   );
 }
 
-/** GPU and CPU load (both percent, one axis), stretched to the waterfall axis; the band is the wait for the first response. */
+/**
+ * Load series (all percent, one axis) stretched to the waterfall axis; the band is the wait for the first
+ * response. Lines break where samples stop; ``gaps`` are shaded and ``marks`` are ticks (robot loop lag).
+ */
 function LoadTrack({
-  samples,
+  series,
   x,
   band,
-}: Readonly<{ samples: SystemSample[]; x: (ts: number) => number; band: [number, number] | null }>) {
+  gaps = [],
+  marks = [],
+  title,
+}: Readonly<{
+  series: LoadSeries[];
+  x: (ts: number) => number;
+  band: [number, number] | null;
+  gaps?: [number, number][];
+  marks?: number[];
+  title: string;
+}>) {
   const px = (ts: number) => (x(ts) / 100) * LOAD_WIDTH;
   const y = (value: number) => LOAD_HEIGHT - 1 - (Math.min(Math.max(value, 0), 100) / 100) * (LOAD_HEIGHT - 2);
-  const line = (key: "gpu_load" | "cpu_load") =>
-    samples
-      .filter((sample) => sample[key] !== null)
-      .map((sample) => `${px(sample.ts).toFixed(1)},${y(sample[key] as number).toFixed(1)}`)
-      .join(" ");
-  const gpu = line("gpu_load");
-  const cpu = line("cpu_load");
-  if (!gpu && !cpu) return null;
   return (
     <svg
       className="rv-wf-load"
       viewBox={`0 0 ${LOAD_WIDTH} ${LOAD_HEIGHT}`}
       preserveAspectRatio="none"
       role="img"
-      aria-label="GPU and CPU load during the turn, 0 to 100 percent"
+      aria-label={title}
     >
-      <title>Host load during the turn, 0–100%. Shaded: waiting for the first response.</title>
+      <title>{title}</title>
       {band && (
         <rect
           x={px(band[0])}
@@ -130,6 +223,16 @@ function LoadTrack({
           fill="rgba(255,255,255,0.08)"
         />
       )}
+      {gaps.map(([start, end]) => (
+        <rect
+          key={start}
+          x={px(start)}
+          y={0}
+          width={Math.max(px(end) - px(start), 1)}
+          height={LOAD_HEIGHT}
+          fill={NO_REPORT_FILL}
+        />
+      ))}
       <line
         x1={0}
         y1={LOAD_HEIGHT - 0.5}
@@ -138,29 +241,38 @@ function LoadTrack({
         stroke={INK.axis}
         vectorEffect="non-scaling-stroke"
       />
-      {cpu && (
-        <polyline
-          points={cpu}
-          fill="none"
-          stroke={SERIES[1]}
+      {series.flatMap((line) =>
+        polylines(line.points, px, y).map((points, i) => (
+          <polyline
+            key={`${line.key}-${i}`}
+            points={points}
+            fill="none"
+            stroke={line.color}
+            strokeWidth={2}
+            strokeDasharray={line.dashed ? "4 3" : undefined}
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        )),
+      )}
+      {marks.map((ts) => (
+        <line
+          key={ts}
+          x1={px(ts)}
+          y1={0}
+          x2={px(ts)}
+          y2={LOAD_HEIGHT}
+          stroke={LAG_COLOR}
           strokeWidth={2}
-          strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
         />
-      )}
-      {gpu && (
-        <polyline
-          points={gpu}
-          fill="none"
-          stroke={SERIES[0]}
-          strokeWidth={2}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      )}
+      ))}
     </svg>
   );
 }
+
+const peak = (points: Point[]) => (points.length ? Math.max(...points.map(([, value]) => value)) : null);
+const percent = (value: number | null) => (value === null ? "n/a" : `${Math.round(value)}%`);
 
 /** Tool calls as badges, for turns that cannot be placed on a time axis. */
 function ToolBadges({ calls }: Readonly<{ calls: ToolCall[] }>) {
@@ -180,7 +292,11 @@ function ToolBadges({ calls }: Readonly<{ calls: ToolCall[] }>) {
   );
 }
 
-export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; samples: SystemSample[] }>) {
+export function TurnTimeline({
+  turn,
+  samples,
+  clientSamples = {},
+}: Readonly<{ turn: TurnDetail; samples: SystemSample[]; clientSamples?: ClientSamples }>) {
   const metrics = turn.metrics;
   if (!metrics) return null;
   const segments = metrics.segments ?? [];
@@ -292,6 +408,36 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
   const x = (ts: number) => (axis ? ((ts - axis.start) / span) * 100 : 0);
 
   const turnSamples = axis ? samples.filter((sample) => sample.ts >= axis.start - 1 && sample.ts <= axis.end + 1) : [];
+  const hostSeries: LoadSeries[] = (["gpu_load", "cpu_load"] as const).map((key, i) => ({
+    key,
+    points: turnSamples.flatMap((sample): Point[] => (sample[key] === null ? [] : [[sample.ts, sample[key]]])),
+    color: SERIES[i],
+  }));
+
+  // ---- robot: shown for every turn once the session has a robot timeline, so a silent robot stands out
+  const robotPoints = (name: string): Point[] =>
+    axis ? (clientSamples[name] ?? []).filter(([ts]) => ts >= axis.start - 1 && ts <= axis.end + 1) : [];
+  const hasRobot = (clientSamples.loop_lag_max_s?.length ?? 0) > 0;
+  const robotSeries: LoadSeries[] = [
+    { key: "gpu_pct", points: robotPoints("gpu_pct"), color: SERIES[0] },
+    { key: "cpu_pct", points: robotPoints("cpu_pct"), color: SERIES[1] },
+    { key: "cpu_max_core_pct", points: robotPoints("cpu_max_core_pct"), color: SERIES[1], dashed: true },
+  ];
+  const robotLag = robotPoints("loop_lag_max_s");
+  const robotGaps = axis && hasRobot ? reportGaps(clientSamples.loop_lag_max_s ?? [], axis.start, axis.end) : [];
+  const lagMax = peak(robotLag);
+  const robotTitle =
+    `Robot during the turn, 0–100%: CPU peak ${percent(peak(robotSeries[1].points))}, ` +
+    `busiest core peak ${percent(peak(robotSeries[2].points))} (dashed), GPU peak ${percent(peak(robotSeries[0].points))}, ` +
+    `app process up to ${(peak(robotPoints("process_cores")) ?? 0).toFixed(2)} cores. ` +
+    `Red ticks: event loop late by over ${LAG_FLAG_SECS * 1000} ms` +
+    (robotGaps.length
+      ? ". Shaded: no report reached the server; a large lag right after it points to the robot, a small one to the network."
+      : ".");
+  const hasPlayback = (clientSamples.pushed_loud_buffers?.length ?? 0) > 0;
+  const audioBars = axis && hasPlayback ? robotAudioBars(clientSamples, axis.start, axis.end) : [];
+  const leadMax = peak(robotPoints("playback_lead_s"));
+  const robotSpoke = robotPoints("pushed_loud_buffers").some(([, value]) => value > 0);
   const ticks = axis ? niceTicks(axis.start - axis.origin, axis.end - axis.origin) : [];
   const marker = axis && responseAt !== null ? x(responseAt) : null;
   const responseLabel = metrics.response_via === "tool" ? "first response (action)" : "first response";
@@ -376,10 +522,69 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
               <span className="rv-wf-track rv-wf-track-load">
                 {markerLine}
                 <LoadTrack
-                  samples={turnSamples}
+                  series={hostSeries}
                   x={x}
                   band={responseAt !== null ? [axis.origin, responseAt] : null}
+                  title="Host GPU and CPU load during the turn, 0–100%. Shaded: waiting for the first response."
                 />
+              </span>
+            </div>
+          )}
+          {hasRobot && (
+            <div className="rv-wf-row">
+              <span className="rv-wf-label" title={robotTitle}>
+                <span className="rv-wf-name">Robot load</span>
+                {lagMax !== null && (
+                  <span className="rv-wf-secs" title="Worst event loop lag on the robot during the turn">
+                    lag {formatSecs(lagMax)}
+                  </span>
+                )}
+              </span>
+              <span className="rv-wf-track rv-wf-track-load">
+                {markerLine}
+                <LoadTrack
+                  series={robotSeries}
+                  x={x}
+                  band={null}
+                  gaps={robotGaps}
+                  marks={robotLag.filter(([, lag]) => lag > LAG_FLAG_SECS).map(([ts]) => ts)}
+                  title={robotTitle}
+                />
+              </span>
+            </div>
+          )}
+          {hasPlayback && (
+            <div className="rv-wf-row">
+              <span className="rv-wf-label" title="Bot audio on the robot, from the app to the speaker sink">
+                <span className="rv-wf-name">Robot audio</span>
+                {leadMax !== null && (
+                  <span className="rv-wf-secs" title="Largest playback lead (queued audio) during the turn">
+                    lead {formatSecs(leadMax)}
+                  </span>
+                )}
+              </span>
+              <span className="rv-wf-track">
+                {markerLine}
+                {audioBars.map((bar, i) => (
+                  <span
+                    key={i}
+                    role="img"
+                    aria-label={bar.title}
+                    title={bar.title}
+                    className={`rv-wf-bar${bar.end === null ? " rv-wf-bar-open" : ""}`}
+                    style={{
+                      left: pct(x(Math.max(bar.start, axis.start))),
+                      width:
+                        bar.end === null
+                          ? undefined
+                          : pct(x(Math.min(bar.end, axis.end)) - x(Math.max(bar.start, axis.start))),
+                      background: bar.color,
+                    }}
+                  />
+                ))}
+                {!audioBars.length && (
+                  <span className="rv-wf-note">{robotSpoke ? "speech reached the speaker" : "no bot speech"}</span>
+                )}
               </span>
             </div>
           )}
@@ -400,7 +605,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
           </div>
         </div>
       )}
-      {(stageKeys.length > 0 || metrics.decision_outcome || turnSamples.length > 0) && (
+      {(stageKeys.length > 0 || metrics.decision_outcome || turnSamples.length > 0 || (axis && hasRobot)) && (
         <div className="rv-stage-legend">
           {stageKeys.map((key) => {
             const info = stageInfo(key);
@@ -429,7 +634,7 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
               {responseLabel}
             </span>
           )}
-          {turnSamples.length > 0 && (
+          {(turnSamples.length > 0 || (axis && hasRobot)) && (
             <>
               <span className="rv-stage-legend-item">
                 <span className="rv-swatch" style={{ background: SERIES[0] }} />
@@ -441,6 +646,38 @@ export function TurnTimeline({ turn, samples }: Readonly<{ turn: TurnDetail; sam
               </span>
             </>
           )}
+          {axis && hasRobot && (
+            <>
+              <span
+                className="rv-stage-legend-item"
+                title="The Python app is mostly held to one core: a busy core can hide behind a low average"
+              >
+                <span className="rv-swatch rv-swatch-dashed" style={{ borderColor: SERIES[1] }} />
+                robot busiest core
+              </span>
+              {robotLag.some(([, lag]) => lag > LAG_FLAG_SECS) && (
+                <span className="rv-stage-legend-item">
+                  <span className="rv-swatch rv-swatch-tick" style={{ borderColor: LAG_COLOR }} />
+                  robot loop lag &gt; {LAG_FLAG_SECS * 1000} ms
+                </span>
+              )}
+              {robotGaps.length > 0 && (
+                <span
+                  className="rv-stage-legend-item"
+                  title="The robot stalled, or its reports were held up on the network"
+                >
+                  <span className="rv-swatch" style={{ background: NO_REPORT_FILL }} />
+                  no robot report
+                </span>
+              )}
+            </>
+          )}
+          {[...new Set(audioBars.map((bar) => bar.issue))].map((issue) => (
+            <span key={issue} className="rv-stage-legend-item">
+              <span className="rv-swatch" style={{ background: ROBOT_AUDIO[issue].color }} />
+              {ROBOT_AUDIO[issue].label}
+            </span>
+          ))}
           <DecisionLegend metrics={metrics} />
         </div>
       )}
