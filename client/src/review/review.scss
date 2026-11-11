@@ -667,6 +667,19 @@
   pointer-events: none;
 }
 
+.rv-swatch-dashed {
+  height: 0;
+  border-top: 2px dashed;
+  border-radius: 0;
+}
+
+.rv-swatch-tick {
+  width: 0;
+  height: 12px;
+  border-left: 2px solid;
+  border-radius: 0;
+}
+
 .rv-swatch-marker {
   width: 0;
   height: 12px;

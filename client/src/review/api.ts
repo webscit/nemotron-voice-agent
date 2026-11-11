@@ -132,6 +132,13 @@ export interface SystemSample {
   cpu_load: number | null;
 }
 
+/**
+ * The robot's per-second metrics: ``client.timeline.*`` without the prefix, as [server receive time, value]
+ * pairs. Load: cpu_pct, cpu_max_core_pct, process_cores, gpu_pct, loop_lag_max_s. Playback: pushed_loud_buffers,
+ * speaker_buffers, speaker_loud_buffers, speech_unheard, playback_lead_s, and playback_error / playback_eos events.
+ */
+export type ClientSamples = Partial<Record<string, [number, number][]>>;
+
 export interface TurnDetail {
   idx: number;
   user_text?: string | null;
@@ -185,6 +192,8 @@ export interface SessionDetail {
   conversation_audio: MediaRef | null;
   turns: TurnDetail[];
   system_samples: SystemSample[];
+  /** Absent from servers older than the robot timeline. */
+  client_samples?: ClientSamples;
   wer_summary: Record<string, { wer: number | null; turns: number; reference_sources: string[] }>;
   /** ``redecide`` agreement with the reference decision model, by source. */
   decision_summary: Record<

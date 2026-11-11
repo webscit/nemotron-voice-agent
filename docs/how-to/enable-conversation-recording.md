@@ -271,9 +271,43 @@ The recorder applies the following rules:
 The **Metrics** page shows these rows in the **Robot client** table, as the
 median and p90 of the stored values. The Reachy Mini client sends timings for
 voice ID, face ID, and event loop lag as aggregates per 10 second window
-(`.count`, `.mean`, `.p95`, and `.max`). It sends system load and queue depths
+(`.count`, `.mean`, `.p95`, and `.max`). It sends memory and queue depths
 as the last reading of each window. It sends tool call durations and startup
 timings as single values.
+
+#### Robot Timeline
+
+Metrics named `client.timeline.*` are per-second readings. The robot sends them
+once per second while it is connected, and each row carries the time the server
+received it. The Reachy Mini client sends the following:
+
+| Metric | Meaning |
+|---|---|
+| `cpu_pct`, `cpu_max_core_pct` | Machine-wide CPU load and the busiest core, in percent |
+| `process_cores` | CPU used by the app process, in cores |
+| `gpu_pct` | Jetson GPU load from `tegrastats` |
+| `loop_lag_max_s` | Worst event loop lag in the second. It is sent every second, so it also serves as the robot's heartbeat |
+| `pushed_loud_buffers`, `speaker_buffers`, `speaker_loud_buffers` | Bot audio buffers handed to the robot's audio pipeline, and buffers that reach the speaker sink |
+| `speech_unheard` | `1` when the bot speech kept arriving but none reached the speaker sink |
+| `playback_lead_s` | How far queued audio runs ahead of the playback clock |
+| `playback_error`, `playback_eos` | A GStreamer error or end-of-stream on the robot's audio pipeline |
+
+Under each turn, the session view draws these readings on the same time axis as
+the host load. It adds the following rows:
+
+- **Robot load** draws the GPU load, the CPU load, and the busiest core
+  (dashed). Red ticks mark seconds when the event loop was over 100 ms late.
+  A shaded stretch means no report reached the server. Either the robot
+  stalled, or the network held up its reports. A large loop lag right after
+  the stretch points to the robot, and a small one to the network.
+- **Robot audio** shows bars where bot speech did not reach the speaker, where
+  the speaker sink stopped, where playback ran over 1 s late, and ticks for
+  GStreamer errors.
+
+The session summary adds the robot's load and playback problems over the whole
+session. Each series is thinned to 14,400 points (4 hours), keeping the largest
+value of each run of points. Past that length, the rows show false reporting
+gaps.
 
 ## Review in the web UI
 
@@ -290,7 +324,9 @@ API (`/api/review/*`) is only served when `MONITORING_ENABLED=true`.
     user speech to the bot stopping, and has one row for each latency stage,
     the bot speech, the decision model, and each tool or intent call. A dashed
     line marks the first perceivable response, and the GPU and CPU load runs
-    underneath on the same axis. Hover a bar for its start and duration;
+    underneath on the same axis, followed by the robot's load and audio when
+    the client sends a [robot timeline](#robot-timeline). Hover a bar for its
+    start and duration;
   - the tool and intent calls as waterfall rows, colored by outcome, with
     their duration and a badge when the outcome is not `ok`;
   - the decision model on its own waterfall row, and a **Decision tools**

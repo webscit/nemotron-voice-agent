@@ -32,6 +32,12 @@ from monitoring.jobs.wer import error_rates, normalize
 from monitoring.report import DEFAULT_GROUP_BY, metrics_json
 from monitoring.store import ArtifactStore, SessionStore
 
+# Per-second robot metrics (load, event loop lag, playback) drawn under each turn.
+CLIENT_TIMELINE_PREFIX = "client.timeline."
+# Per series: 4 h at one point per second. The session view assumes one point per second, so
+# thinning (beyond this) makes it shade reporting gaps and merge flagged seconds.
+CLIENT_SAMPLE_MAX_POINTS = 4 * 3600
+
 _ANNOTATOR_RE = re.compile(r"^[\w .@-]{1,64}$")
 
 
@@ -398,6 +404,7 @@ class ReviewService:
             "conversation_audio": conversation_audio,
             "turns": out_turns,
             "system_samples": self._system_samples(session),
+            "client_samples": self._client_samples(session_id),
             "wer_summary": wer_summary,
             "decision_summary": decision_summary,
             "jobs": [{k: job[k] for k in ("kind", "status", "error", "attempts", "finished_at")} for job in jobs],
@@ -409,6 +416,32 @@ class ReviewService:
         samples = self.store.system_samples_between(session["started_at"], end)
         step = max(1, -(-len(samples) // max_points))
         return [{k: v for k, v in sample.items() if k != "id"} for sample in samples[::step]]
+
+    def _client_samples(self, session_id: str) -> dict[str, list[list[float]]]:
+        """The robot's per-second ``client.timeline.*`` metrics as ``{field: [[ts, value], ...]}``.
+
+        Each value carries the time the server received it. Long series keep the largest value
+        of each run of consecutive points, so a load or lag spike survives the thinning.
+        """
+        m = schema.metrics
+        rows = self._rows_pairs(
+            select(m.c.name, m.c.ts, m.c.value)
+            .where(
+                m.c.session_id == session_id,
+                m.c.processor == "client",
+                m.c.name.startswith(CLIENT_TIMELINE_PREFIX, autoescape=True),
+                m.c.value.is_not(None),
+            )
+            .order_by(m.c.ts)
+        )
+        series: dict[str, list[list[float]]] = defaultdict(list)
+        for name, ts, value in rows:
+            series[name.removeprefix(CLIENT_TIMELINE_PREFIX)].append([ts, value])
+        thinned: dict[str, list[list[float]]] = {}
+        for name, points in sorted(series.items()):
+            step = max(1, -(-len(points) // CLIENT_SAMPLE_MAX_POINTS))
+            thinned[name] = [max(points[i : i + step], key=lambda point: point[1]) for i in range(0, len(points), step)]
+        return thinned
 
     def _session_memories(self, session_id: str) -> dict[str, Any]:
         """Memories injected in this session and those extracted from it."""
